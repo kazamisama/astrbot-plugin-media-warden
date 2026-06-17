@@ -150,6 +150,8 @@ class Storage:
         self.pattern = pattern
         self.max_bytes = max_bytes
         os.makedirs(self.root, exist_ok=True)
+        # 解析 symlink 后真实路径,用于路径越权检查
+        self._real_root = os.path.realpath(self.root)
 
     def _blake_path(self, digest: str) -> str:
         return os.path.join(self.root, "_blake", digest[:2], digest[2:4], digest + ".bin")
@@ -164,6 +166,8 @@ class Storage:
             raise ValueError(
                 f"data {len(data)}B exceeds max_bytes {self.max_bytes}"
             )
+        # path-safety: 解析后路径必须在 self._real_root 内
+        self._real_root = self._real_root or os.path.realpath(self.root)
         digest = _blake_digest(data) if self.dedupe else None
 
         if digest and self.dedupe:
@@ -184,6 +188,8 @@ class Storage:
             except OSError:
                 pass
 
+        # 路径越权检查(防恶意模板或 symlink 把文件写到外面)
+        self._assert_within_root(full)
         os.makedirs(os.path.dirname(full), exist_ok=True)
         if os.path.exists(full):
             base, ext = os.path.splitext(full)
@@ -196,6 +202,8 @@ class Storage:
                 i += 1
             else:
                 raise RuntimeError("too many collisions on " + full)
+        # 写入后再校验一次,防止 TOCTOU
+        self._assert_within_root(full)
         with open(full, "wb") as f:
             f.write(data)
 
@@ -210,3 +218,12 @@ class Storage:
                     import shutil
                     shutil.copy2(full, bp)
         return SaveResult(path=full, size=len(data), reused=False, blake16=digest)
+
+    def _assert_within_root(self, path: str) -> None:
+        """防路径越权:确保 path 在 self._real_root 内."""
+        rp = os.path.realpath(path)
+        if not (rp == self._real_root or rp.startswith(self._real_root + os.sep)):
+            raise ValueError(
+                f"path escapes storage root: {path!r} -> {rp!r} not under {self._real_root!r}"
+            )
+

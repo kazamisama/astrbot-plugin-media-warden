@@ -1,4 +1,4 @@
-﻿"""Smoke v1.1: 骨架 + 配置 + 钩子 + 策略 + 组件识别 + 下载 + 落盘 + dedupe.
+"""Smoke v1.1: 骨架 + 配置 + 钩子 + 策略 + 组件识别 + 下载 + 落盘 + dedupe.
 
 独立运行,不依赖 AstrBot runtime.通过在 sys.modules 注入 astrbot.* stub
 让 main.py 的 import 通路走通,然后直接调用核心函数验证.
@@ -80,7 +80,7 @@ from warden import (
     format_batch,
     summarize,
 )
-from warden.downloader import aiohttp_fetcher, download, DownloadError, Downloaded
+from warden.downloader import aiohttp_fetcher, download, download_many, DownloadError, Downloaded
 from warden.storage import Storage, SaveContext, render_filename, _safe_name, _guess_ext
 
 
@@ -1428,29 +1428,397 @@ PHASE3 = [
 ]
 
 
+# =========================================================
+# Phase 4 测试 (v1.3 新功能:retry / concurrent / lookup / prune / path-safety)
+# =========================================================
+
+
+def _make_component(url="https://example.com/a.png", kind="image", file_id="f1"):
+    return Component(kind=kind, url=url, file_id=file_id, name="a.png")
+
+
+def test_downloader_retry_transient():
+    banner("downloader: retries on transient error then succeeds")
+    import asyncio
+    comp = _make_component()
+    calls = {"n": 0}
+
+    async def flaky(c, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise DownloadError("http 503 service unavailable")
+        return Downloaded(data=b"PNG-bytes", mime="image/png", size=9)
+
+    out = asyncio.run(download(comp, fetcher=flaky, retries=3,
+                                backoff_base=0.001, backoff_cap=0.01))
+    assert out.data == b"PNG-bytes"
+    assert calls["n"] == 3
+    print(f"  OK -> retried {calls['n'] - 1} times then succeeded")
+
+
+def test_downloader_no_retry_on_non_transient():
+    banner("downloader: does not retry on 4xx (non-transient)")
+    import asyncio
+    comp = _make_component()
+    calls = {"n": 0}
+
+    async def four_oh_four(c, **kw):
+        calls["n"] += 1
+        raise DownloadError("http 404 not found")
+
+    try:
+        asyncio.run(download(comp, fetcher=four_oh_four, retries=3,
+                              backoff_base=0.001, backoff_cap=0.01))
+        raise AssertionError("expected DownloadError")
+    except DownloadError as e:
+        assert "404" in str(e)
+        assert calls["n"] == 1, f"should not retry, got {calls['n']} calls"
+    print(f"  OK -> no retry on 4xx (calls={calls['n']})")
+
+
+def test_downloader_give_up_after_max():
+    banner("downloader: gives up after max retries")
+    import asyncio
+    comp = _make_component()
+    calls = {"n": 0}
+
+    async def always_5xx(c, **kw):
+        calls["n"] += 1
+        raise DownloadError("http 502 bad gateway")
+
+    try:
+        asyncio.run(download(comp, fetcher=always_5xx, retries=2,
+                              backoff_base=0.001, backoff_cap=0.01))
+        raise AssertionError("expected DownloadError")
+    except DownloadError as e:
+        assert "502" in str(e)
+        assert calls["n"] == 3, f"expected 3 attempts, got {calls['n']}"
+    print(f"  OK -> gave up after {calls['n']} attempts")
+
+
+def test_downloader_many_concurrent():
+    banner("downloader: download_many fetches concurrently, preserves order")
+    import asyncio, time
+    comps = [_make_component(url=f"https://x/{i}.png", file_id=str(i))
+             for i in range(5)]
+
+    async def slow(c, **kw):
+        await asyncio.sleep(0.05)
+        idx = int(c.file_id)
+        return Downloaded(data=f"img-{idx}".encode(), mime="image/png",
+                          size=5 + len(c.file_id))
+
+    t0 = time.time()
+    out = asyncio.run(download_many(comps, fetcher=slow, retries=0))
+    elapsed = time.time() - t0
+
+    assert len(out) == 5
+    assert [d.data for d in out] == [f"img-{i}".encode() for i in range(5)]
+    assert elapsed < 0.20, f"concurrent too slow: {elapsed:.3f}s"
+    print(f"  OK -> 5 components in {elapsed:.3f}s (serial would ~0.25s)")
+
+
+def test_storage_path_safety_rejects_outside_root():
+    banner("storage: _assert_within_root rejects paths outside root")
+    root = tempfile.mkdtemp(prefix="warden_safe_")
+    s = Storage(root=root, dedupe=False, pattern="{safe_name}.{ext}", max_bytes=1000)
+    bad = os.path.join(root, "..", "..", "etc", "passwd")
+    try:
+        s._assert_within_root(bad)
+        raise AssertionError("expected ValueError for outside-root path")
+    except ValueError as e:
+        assert "escapes storage root" in str(e)
+    s._assert_within_root(root)
+    s._assert_within_root(os.path.join(root, "sub", "file.png"))
+    print("  OK -> outside-root rejected, inside-root accepted")
+
+
+def test_storage_works_for_legit_paths():
+    banner("storage: _assert_within_root accepts normal save paths")
+    root = tempfile.mkdtemp(prefix="warden_legit_")
+    s = Storage(root=root, dedupe=False, pattern="{safe_name}.{ext}", max_bytes=1000)
+    comp = _make_component()
+    ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                      sender_name="alice",
+                      msg_id="m1", idx=0, ts=1718600000)
+    sr = s.save(b"hello", comp, ctx, mime="text/plain")
+    rp = os.path.realpath(sr.path)
+    assert rp.startswith(os.path.realpath(root))
+    assert os.path.exists(sr.path)
+    print(f"  OK -> saved at {sr.path}")
+
+
+def _drive_command(plugin, event, fn):
+    out = []
+    gen = fn(event)
+    if hasattr(gen, "__aiter__"):
+        import asyncio
+        async def _collect():
+            res = []
+            async for r in gen:
+                res.append(r)
+            return res
+        return asyncio.run(_collect())
+    for r in gen:
+        out.append(r)
+    return out
+
+
+def _build_plugin_for_command(tmpdir, *, enable_index=True, log_to_stdout=False):
+    cfg = {
+        "storage_root": tmpdir,
+        "enable_index_db": enable_index,
+        "log_to_stdout": log_to_stdout,
+    }
+    pl = plugin_main.MediaWardenStar(
+        plugin_main.MediaWardenStar.__init__.__globals__["Context"](), cfg)
+    return pl
+
+
+def _seed_index(pl, *, msg_id="m42", n=3, ts=None):
+    import time as _t
+    pl._index.open()
+    use_ts = int(ts) if ts is not None else int(_t.time())
+    conn = pl._index._conn
+    for i in range(n):
+        conn.execute(
+            "INSERT INTO assets (ts, platform, group_id, sender_id, msg_id, idx, kind, path, size, sha16) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (use_ts, "aiocqhttp", "g1", "u1", msg_id, i, "image",
+             f"/fake/path_{i}.png", 100 + i, f"sha{i:x}"),
+        )
+    conn.commit()
+
+
+def test_plugin_warden_lookup_command():
+    banner("plugin: /warden lookup <msg_id>")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_lookup_")
+    pl = _build_plugin_for_command(tmp, enable_index=True)
+    asyncio.run(pl.initialize())
+    _seed_index(pl, msg_id="m42", n=2)
+    _seed_index(pl, msg_id="m99", n=1)
+
+    class _R:
+        def __init__(self, t): self.text = t
+    class _E:
+        def plain_result(self, t): return _R(t)
+    ev = _E()
+
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_lookup(e, "m42"))
+    assert len(out) == 1
+    text = out[0].text
+    assert "lookup msg_id=m42" in text
+    assert "(2 条)" in text
+    assert "m99" not in text
+    print(f"  OK -> {text.splitlines()[0]}")
+
+    pl._index.close()
+
+
+def test_plugin_warden_prune_command():
+    banner("plugin: /warden prune <days>")
+    import asyncio, time as _t
+    tmp = tempfile.mkdtemp(prefix="warden_prune_")
+    pl = _build_plugin_for_command(tmp, enable_index=True)
+    asyncio.run(pl.initialize())
+    pl._index.open()
+    old_ts = int(_t.time()) - 100 * 86400
+    new_ts = int(_t.time()) - 1 * 86400
+    conn = pl._index._conn
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO assets (ts, platform, group_id, sender_id, msg_id, idx, kind, path, size, sha16) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (old_ts, "aiocqhttp", "g1", "u1", f"old{i}", 0, "image",
+             f"/x/old_{i}.png", 10, f"o{i:x}"),
+        )
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO assets (ts, platform, group_id, sender_id, msg_id, idx, kind, path, size, sha16) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_ts, "aiocqhttp", "g1", "u1", f"new{i}", 0, "image",
+             f"/x/new_{i}.png", 10, f"n{i:x}"),
+        )
+    conn.commit()
+
+    class _R:
+        def __init__(self, t): self.text = t
+    class _E:
+        def plain_result(self, t): return _R(t)
+    ev = _E()
+
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_prune(e, "50"))
+    assert len(out) == 1
+    assert "已删除 2 条" in out[0].text
+    assert pl._index.count() == 2
+
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_prune(e, "0"))
+    assert "days 必须 > 0" in out[0].text
+
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_prune(e, "abc"))
+    assert "usage:" in out[0].text
+
+    pl._index.close()
+    print("  OK -> 2 old pruned, 2 new kept, errors handled")
+
+
+def test_index_find_by_msg_filters():
+    banner("index: find_by_msg returns only matching msg_id")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_findby_")
+    pl = _build_plugin_for_command(tmp, enable_index=True)
+    asyncio.run(pl.initialize())
+    pl._index.open()
+    _seed_index(pl, msg_id="m42", n=2)
+    _seed_index(pl, msg_id="m99", n=1)
+
+    rows = pl._index.find_by_msg("m42")
+    assert len(rows) == 2
+    assert all(r["msg_id"] == "m42" for r in rows)
+    assert rows[0]["idx"] < rows[1]["idx"]
+
+    rows2 = pl._index.find_by_msg("m99")
+    assert len(rows2) == 1
+    assert rows2[0]["msg_id"] == "m99"
+
+    rows3 = pl._index.find_by_msg("nope")
+    assert rows3 == []
+
+    pl._index.close()
+    print("  OK -> m42=2, m99=1, nope=0")
+
+
+def test_index_count_and_prune_older_than():
+    banner("index: count + prune_older_than (no file delete)")
+    import asyncio, time as _t
+    tmp = tempfile.mkdtemp(prefix="warden_count_")
+    pl = _build_plugin_for_command(tmp, enable_index=True)
+    asyncio.run(pl.initialize())
+    pl._index.open()
+
+    old_ts = int(_t.time()) - 30 * 86400
+    new_ts = int(_t.time()) - 5 * 86400
+    conn = pl._index._conn
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO assets (ts, platform, group_id, sender_id, msg_id, idx, kind, path, size, sha16) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (old_ts, "aiocqhttp", "g1", "u1", f"o{i}", 0, "image",
+             f"/x/o_{i}.png", 10, f"o{i:x}"),
+        )
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO assets (ts, platform, group_id, sender_id, msg_id, idx, kind, path, size, sha16) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_ts, "aiocqhttp", "g1", "u1", f"n{i}", 0, "image",
+             f"/x/n_{i}.png", 10, f"n{i:x}"),
+        )
+    conn.commit()
+
+    assert pl._index.count() == 5
+    cutoff = int(_t.time()) - 7 * 86400
+    removed = pl._index.prune_older_than(cutoff)
+    assert removed == 3
+    assert pl._index.count() == 2
+
+    removed2 = pl._index.prune_older_than(cutoff)
+    assert removed2 == 0
+
+    pl._index.close()
+    print(f"  OK -> removed 3, left 2")
+
+
+def test_plugin_e2e_concurrent_download_two_images():
+    banner("plugin: end-to-end concurrent download of 2 image components")
+    import asyncio, time as _t
+    tmp = tempfile.mkdtemp(prefix="warden_concurrent_")
+    pl = _build_plugin_for_command(
+        tmp, enable_index=True, log_to_stdout=False,
+    )
+    pl.cfg.match_mode = "whitelist"
+    pl.cfg.target_groups = ["g1"]
+    pl.cfg.target_users = ["u1"]
+    pl.cfg.max_concurrent = 4
+    pl.cfg.download_retries = 0
+    asyncio.run(pl.initialize())
+
+    async def stub_fetcher(c, **kw):
+        await asyncio.sleep(0.05)
+        return Downloaded(
+            data=b"\x89PNG\r\n\x1a\n" + b"x" * 50,
+            mime="image/png", size=58,
+        )
+
+    from warden import downloader as dl_mod
+    orig = dl_mod.aiohttp_fetcher
+    dl_mod.aiohttp_fetcher = stub_fetcher
+    try:
+        comps = [
+            _make_component(url="https://x/1.png", file_id="1"),
+            _make_component(url="https://x/2.png", file_id="2"),
+        ]
+        t0 = _t.time()
+        dls = asyncio.run(dl_mod.download_many(
+            comps, fetcher=stub_fetcher, retries=0,
+        ))
+        elapsed = _t.time() - t0
+
+        assert len(dls) == 2
+        assert all(isinstance(d, Downloaded) for d in dls)
+        assert elapsed < 0.09, f"expected < 0.09s, got {elapsed:.3f}s"
+    finally:
+        dl_mod.aiohttp_fetcher = orig
+
+    pl._index.close()
+    print(f"  OK -> 2 images in {elapsed:.3f}s (serial ~0.10s)")
+
+
+def test_forwarder_render_with_images():
+    banner("forwarder: render_with_images uses pre-downloaded bytes")
+    import asyncio
+    from warden.forwarder import Forwarder, ForwardNode
+    fwd = Forwarder(width=400, max_nodes=10)
+
+    tiny_png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
+        b"\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05"
+        b"\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    nodes = [
+        ForwardNode(sender_id="u1", sender_name="alice", text="look",
+                    image_urls=["https://x/a.png"], time=1718600000),
+        ForwardNode(sender_id="u2", sender_name="bob", text="seen",
+                    image_urls=[], time=1718600001),
+    ]
+    node_imgs = {0: [tiny_png], 1: []}
+
+    png = asyncio.run(fwd.render_with_images(nodes, node_imgs=node_imgs))
+    assert isinstance(png, bytes)
+    assert png.startswith(b"\x89PNG")
+    assert len(png) > 1000
+    print(f"  OK -> {len(png)}B PNG (2 nodes, 1 pre-loaded image)")
+
+
+PHASE4 = [
+    test_downloader_retry_transient,
+    test_downloader_no_retry_on_non_transient,
+    test_downloader_give_up_after_max,
+    test_downloader_many_concurrent,
+    test_storage_path_safety_rejects_outside_root,
+    test_storage_works_for_legit_paths,
+    test_plugin_warden_lookup_command,
+    test_plugin_warden_prune_command,
+    test_index_find_by_msg_filters,
+    test_index_count_and_prune_older_than,
+    test_plugin_e2e_concurrent_download_two_images,
+    test_forwarder_render_with_images,
+]
+
+
 if __name__ == "__main__":
-    for t in PHASE1 + PHASE2 + PHASE3:
+    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4:
         t()
-    print("\nALL OK (phase1=%d phase2=%d phase3=%d)"
-          % (len(PHASE1), len(PHASE2), len(PHASE3)))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d)"
+          % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4)))

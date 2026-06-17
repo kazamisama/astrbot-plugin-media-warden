@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -30,6 +30,8 @@ class MediaWardenConfig:
     dedupe: bool = True
     enable_index_db: bool = True
     log_to_stdout: bool = True
+    download_retries: int = 2
+    max_concurrent: int = 4
 
     max_file_size_bytes: int = field(init=False)
 
@@ -58,3 +60,5 @@ class MediaWardenConfig:
 
     def matched_users_set(self) -> set[str]:
         return {str(x) for x in self.target_users if x}
+
+

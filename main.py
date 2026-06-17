@@ -1,10 +1,11 @@
 ﻿"""astrbot-plugin-media-warden 入口.
 
-Phase 3 (v1.2):
-  - forwarder (PIL 渲染 / JSON sidecar,按 forward_render_mode 决定)
-  - index SQLite
-  - /warden list / /warden export / /warden stats 命令
-  - 3c 预览图回传:image 类型用 event.image_result,降级 plain_result
+v1.3 增量:
+  - /warden lookup <msg_id> 反向查询
+  - 并发下载多组件
+  - 配置项 retries / max_concurrent
+
+保留 v1.2: forwarder / index / 命令 / 预览回传
 """
 from __future__ import annotations
 import asyncio
@@ -27,14 +28,16 @@ from warden import (
     VERSION,
 )
 from warden.components import Component
-from warden.downloader import aiohttp_fetcher, download, Downloaded, DownloadError
+from warden.downloader import (
+    aiohttp_fetcher, download, download_many, DownloadError,
+)
 from warden.storage import Storage, SaveContext
 
 
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人:监听特定群/用户的非文字消息,按固定命名落盘,转发链渲染/JSON保存并回复处理结果",
+    "群聊素材守门人 v1.3: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -52,7 +55,9 @@ class MediaWardenStar(Star):
             f"loaded: v{VERSION} | mode={self.cfg.match_mode} "
             f"| groups={len(self.cfg.target_groups)} "
             f"users={len(self.cfg.target_users)} "
-            f"| root={self.cfg.storage_root}"
+            f"| root={self.cfg.storage_root} "
+            f"| retries={self.cfg.download_retries} "
+            f"| concurrent={self.cfg.max_concurrent}"
         )
 
     async def initialize(self) -> None:
@@ -138,14 +143,18 @@ class MediaWardenStar(Star):
         t0 = time.time()
         batch = BatchResult()
 
-        for idx, comp in enumerate(media):
-            ctx = SaveContext(
-                platform=platform, group_id=group_id, sender_id=sender_id,
-                sender_name=sender_name, msg_id=msg_id, idx=idx, ts=ts,
-            )
-            r = await self._save_one(comp, ctx)
+        # 1) 并发下载所有 media
+        save_contexts = [
+            SaveContext(platform=platform, group_id=group_id, sender_id=sender_id,
+                        sender_name=sender_name, msg_id=msg_id, idx=idx, ts=ts)
+            for idx in range(len(media))
+        ]
+        dl_results = await self._download_all(media)
+        for comp, ctx, dl in zip(media, save_contexts, dl_results):
+            r = self._store_dl(comp, ctx, dl)
             batch.items.append(r)
 
+        # 2) 转发节点(顺序,因渲染需要前序 json)
         for idx, comp in enumerate(forwards, start=len(media)):
             ctx = SaveContext(
                 platform=platform, group_id=group_id, sender_id=sender_id,
@@ -157,58 +166,36 @@ class MediaWardenStar(Star):
         batch.duration_s = time.time() - t0
         text = format_batch(batch)
         yield event.plain_result(text)
-        # 3c 预览图回传
         for extra in self._build_previews(event, batch):
             yield extra
 
-    # ----------------- 内部 -----------------
+    # ----------------- 内部:并发下载 + 落盘 -----------------
 
-    def _build_previews(self, event: AstrMessageEvent, batch: BatchResult):
-        """生成预览图回传.
+    async def _download_all(self, media: list[Component]) -> list:
+        """并发下载所有 media 组件.
 
-        优先级:
-          1) forward_render 生成的 PNG  (kind == 'forward_render')
-          2) 第一张 image 类型的 AssetResult
-
-        有 event.image_result 方法 -> 调它
-        没有 -> 降级:在 plain_result 后面再补一行 '预览: <path>'
+        用 Semaphore 限流到 cfg.max_concurrent.
+        单个失败 -> 该项是 DownloadError,其他继续;最后返回 list[Downloaded|DownloadError].
         """
-        if not self.cfg.reply_preview:
-            return
-        candidate = None
-        for x in batch.items:
-            if x.ok and x.kind == "forward_render" and x.path:
-                candidate = x
-                break
-        if candidate is None:
-            for x in batch.items:
-                if x.ok and x.kind == "image" and x.path:
-                    candidate = x
-                    break
-        if candidate is None:
-            return
+        if not media:
+            return []
+        sem = asyncio.Semaphore(self.cfg.max_concurrent)
 
-        path = candidate.path
-        if not os.path.exists(path):
-            return
-        img_fn = getattr(event, "image_result", None)
-        if callable(img_fn):
-            try:
-                yield event.image_result(path)
-                return
-            except Exception as e:
-                self._log(f"image_result failed: {e!r} — fall back to text")
-        # 降级:这条消息前面已经 yield 了 plain_result,这里只能再补一条
-        try:
-            yield event.plain_result(f"预览: {path}")
-        except Exception:
-            pass
+        async def _one(c):
+            async with sem:
+                try:
+                    return await download(
+                        c, fetcher=aiohttp_fetcher,
+                        retries=self.cfg.download_retries,
+                    )
+                except DownloadError as e:
+                    return e
 
-    async def _save_one(self, comp: Component, ctx: SaveContext) -> AssetResult:
-        try:
-            dl = await download(comp, fetcher=aiohttp_fetcher)
-        except DownloadError as e:
-            return AssetResult(kind=comp.kind, ok=False, err=f"download: {e}")
+        return await asyncio.gather(*(_one(c) for c in media))
+
+    def _store_dl(self, comp: Component, ctx: SaveContext, dl) -> AssetResult:
+        if isinstance(dl, DownloadError):
+            return AssetResult(kind=comp.kind, ok=False, err=f"download: {dl}")
         try:
             sr = self._storage.save(dl.data, comp, ctx, mime=dl.mime)
         except ValueError as e:
@@ -229,6 +216,8 @@ class MediaWardenStar(Star):
             size=dl.size, preview_path=preview,
         )
 
+    # ----------------- 内部:转发处理(同 v1.2) -----------------
+
     async def _save_forward(self, comp: Component, ctx: SaveContext
                             ) -> list[AssetResult]:
         from warden.forwarder import from_component
@@ -245,7 +234,8 @@ class MediaWardenStar(Star):
 
         if want_json or not want_image:
             payload = json.dumps(
-                {"forward": True, "node_count": len(nodes), "nodes": (comp.meta or {}).get("nodes")},
+                {"forward": True, "node_count": len(nodes),
+                 "nodes": (comp.meta or {}).get("nodes")},
                 ensure_ascii=False, indent=2,
             )
             comp_json = Component(
@@ -271,13 +261,37 @@ class MediaWardenStar(Star):
                 results.append(AssetResult(kind="forward", ok=False, err=f"json save: {e}"))
 
         if want_image and nodes:
-            async def _img_dl(url: str) -> bytes:
-                dl = await download(
-                    Component(kind="image", url=url), fetcher=aiohttp_fetcher
+            # 节点内图片也并发下载
+            all_urls: list[str] = []
+            url_to_node: list[int] = []  # 第 N 个 url 对应第几个 node
+            for ni, nd in enumerate(nodes):
+                for u in nd.image_urls:
+                    all_urls.append(u)
+                    url_to_node.append(ni)
+            node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
+            if all_urls:
+                async def _fetch(url: str) -> bytes:
+                    dl = await download(
+                        Component(kind="image", url=url),
+                        fetcher=aiohttp_fetcher,
+                        retries=self.cfg.download_retries,
+                    )
+                    return dl.data
+                # 并发拉
+                results_dl = await asyncio.gather(
+                    *(_fetch(u) for u in all_urls),
+                    return_exceptions=True,
                 )
-                return dl.data
+                for url, r in zip(all_urls, results_dl):
+                    if isinstance(r, BaseException):
+                        continue
+                    ni = url_to_node[all_urls.index(url)]
+                    node_imgs[ni].append(r)
             try:
-                png = await self._forwarder.render(nodes, image_downloader=_img_dl)
+                # render 仍走原来的 PIL 路径,但喂预下载的 bytes
+                png = await self._forwarder.render_with_images(
+                    nodes, node_imgs=node_imgs,
+                )
                 comp_png = Component(
                     kind="image", name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
                     raw=comp.raw,
@@ -308,6 +322,38 @@ class MediaWardenStar(Star):
                 kind="forward", ok=False, err="empty forward or no mode enabled",
             ))
         return results
+
+    # ----------------- 内部:预览回传(同 v1.2) -----------------
+
+    def _build_previews(self, event: AstrMessageEvent, batch: BatchResult):
+        if not self.cfg.reply_preview:
+            return
+        candidate = None
+        for x in batch.items:
+            if x.ok and x.kind == "forward_render" and x.path:
+                candidate = x
+                break
+        if candidate is None:
+            for x in batch.items:
+                if x.ok and x.kind == "image" and x.path:
+                    candidate = x
+                    break
+        if candidate is None:
+            return
+        path = candidate.path
+        if not os.path.exists(path):
+            return
+        img_fn = getattr(event, "image_result", None)
+        if callable(img_fn):
+            try:
+                yield event.image_result(path)
+                return
+            except Exception as e:
+                self._log(f"image_result failed: {e!r} — fall back to text")
+        try:
+            yield event.plain_result(f"预览: {path}")
+        except Exception:
+            pass
 
     # ----------------- 命令 -----------------
 
@@ -361,6 +407,66 @@ class MediaWardenStar(Star):
             )
         except Exception as e:
             yield event.plain_result(f"[Warden] 导出失败: {e!r}")
+
+    @filter.command("warden lookup")
+    async def cmd_warden_lookup(self, event: AstrMessageEvent, arg: str = ""):
+        """用法: /warden lookup <msg_id>  (可选加 #<idx>)"""
+        if self._index is None:
+            yield event.plain_result("[Warden] 索引未启用")
+            return
+        token = arg.strip()
+        if not token:
+            yield event.plain_result("usage: /warden lookup <msg_id> [#idx]")
+            return
+        # 解析 msg_id#idx
+        msg_id = token
+        idx_filter: Optional[int] = None
+        if "#" in token:
+            msg_id, idx_s = token.split("#", 1)
+            try:
+                idx_filter = int(idx_s)
+            except ValueError:
+                yield event.plain_result(f"[Warden] 非法 idx: {idx_s!r}")
+                return
+        rows = self._index.find_by_msg(msg_id)
+        if idx_filter is not None:
+            rows = [r for r in rows if r["idx"] == idx_filter]
+        if not rows:
+            yield event.plain_result(f"[Warden] 未找到 msg_id={msg_id} 的资产")
+            return
+        lines = [f"## lookup msg_id={msg_id} ({len(rows)} 条)"]
+        for r in rows:
+            fwd = ""
+            if r.get("forward_meta"):
+                fwd = f" | fwd={r['forward_meta']}"
+            lines.append(
+                f"- id={r['id']} [{r['ts']}] {r['platform']}:{r['group_id']} "
+                f"sender={r['sender_id']} idx={r['idx']} "
+                f"kind={r['kind']} size={r['size']} "
+                f"sha16={r.get('sha16')}{fwd} -> {r['path']}"
+            )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("warden prune")
+    async def cmd_warden_prune(self, event: AstrMessageEvent, arg: str = ""):
+        """用法: /warden prune <days>   删除索引里 N 天前的记录(不删文件)"""
+        if self._index is None:
+            yield event.plain_result("[Warden] 索引未启用")
+            return
+        try:
+            days = int(arg.strip())
+        except ValueError:
+            yield event.plain_result("usage: /warden prune <days>")
+            return
+        if days <= 0:
+            yield event.plain_result("[Warden] days 必须 > 0")
+            return
+        cutoff = int(time.time()) - days * 86400
+        try:
+            n = self._index.prune_older_than(cutoff)
+            yield event.plain_result(f"[Warden] 已删除 {n} 条索引记录 (> {days} 天前)")
+        except Exception as e:
+            yield event.plain_result(f"[Warden] prune 失败: {e!r}")
 
     # ----------------- 工具 -----------------
 

@@ -88,6 +88,44 @@ class AssetIndex:
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    def find_by_msg(self, msg_id: str, *,
+                    platform: Optional[str] = None,
+                    group_id: Optional[str] = None,
+                    sender_id: Optional[str] = None) -> list[dict]:
+        """反向查:某条消息保存了哪些资产.
+
+        至少要 msg_id,可选加 platform/group_id/sender_id 缩窄范围.
+        """
+        c = self._require()
+        where = ["msg_id = ?"]
+        params: list[Any] = [msg_id]
+        if platform:
+            where.append("platform = ?")
+            params.append(platform)
+        if group_id:
+            where.append("group_id = ?")
+            params.append(group_id)
+        if sender_id:
+            where.append("sender_id = ?")
+            params.append(sender_id)
+        sql = (
+            "SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
+            "kind, path, size, sha16, forward_meta FROM assets WHERE "
+            + " AND ".join(where) + " ORDER BY idx ASC, id ASC"
+        )
+        cur = c.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        out = []
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            if d.get("forward_meta"):
+                try:
+                    d["forward_meta"] = json.loads(d["forward_meta"])
+                except (TypeError, ValueError):
+                    pass
+            out.append(d)
+        return out
+
     def find_by_sha(self, sha16: str) -> list[dict]:
         c = self._require()
         cur = c.execute(
@@ -97,6 +135,17 @@ class AssetIndex:
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def count(self) -> int:
+        c = self._require()
+        return c.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+
+    def prune_older_than(self, cutoff_ts: int) -> int:
+        """删除 ts < cutoff 的记录;不删文件,只删索引.返回删除条数."""
+        c = self._require()
+        cur = c.execute("DELETE FROM assets WHERE ts < ?", (int(cutoff_ts),))
+        c.commit()
+        return cur.rowcount
 
     def stats(self) -> dict:
         c = self._require()

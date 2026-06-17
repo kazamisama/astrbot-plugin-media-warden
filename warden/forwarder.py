@@ -308,6 +308,145 @@ class Forwarder:
         img.save(buf, format="PNG")
         return buf.getvalue()
 
+    async def render_with_images(self, nodes: List[ForwardNode],
+                                 *, node_imgs: Optional[dict] = None) -> bytes:
+        """与 render() 同功能,但用调用方预下载的图片 dict{node_index: [bytes, ...]}.
+
+        主要让 main.py 用并发下载,避免 forwarder 内部串行拉图.
+        node_imgs 为 None 时走原来的"无图片"路径(等同于把所有图当加载失败).
+        """
+        if node_imgs is None:
+            node_imgs = {i: [] for i in range(len(nodes))}
+        from PIL import Image as _I
+        # 把预下载的 bytes 转 PIL
+        converted: List[List[_I.Image]] = []
+        for nd, imgs in zip(nodes, [node_imgs.get(i, []) for i in range(len(nodes))]):
+            pil_imgs = []
+            for b in imgs:
+                try:
+                    im = _I.open(io.BytesIO(b))
+                    im.load()
+                    pil_imgs.append(im)
+                except Exception:
+                    continue
+            converted.append(pil_imgs)
+        # 走原来的"无 fetcher"渲染路径
+        return await self.render(nodes, image_downloader=None) \
+            if False else await self._render_with_pil(nodes, converted)
+
+    async def _render_with_pil(self, nodes: List[ForwardNode],
+                                node_pil: List[List["Image.Image"]]) -> bytes:
+        """内部:已知 PIL 图片列表,直接渲染."""
+        from PIL import Image, ImageDraw
+        self._ensure_fonts()
+        cfg = self.cfg
+
+        def line_h(font, text):
+            bbox = font.getbbox(text)
+            return (bbox[3] - bbox[1]) if bbox else self.cfg.font_size + 4
+
+        def wrap_text(text: str, font, max_w: int) -> List[str]:
+            if not text:
+                return []
+            lines: List[str] = []
+            for paragraph in text.split("\n"):
+                if not paragraph:
+                    lines.append("")
+                    continue
+                cur = ""
+                for ch in paragraph:
+                    cand = cur + ch
+                    bbox = font.getbbox(cand)
+                    w = bbox[2] - bbox[0] if bbox else 0
+                    if w <= max_w or not cur:
+                        cur = cand
+                    else:
+                        lines.append(cur)
+                        cur = ch
+                if cur:
+                    lines.append(cur)
+            return lines
+
+        inner_w = cfg.width - cfg.padding * 2
+        bubble_w = inner_w
+        node_heights: List[int] = []
+        for nd, imgs in zip(nodes, node_pil):
+            text_w = bubble_w - cfg.padding * 2
+            lines = wrap_text(nd.text, self._font, text_w)
+            h = cfg.padding
+            h += line_h(self._font_header, nd.sender_name or "anon")
+            h += 4
+            for ln in lines:
+                h += line_h(self._font, ln) + 2
+            if nd.time:
+                h += 6 + line_h(self._font_time, _fmt_time(nd.time))
+            for im in imgs:
+                w, ih = im.size
+                scale = min(cfg.max_image_width / max(w, 1), 1.0)
+                nw = max(1, int(w * scale))
+                nh_im = max(1, int(ih * scale))
+                if nh_im > cfg.max_image_height:
+                    extra = nh_im - cfg.max_image_height
+                    nh_im = cfg.max_image_height
+                h += nh_im + 6
+            h += cfg.padding
+            node_heights.append(h)
+
+        total_h = cfg.padding * 2
+        total_h += line_h(self._font_header, cfg.title) + 8
+        for nh in node_heights:
+            total_h += nh + cfg.gap
+        if node_heights:
+            total_h -= cfg.gap
+        total_h = max(total_h, 200)
+
+        img = Image.new("RGB", (cfg.width, total_h), cfg.bg)
+        draw = ImageDraw.Draw(img)
+
+        y = cfg.padding
+        draw.text((cfg.padding, y), cfg.title, fill=cfg.header_color,
+                  font=self._font_header)
+        y += line_h(self._font_header, cfg.title) + 8
+
+        for nd, imgs, nh in zip(nodes, node_pil, node_heights):
+            draw.rounded_rectangle(
+                (cfg.padding, y, cfg.padding + bubble_w, y + nh),
+                radius=cfg.bubble_radius,
+                fill=cfg.bubble_bg,
+                outline=cfg.bubble_border,
+            )
+            tx = cfg.padding + cfg.padding
+            ty = y + cfg.padding
+            draw.text((tx, ty), nd.sender_name or "anon",
+                      fill=cfg.header_color, font=self._font_header)
+            ty += line_h(self._font_header, nd.sender_name or "anon") + 4
+            text_w = bubble_w - cfg.padding * 2
+            for ln in wrap_text(nd.text, self._font, text_w):
+                draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
+                ty += line_h(self._font, ln) + 2
+            if nd.time:
+                ty += 6
+                draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
+                          font=self._font_time)
+                ty += line_h(self._font_time, _fmt_time(nd.time))
+            for im in imgs:
+                w, ih = im.size
+                scale = min(cfg.max_image_width / max(w, 1), 1.0)
+                nw = max(1, int(w * scale))
+                nh_im = max(1, int(ih * scale))
+                if nh_im > cfg.max_image_height:
+                    scale2 = cfg.max_image_height / nh_im
+                    nw = max(1, int(nw * scale2))
+                    nh_im = cfg.max_image_height
+                im2 = im.resize((nw, nh_im))
+                img.paste(im2, (tx, ty))
+                ty += nh_im + 6
+            y += nh + cfg.gap
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
 
 def _fmt_time(ts: int) -> str:
     import datetime
@@ -321,3 +460,4 @@ def from_component(component) -> List[ForwardNode]:
     """从 Component(kind='forward') 抽出 ForwardNode[].Phase 2 main.py 用."""
     raw = (component.meta or {}).get("nodes")
     return _coerce_nodes(raw)
+

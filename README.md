@@ -13,6 +13,8 @@
 | 3a | 转发链渲染 (PIL 自绘气泡) + JSON sidecar + 节点超限降级 | ✅ v1.2 |
 | 3b | SQLite 索引 + `/warden list / stats / export` 命令 | ✅ v1.2 |
 | 3c | 预览图回传 (`image_result` + 文本降级) | ✅ v1.2 |
+| 3d | 并发下载 (`download_many`) + 指数退避重试 + path-safety 防御 | ✅ v1.3 |
+| 3e | 反向查询 `/warden lookup` + 时效清理 `/warden prune` | ✅ v1.3 |
 
 ## 目录
 
@@ -31,9 +33,11 @@ astrbot-plugin-media-warden/
     downloader.py            # aiohttp 流式下载 + fetcher 抽象
     storage.py               # 命名模板 + 落盘 + blake2b 去重
     forwarder.py             # PIL 自绘气泡渲染
-    index.py                 # SQLite 资产索引
+    index.py                 # SQLite 资产索引 (find_by_msg / count / prune)
   README.md                  # 本文件
   _smoke.py                  # 离线冒烟测试（mock astrbot.api）
+  CONTRIBUTING.md            # 贡献指南
+  .github/ISSUE_TEMPLATE/    # bug / feature / question 模板
 ```
 
 ## 依赖
@@ -67,6 +71,8 @@ pip install Pillow  # forwarder 自绘气泡
 | `dedupe` | `true` | 基于 blake2b 头 1MB 做去重 |
 | `enable_index_db` | `true` | 是否启用 SQLite 索引（`storage_root/_warden.db`） |
 | `log_to_stdout` | `true` | 是否把每条匹配消息打到日志 |
+| `download_retries` | `2` | 失败重试次数（transient: 5xx / 超时 / 连接错） |
+| `max_concurrent` | `4` | 单消息多组件 / 转发节点图的并发上限 |
 
 **默认命名模板**：
 
@@ -82,8 +88,8 @@ pip install Pillow  # forwarder 自绘气泡
 
 1. **策略过滤**（policy）—— 群 / 用户白名单或黑名单
 2. **组件识别**（components）—— OneBot v11 segment → 归一化 Component
-3. **下载**（downloader）—— aiohttp 流式抓 bytes,带超时 + 大小限制
-4. **命名 + 落盘**（storage）—— 按模板渲染相对路径,blake2b 去重,blake 软链复用
+3. **下载**（downloader）—— aiohttp 流式抓 bytes,带超时 + 大小限制;多组件消息走 `download_many` 并发 (`max_concurrent` 限流);transient 错误(超时/连接错/5xx)按 `download_retries` 指数退避重试,4xx 立即抛
+4. **命名 + 落盘**（storage）—— 按模板渲染相对路径,blake2b 去重,blake 软链复用,落盘前 `_assert_within_root` 防止越权写入
 5. **转发节点处理**（forwarder）—— 按 `forward_render_mode`:
    - `image`: PIL 渲染节点链为 PNG（30 节点上限,超限降级 JSON）
    - `json`: 节点链结构化落到 `.json` sidecar
@@ -108,6 +114,8 @@ pip install Pillow  # forwarder 自绘气泡
 | `/warden list [N]` | 列最近 N 条索引记录（默认 10,上限 50） |
 | `/warden stats` | 资产统计：总数 / 按类型分布 / 总字节数 / db 路径 |
 | `/warden export [path]` | 导出索引为 JSON,默认 `<storage_root>/_export.json` |
+| `/warden lookup <msg_id> [#idx]` | 反向查询:该消息保存了哪些资产,可选按 idx 过滤 |
+| `/warden prune <days>` | 时效清理:从索引里删 N 天前的记录(不删实际文件) |
 
 ## 离线自测
 
@@ -116,7 +124,7 @@ cd astrbot-plugin-media-warden
 python -X utf8 _smoke.py
 ```
 
-无外部 AstrBot 依赖,也不发起真实网络。覆盖 **46 项**（17 Phase 1 + 12 Phase 2 + 17 Phase 3）：
+无外部 AstrBot 依赖,也不发起真实网络。覆盖 **58 项**（17 Phase 1 + 12 Phase 2 + 17 Phase 3 + 12 Phase 4）：
 
 - 配置加载 / 校验 / 降级
 - 策略匹配（白名单 / 黑名单 / 私聊跳过 / 空列表 = 不限）
@@ -128,6 +136,14 @@ python -X utf8 _smoke.py
 - 预览：有 image_result / 无 image_result 降级 / 关闭 / 转发渲染优先
 - 三个 `/warden` 命令
 - 插件入口构造与配置注入
+- Phase 4 (v1.3) 补充:
+  - `download` 指数退避: transient 重试 / 4xx 不重试 / 达到上限抛错
+  - `download_many` 并发保序 / 超时边界
+  - `_assert_within_root` 越权拒绝 / 合法路径放行
+  - `index.find_by_msg` 多 msg 隔离 + 排序
+  - `index.count` / `prune_older_than` 时效清理
+  - `/warden lookup` 命中 / `/warden prune` 阈值/参数错/索引关闭
+  - `forwarder.render_with_images` 接收预下载 bytes
 
 ## 已知边界
 
@@ -140,8 +156,8 @@ python -X utf8 _smoke.py
 
 ## 后续可选
 
-- **v1.3 adapter 扩展** —— TG / 微信 / 其他平台的消息组件 schema
+- **v1.4 adapter 扩展** —— TG / 微信 / 其他平台的消息组件 schema
 - **playwright 渲染引擎** —— HTML 模板 + headless Chromium,样式自由度更高
-- **并发下载** —— 多组件消息并行抓
 - **头像 + @提醒** —— 节点内抓头像,@人高亮
+- **媒体分类** —— image / video / file 各自子目录 + 配 metadata.json 索引
 
