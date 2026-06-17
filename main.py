@@ -17,7 +17,7 @@ from typing import Any, Optional
 from astrbot.api.star import Star, register, Context
 from astrbot.api.event import filter, AstrMessageEvent
 
-from warden import (
+from .warden import (
     MediaWardenConfig,
     evaluate,
     extract_components,
@@ -27,11 +27,11 @@ from warden import (
     format_batch,
     VERSION,
 )
-from warden.components import Component
-from warden.downloader import (
+from .warden.components import Component
+from .warden.downloader import (
     aiohttp_fetcher, download, download_many, DownloadError,
 )
-from warden.storage import Storage, SaveContext
+from .warden.storage import Storage, SaveContext
 
 
 @register(

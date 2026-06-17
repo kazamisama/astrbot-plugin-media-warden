@@ -1,3 +1,2 @@
-﻿# v1.2 依赖
 Pillow>=10.0  # forwarder 自绘气泡
-# aiohttp>=3.9  # Phase 2 已抽象,缺包时报明确错误而非 import
+aiohttp>=3.9  # downloader 流式下载(AstrBot 运行环境自带)

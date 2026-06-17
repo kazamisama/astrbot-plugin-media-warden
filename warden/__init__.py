@@ -2,10 +2,10 @@
 
 公开符号遵循最小集,具体实现分散到子模块.
 """
-from warden.config import MediaWardenConfig, VERSION, EXPORT_FORMAT_VERSION
-from warden.policy import MatchDecision, evaluate
-from warden.components import Component, extract_components, summarize
-from warden.reporter import AssetResult, BatchResult, format_batch
+from .config import MediaWardenConfig, VERSION, EXPORT_FORMAT_VERSION
+from .policy import MatchDecision, evaluate
+from .components import Component, extract_components, summarize
+from .reporter import AssetResult, BatchResult, format_batch
 
 __version__ = VERSION
 __all__ = [

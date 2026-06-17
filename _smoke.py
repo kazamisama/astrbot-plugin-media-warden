@@ -67,8 +67,18 @@ _install_stub()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))  # for parent package import
 
-import main as plugin_main
+# 装载插件作为包,让 main.py 的 'from .warden import ...' 能工作.
+import importlib
+_pname = "astrbot_plugin_media_warden_smoke"
+if _pname in sys.modules:
+    del sys.modules[_pname]
+pkg = types.ModuleType(_pname)
+pkg.__path__ = [HERE]
+sys.modules[_pname] = pkg
+main = importlib.import_module(_pname + ".main")
+plugin_main = main
 from warden import (
     MediaWardenConfig,
     MatchDecision,
