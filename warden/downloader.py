@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Tuple, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from warden.components import Component
+    from .components import Component
 
 
 class DownloadError(Exception):

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from warden.config import MediaWardenConfig
+    from .config import MediaWardenConfig
 
 
 @dataclass(frozen=True)

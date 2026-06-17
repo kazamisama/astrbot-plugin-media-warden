@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from warden.components import Component
+    from .components import Component
 
 
 def _is_safe_char(c: str) -> bool:

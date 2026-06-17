@@ -68,7 +68,7 @@ class MediaWardenStar(Star):
             max_bytes=self.cfg.max_file_size_bytes,
         )
         try:
-            from warden.forwarder import Forwarder
+            from .warden.forwarder import Forwarder
             self._forwarder = Forwarder(
                 width=self.cfg.forward_image_width,
                 max_nodes=30,
@@ -78,7 +78,7 @@ class MediaWardenStar(Star):
             self._forwarder = None
         if self.cfg.enable_index_db:
             try:
-                from warden.index import AssetIndex
+                from .warden.index import AssetIndex
                 self._index = AssetIndex(
                     db_path=os.path.join(self.cfg.storage_root, "_warden.db")
                 )
@@ -220,7 +220,7 @@ class MediaWardenStar(Star):
 
     async def _save_forward(self, comp: Component, ctx: SaveContext
                             ) -> list[AssetResult]:
-        from warden.forwarder import from_component
+        from .warden.forwarder import from_component
         nodes = from_component(comp)
         results: list[AssetResult] = []
 
