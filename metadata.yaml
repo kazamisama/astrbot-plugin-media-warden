@@ -1,5 +1,5 @@
 name: astrbot-plugin-media-warden
 author: shirley
-version: 1.4.3
+version: 1.4.4
 description: 群聊素材守门人 v1.3 —— 监听特定群/用户的非文字消息，按模板命名落盘（blake2b 去重），转发链 PIL 渲染/JSON 保存，SQLite 索引 + /warden list/stats/export 命令 + 预览图回传 + /warden lookup 反查 + /warden prune 时效清理 + 并发下载 + 指数退避重试。
 

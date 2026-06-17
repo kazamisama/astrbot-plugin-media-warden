@@ -122,18 +122,25 @@ async def astrbot_component_fetcher(component: "Component",
                                     session=None) -> Downloaded:
     """优先走 url；没 url 时回退到 AstrBot 组件对象的 convert_to_file_path / convert_to_base64.
 
-    商城表情 / napcat / lagrange 的 Image 常常只有 file_id 而无 http url，
+    商城表情 / napcat / lagrange 的 Image 常常 url 为空或直接是本地缓存路径（非 http），
     AstrBot 组件自带的 convert_to_file_path() 能把 file_id / file:// / base64:// 统一解析为本地文件。
     """
-    if component.url:
+    url = component.url or ""
+    if url.startswith("http://") or url.startswith("https://"):
         return await aiohttp_fetcher(
             component, timeout_s=timeout_s, max_bytes=max_bytes, session=session
         )
 
+    # url 为本地路径 / file:// / base64:// / 空 都走本地解析
+    # napcat 等环境下 Image.url 常直接是 \.astrbot\data\temp\... 本地缓存路径
+    local = _url_to_local_path(url)
+    if local:
+        return _read_local_file(local, max_bytes)
+
     raw = getattr(component, "raw", None)
     if raw is None:
         raise DownloadError(
-            f"component has no url and no raw object (kind={component.kind}, file_id={component.file_id!r})"
+            f"component has no usable url and no raw object (kind={component.kind}, url={component.url!r}, file_id={component.file_id!r})"
         )
 
     to_path = getattr(raw, "convert_to_file_path", None)
@@ -159,6 +166,36 @@ async def astrbot_component_fetcher(component: "Component",
     raise DownloadError(
         f"component has no url and raw object cannot resolve bytes (kind={component.kind})"
     )
+
+
+def _url_to_local_path(url: str):
+    """把非 http(s) 的 url 解析为本地文件路径；不是本地文件返回 None。
+
+    兼容：file:///C:/x.jpg、file://C:/x.jpg、URL 编码的 c%3A%5C...、裸本地路径。
+    base64:// 交给 raw.convert_to_base64 处理，这里返回 None。
+    """
+    import os
+    from urllib.parse import unquote, urlparse
+    if not url or url.startswith("base64://"):
+        return None
+    candidate = url
+    if url.startswith("file://"):
+        parsed = urlparse(url)
+        candidate = unquote(parsed.path or "")
+        # Windows: /C:/x -> C:/x
+        if os.name == "nt" and len(candidate) >= 3 and candidate[0] == "/" and candidate[2] == ":":
+            candidate = candidate[1:]
+    else:
+        # 可能是 URL 编码过的本地路径（如 c%5CUsers%5C...）
+        if "%" in candidate:
+            candidate = unquote(candidate)
+    candidate = candidate.replace("\\", os.sep).replace("/", os.sep) if os.name == "nt" else candidate
+    try:
+        if os.path.isfile(candidate):
+            return candidate
+    except OSError:
+        return None
+    return None
 
 
 def _read_local_file(path: str, max_bytes: int) -> Downloaded:

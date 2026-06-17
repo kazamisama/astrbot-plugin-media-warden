@@ -90,7 +90,10 @@ from warden import (
     format_batch,
     summarize,
 )
-from warden.downloader import aiohttp_fetcher, download, download_many, DownloadError, Downloaded
+from warden.downloader import (
+    aiohttp_fetcher, astrbot_component_fetcher,
+    download, download_many, DownloadError, Downloaded,
+)
 from warden.storage import Storage, SaveContext, render_filename, _safe_name, _guess_ext
 
 
@@ -536,6 +539,41 @@ def test_downloader_no_url():
     except DownloadError as e:
         assert "no url" in str(e)
         print("  OK ->", e)
+
+
+def test_component_fetcher_local_url_reads_file():
+    banner("downloader: astrbot_component_fetcher reads local-path url (napcat) instead of aiohttp")
+    import asyncio, tempfile, os
+    with tempfile.TemporaryDirectory() as td:
+        fp = os.path.join(td, "media_image_abc.jpg")
+        body = b"\xff\xd8\xff\xe0local-jpeg-bytes"
+        open(fp, "wb").write(body)
+        # 模拟 napcat：Image.url 直接是本地路径
+        c = Component(kind="image", url=fp)
+        dl = asyncio.run(astrbot_component_fetcher(c, max_bytes=1024))
+        assert dl.data == body and dl.size == len(body)
+        assert dl.mime == "image/jpeg"
+        print("  OK -> read", dl.size, "bytes from local url")
+
+
+def test_component_fetcher_fileurl_and_encoded():
+    banner("downloader: fetcher handles file:// and URL-encoded local paths")
+    import asyncio, tempfile, os
+    from urllib.parse import quote
+    with tempfile.TemporaryDirectory() as td:
+        fp = os.path.join(td, "pic.png")
+        body = b"PNGBODY"
+        open(fp, "wb").write(body)
+        # file:/// 形式
+        file_url = "file:///" + fp.replace(os.sep, "/")
+        c1 = Component(kind="image", url=file_url)
+        dl1 = asyncio.run(astrbot_component_fetcher(c1, max_bytes=1024))
+        assert dl1.data == body, "file:// url failed"
+        # URL 编码的本地路径（如 c%3A%5C...）
+        c2 = Component(kind="image", url=quote(fp))
+        dl2 = asyncio.run(astrbot_component_fetcher(c2, max_bytes=1024))
+        assert dl2.data == body, "encoded local path failed"
+        print("  OK -> file:// and encoded local path both read")
 
 
 def test_downloader_aiohttp_success_via_mock():
@@ -1929,6 +1967,8 @@ PHASE4 = [
     test_downloader_no_retry_on_non_transient,
     test_downloader_give_up_after_max,
     test_downloader_many_concurrent,
+    test_component_fetcher_local_url_reads_file,
+    test_component_fetcher_fileurl_and_encoded,
     test_storage_path_safety_rejects_outside_root,
     test_storage_works_for_legit_paths,
     test_plugin_warden_lookup_command,
