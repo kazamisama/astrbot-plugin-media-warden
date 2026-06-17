@@ -54,11 +54,54 @@ MIME_EXT = {
 }
 
 
-def _guess_ext(component: "Component", mime: Optional[str] = None) -> str:
+def _sniff_ext(data: Optional[bytes]) -> Optional[str]:
+    """由内容魔数推断扩展名（最可靠，不受 QQ 文件名/Content-Type 干扰）。"""
+    if not data or len(data) < 12:
+        return None
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:2] == b"BM":
+        return ".bmp"
+    if data[:4] == b"\x00\x00\x01\x00":
+        return ".ico"
+    # mp4 / mov: ....ftyp
+    if data[4:8] == b"ftyp":
+        return ".mp4"
+    # OGG / Opus / amr
+    if data[:4] == b"OggS":
+        return ".ogg"
+    if data[:6] == b"#!AMR\n" or data[:5] == b"#!AMR":
+        return ".amr"
+    if data[:4] == b"%PDF":
+        return ".pdf"
+    if data[:4] == b"PK\x03\x04":
+        return ".zip"
+    return None
+
+
+def _guess_ext(component: "Component", mime: Optional[str] = None,
+               data: Optional[bytes] = None) -> str:
+    # 1) 内容魔数优先（QQ 动图经常 file=.gif 但下到 jpg 静帧，以真实字节为准）
+    sniff = _sniff_ext(data)
+    if sniff:
+        return sniff
+    # 2) 显式文件名后缀
     name = component.name or ""
     m = re.search(r"\.([A-Za-z0-9]{1,5})$", name)
     if m:
         return "." + m.group(1).lower()
+    # 3) file_id 携带的后缀（如 8BD....gif）—— 优先于 mime 猜测
+    if component.file_id:
+        m = re.search(r"\.([A-Za-z0-9]{1,5})$", component.file_id)
+        if m:
+            return "." + m.group(1).lower()
+    # 4) mime
     if mime:
         ext = MIME_EXT.get(mime.lower())
         if ext:
@@ -66,12 +109,9 @@ def _guess_ext(component: "Component", mime: Optional[str] = None) -> str:
         m = re.search(r"/([A-Za-z0-9.+-]+)", mime)
         if m:
             return "." + m.group(1).lower()
+    # 5) url 路径后缀
     if component.url:
         m = re.search(r"\.([A-Za-z0-9]{1,5})(?:\?|$)", component.url)
-        if m:
-            return "." + m.group(1).lower()
-    if component.file_id:
-        m = re.search(r"\.([A-Za-z0-9]{1,5})$", component.file_id)
         if m:
             return "." + m.group(1).lower()
     return ".bin"
@@ -103,10 +143,11 @@ def _format_ctx(ctx: SaveContext) -> dict:
 
 
 def render_filename(pattern: str, component: "Component", ctx: SaveContext,
-                    *, mime: Optional[str] = None, short_id: Optional[str] = None) -> str:
+                    *, mime: Optional[str] = None, short_id: Optional[str] = None,
+                    data: Optional[bytes] = None) -> str:
     fmt = _format_ctx(ctx)
     vars = dict(fmt)
-    ext = _guess_ext(component, mime)
+    ext = _guess_ext(component, mime, data)
     # safe_name 去掉末尾与 ext 重复的后缀，避免 ".jpg..jpg" 双扩展名
     raw_name = component.name or component.file_id or "asset"
     base_name, name_ext = os.path.splitext(raw_name)
@@ -232,6 +273,7 @@ class Storage:
         rel = render_filename(
             self.pattern, component, ctx, mime=mime,
             short_id=(digest or _blake_digest(data)),
+            data=data,
         )
         full = os.path.join(self.root, rel)
         if os.path.exists(full) and digest:

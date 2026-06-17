@@ -426,6 +426,25 @@ def test_storage_guess_ext():
     print("  OK")
 
 
+def test_storage_guess_ext_sniffs_bytes():
+    banner("storage: content magic-bytes win over file_id/mime (gif stays gif)")
+    # 复现 bug：QQ 动图 file_id=.gif 但 mime 猜成 jpeg；现在以字节为准
+    gif = b"GIF89a" + b"\x00" * 16
+    c = Component(kind="image", file_id="8BD....gif", url="https://x/download")
+    assert _guess_ext(c, mime="image/jpeg", data=gif) == ".gif", "should sniff gif"
+    # 真是 jpeg 字节时就是 jpg
+    jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+    assert _guess_ext(c, mime=None, data=jpg) == ".jpg"
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+    assert _guess_ext(Component(kind="image"), data=png) == ".png"
+    webp = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 8
+    assert _guess_ext(Component(kind="image"), data=webp) == ".webp"
+    # file_id 后缀 现在优先于 mime（无字节时）
+    c2 = Component(kind="image", file_id="x.gif")
+    assert _guess_ext(c2, mime="image/jpeg") == ".gif"
+    print("  OK")
+
+
 def test_storage_render_filename_pattern():
     banner("storage: render_filename applies pattern + escapes path traversal")
     c = Component(kind="image", name="a/b/c.jpg")
@@ -682,7 +701,7 @@ def test_plugin_e2e_group_message_image_saved():
 
     class _Content:
         async def iter_chunked(self, n):
-            yield _Chunk(b"\x89PNG\r\nfake-png-body")
+            yield _Chunk(b"\x89PNG\r\n\x1a\nfake-png-body")
 
     class _Resp:
         status = 200
@@ -870,6 +889,7 @@ PHASE1 = [
 PHASE2 = [
     test_storage_safe_name,
     test_storage_guess_ext,
+    test_storage_guess_ext_sniffs_bytes,
     test_storage_render_filename_pattern,
     test_storage_render_filename_blocks_traversal,
     test_storage_save_roundtrip,
@@ -1257,7 +1277,7 @@ def test_plugin_e2e_image_triggers_image_result():
 
     class _Content:
         async def iter_chunked(self, n):
-            yield _Chunk(b"\x89PNG\r\nfake-png-body")
+            yield _Chunk(b"\x89PNG\r\n\x1a\nfake-png-body")
 
     class _Resp:
         status = 200
@@ -1343,7 +1363,7 @@ def test_plugin_e2e_image_fallback_when_no_image_result():
 
     class _Content:
         async def iter_chunked(self, n):
-            yield _Chunk(b"\x89PNG\r\nfake-png-body")
+            yield _Chunk(b"\x89PNG\r\n\x1a\nfake-png-body")
 
     class _Resp:
         status = 200
@@ -1421,7 +1441,7 @@ def test_plugin_preview_disabled():
 
     class _Content:
         async def iter_chunked(self, n):
-            yield _Chunk(b"\x89PNG\r\nfake-png-body")
+            yield _Chunk(b"\x89PNG\r\n\x1a\nfake-png-body")
 
     class _Resp:
         status = 200
@@ -1495,7 +1515,7 @@ def test_plugin_forward_render_takes_precedence_over_image():
 
     class _Content:
         async def iter_chunked(self, n):
-            yield _Chunk(b"\x89PNG\r\nfake-png-body")
+            yield _Chunk(b"\x89PNG\r\n\x1a\nfake-png-body")
 
     class _Resp:
         status = 200
