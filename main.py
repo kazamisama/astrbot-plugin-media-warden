@@ -25,6 +25,7 @@ from .warden import (
     event_sender_id,
     event_sender_name,
     extract_components,
+    recover_raw_media_refs,
     summarize,
     AssetResult,
     BatchResult,
@@ -153,6 +154,12 @@ class MediaWardenStar(Star):
         t0 = time.time()
         batch = BatchResult()
 
+        # 0) ???????? http ????.
+        #    AstrBot 4.26+ ? PreProcessStage ???? Image ???? jpeg ???
+        #    component.url/file/path; raw_message ??? napcat ??????(??? gif).
+        #    ????????? http url ??????,????????? jpeg ???.
+        self._recover_original_urls(event, media)
+
         # 1) 并发下载所有 media
         save_contexts = [
             SaveContext(platform=platform, group_id=group_id, sender_id=sender_id,
@@ -180,6 +187,42 @@ class MediaWardenStar(Star):
             yield extra
 
     # ----------------- 内部:并发下载 + 落盘 -----------------
+
+    def _recover_original_urls(self, event, media: list[Component]) -> None:
+        """? raw_message ???? http ????? PreProcessStage ????? url.
+
+        ??????? http(s) url ????,?? kind ??? media ????;
+        ????????(?????????),???? OneBot ????.
+        """
+        try:
+            refs = recover_raw_media_refs(event)
+        except Exception as e:
+            if self.cfg.log_to_stdout:
+                self._log(f"recover raw urls failed: {e!r}")
+            return
+        if not refs:
+            return
+        from collections import defaultdict
+        buckets: dict[str, list[dict]] = defaultdict(list)
+        for r in refs:
+            buckets[r["kind"]].append(r)
+        cursor: dict[str, int] = defaultdict(int)
+        for comp in media:
+            lst = buckets.get(comp.kind) or []
+            i = cursor[comp.kind]
+            if i >= len(lst):
+                continue
+            cursor[comp.kind] = i + 1
+            ref = lst[i]
+            url = ref.get("url")
+            if url:
+                comp.url = url
+                if ref.get("name") and not comp.name:
+                    comp.name = ref["name"]
+                if ref.get("size") and not comp.size:
+                    comp.size = ref["size"]
+                if self.cfg.log_to_stdout:
+                    self._log(f"recovered original url for {comp.kind}: {url[:60]}...")
 
     async def _download_all(self, media: list[Component]) -> list:
         """并发下载所有 media 组件.

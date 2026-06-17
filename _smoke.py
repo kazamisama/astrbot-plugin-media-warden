@@ -84,6 +84,7 @@ from warden import (
     MatchDecision,
     evaluate,
     extract_components,
+    recover_raw_media_refs,
     Component,
     AssetResult,
     BatchResult,
@@ -142,7 +143,8 @@ def test_policy_key_format():
 
 def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
                 message=None, message_str="", is_group=True,
-                nickname=None, message_id="m42", timestamp=None):
+                nickname=None, message_id="m42", timestamp=None,
+                raw_message=None):
     class _PM:
         def __init__(self, p, g):
             self.name = p
@@ -156,12 +158,13 @@ def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
             self.nickname = nick
 
     class _MO:
-        def __init__(self, m, gid, sender, mid, ts):
+        def __init__(self, m, gid, sender, mid, ts, raw):
             self.message = m
             self.group_id = gid
             self.sender = sender
             self.message_id = mid
             self.timestamp = ts
+            self.raw_message = raw
 
     class _Result:
         def __init__(self, t): self.text = t
@@ -182,7 +185,7 @@ def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
     e = _Ev()
     e.platform_meta = _PM(platform, gid)
     e.sender = sender_obj
-    e.message_obj = _MO(message, gid, sender_obj, message_id, timestamp)
+    e.message_obj = _MO(message, gid, sender_obj, message_id, timestamp, raw_message)
     e.message_str = message_str
     e.message_id = message_id
     e.timestamp = timestamp
@@ -1997,6 +2000,70 @@ PHASE4 = [
     test_index_count_and_prune_older_than,
     test_plugin_e2e_concurrent_download_two_images,
     test_forwarder_render_with_images,
+]
+
+
+def test_recover_raw_url_overrides_local_jpeg():
+    banner("recover: raw_message http url overrides PreProcessStage-jpeg'd component")
+    from warden.components import Component
+    # ?? AstrBot 4.26 PreProcessStage ??????: url/file ???? jpeg
+    comp = Component(kind="image", url=r"C:\\temp\\media_image_x.jpg",
+                     file_id=r"C:\\temp\\media_image_x.jpg")
+    media = [comp]
+    # raw_message ?? napcat ???: ?? gif ? http ??
+    raw = {"message": [
+        {"type": "text", "data": {"text": "hi"}},
+        {"type": "image", "data": {
+            "file": "ABCD.gif",
+            "url": "https://multimedia.nt.qq.com.cn/download?fileid=xyz",
+            "file_size": "1226503",
+        }},
+    ]}
+    ev = _fake_event(message=[{"type": "image", "data": {}}], raw_message=raw)
+
+    refs = recover_raw_media_refs(ev)
+    assert len(refs) == 1, refs
+    assert refs[0]["kind"] == "image"
+    assert refs[0]["url"].startswith("https://"), refs[0]
+    assert refs[0]["name"] == "ABCD.gif"
+    assert refs[0]["size"] == 1226503
+
+    # ????????
+    _ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    star = plugin_main.MediaWardenStar(_ctx, config=None)
+    star._recover_original_urls(ev, media)
+    assert comp.url == "https://multimedia.nt.qq.com.cn/download?fileid=xyz", comp.url
+    assert comp.name == "ABCD.gif"
+    assert comp.size == 1226503
+    print("  OK -> component.url restored to original http gif link")
+
+
+def test_recover_raw_no_http_keeps_local():
+    banner("recover: no http in raw seg -> component untouched (no degrade)")
+    from warden.components import Component
+    comp = Component(kind="image", url=r"C:\\temp\\media_image_y.jpg")
+    media = [comp]
+    # ??? url ????????(napcat ???) -> ????
+    raw = {"message": [
+        {"type": "image", "data": {"file": "z.jpg",
+                                   "url": r"C:\\temp\\media_image_y.jpg"}},
+    ]}
+    ev = _fake_event(message=[{"type": "image", "data": {}}], raw_message=raw)
+    refs = recover_raw_media_refs(ev)
+    assert refs[0]["url"] is None, "local path should not be treated as http url"
+    _ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    star = plugin_main.MediaWardenStar(_ctx, config=None)
+    star._recover_original_urls(ev, media)
+    assert comp.url == r"C:\\temp\\media_image_y.jpg", "must stay unchanged"
+    # ? raw_message ?????
+    ev2 = _fake_event(message=[{"type": "image", "data": {}}], raw_message=None)
+    star._recover_original_urls(ev2, [Component(kind="image", url="x")])
+    print("  OK -> local-only raw and no-raw both leave component unchanged")
+
+
+PHASE4 += [
+    test_recover_raw_url_overrides_local_jpeg,
+    test_recover_raw_no_http_keeps_local,
 ]
 
 

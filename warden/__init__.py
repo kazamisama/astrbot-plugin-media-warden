@@ -7,7 +7,7 @@ from .policy import (
     MatchDecision, evaluate,
     event_platform, event_group_id, event_sender_id, event_sender_name,
 )
-from .components import Component, extract_components, summarize
+from .components import Component, extract_components, summarize, recover_raw_media_refs
 from .reporter import AssetResult, BatchResult, format_batch
 
 __version__ = VERSION
@@ -22,6 +22,7 @@ __all__ = [
     "Component",
     "extract_components",
     "summarize",
+    "recover_raw_media_refs",
     "AssetResult",
     "BatchResult",
     "format_batch",

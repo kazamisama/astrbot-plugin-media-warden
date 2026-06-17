@@ -180,6 +180,76 @@ def _coerce_one(item: Any) -> Component:
     return Component(kind="unknown", meta={"type": t}, raw=item)
 
 
+def _seg_type(seg: Any) -> Optional[str]:
+    t = seg.get("type") if isinstance(seg, dict) else getattr(seg, "type", None)
+    if t is None:
+        return None
+    val = getattr(t, "value", None)
+    return str(val if val is not None else t).lower()
+
+
+def _seg_data(seg: Any) -> dict:
+    d = seg.get("data") if isinstance(seg, dict) else getattr(seg, "data", None)
+    return d if isinstance(d, dict) else {}
+
+
+_RAW_MEDIA_KINDS = {
+    "image": "image",
+    "video": "video",
+    "record": "voice",
+    "voice": "voice",
+    "audio": "voice",
+    "file": "file",
+}
+
+
+def recover_raw_media_refs(event) -> List[dict]:
+    """? event.message_obj.raw_message ?????????????.
+
+    AstrBot 4.26 ? PreProcessStage ???? Image ????????? jpeg,
+    ?? component ? url/file/path; ? raw_message ?? napcat ??????,
+    ?? image ?? data.url ???? http ????(????? gif).
+
+    Returns:
+        List[dict]: ??????,?? media ???
+        {"kind","url","file","name","size"}; url/file ??? None.
+        ? OneBot ???? raw_message ??? [].
+    """
+    obj = getattr(event, "message_obj", None)
+    raw = getattr(obj, "raw_message", None) if obj is not None else None
+    if raw is None:
+        return []
+    segs = raw.get("message") if isinstance(raw, dict) else getattr(raw, "message", None)
+    if not isinstance(segs, list):
+        return []
+
+    out: List[dict] = []
+    for seg in segs:
+        tn = _seg_type(seg)
+        kind = _RAW_MEDIA_KINDS.get(tn or "")
+        if kind is None:
+            continue
+        data = _seg_data(seg)
+        url = data.get("url")
+        size = None
+        for n in ("file_size", "size"):
+            v = data.get(n)
+            if v not in (None, ""):
+                try:
+                    size = int(v)
+                    break
+                except (TypeError, ValueError):
+                    pass
+        out.append({
+            "kind": kind,
+            "url": url if isinstance(url, str) and url.startswith(("http://", "https://")) else None,
+            "file": data.get("file"),
+            "name": data.get("file") or data.get("name"),
+            "size": size,
+        })
+    return out
+
+
 def extract_components(event) -> List[Component]:
     """从 event.message_obj 抽 Component[].
 
