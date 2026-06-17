@@ -1,5 +1,7 @@
 ﻿# astrbot-plugin-media-warden
 
+[![smoke](https://github.com/kazamisama/astrbot-plugin-media-warden/actions/workflows/smoke.yml/badge.svg)](https://github.com/kazamisama/astrbot-plugin-media-warden/actions/workflows/smoke.yml)
+
 > 群聊素材守门人 —— 监听特定群/用户的非文字消息，按固定命名落盘，转发链渲染/JSON 保存并回复处理结果，支持预览图回传。
 
 ## 进度
@@ -142,3 +144,4 @@ python -X utf8 _smoke.py
 - **playwright 渲染引擎** —— HTML 模板 + headless Chromium,样式自由度更高
 - **并发下载** —— 多组件消息并行抓
 - **头像 + @提醒** —— 节点内抓头像,@人高亮
+
