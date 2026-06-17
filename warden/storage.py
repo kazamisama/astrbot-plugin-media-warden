@@ -152,7 +152,7 @@ class Storage:
     """本地落盘 + dedupe 复用."""
 
     def __init__(self, root: str, *, dedupe: bool = True,
-                 pattern: str = "{date}/{group_id}/{sender_name}-{sender_id}/{time}_{kind}_{short_id}{ext}",
+                 pattern: str = "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}",
                  max_bytes: int = 100 * 1024 * 1024):
         self.root = os.path.abspath(root)
         self.dedupe = dedupe
