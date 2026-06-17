@@ -5,7 +5,8 @@
               {date} {time} {msg_id} {idx} {safe_name} {ext} {kind}
   - safe_name: 字符级清理(替换非字母数字/中文/.-_ 的字符为 _)
   - ext: 从 mime / url / file_id 推断,缺省 '.bin'
-  - dedupe: blake2b(data[:1MB], digest_size=16) -> 落到 _blake/<aa>/<bb>/<hex>.bin
+  - dedupe: blake2b 指纹(小文件全量 / 大文件前1MB+size) -> _blake/<aa>/<bb>/<hex>.ptr
+             指针文件内容=首存真实相对路径；命中时返回首存原位置
             命中已有 hash -> 复用旧路径,AssetResult 标记 reused=True
 """
 from __future__ import annotations
@@ -134,9 +135,22 @@ def render_filename(pattern: str, component: "Component", ctx: SaveContext,
     return "/".join(parts)
 
 
+_FULL_HASH_LIMIT = 16 * 1024 * 1024  # ≤ 16MB 全量哈希；超过则前1MB + total_size
+
+
 def _blake_digest(data: bytes) -> str:
+    """内容指纹。
+
+    - 小文件（≤ _FULL_HASH_LIMIT）：全量哈希，零误判/零漏判。
+    - 大文件：前 1MB + 总字节数进摘要，消除“前1MB相同即误判”。
+    """
     h = hashlib.blake2b(digest_size=16)
-    h.update(data[: 1024 * 1024])
+    if len(data) <= _FULL_HASH_LIMIT:
+        h.update(data)
+    else:
+        h.update(data[: 1024 * 1024])
+        h.update(b"\x00")
+        h.update(str(len(data)).encode("ascii"))
     return h.hexdigest()
 
 
@@ -163,11 +177,41 @@ class Storage:
         self._real_root = os.path.realpath(self.root)
 
     def _blake_path(self, digest: str) -> str:
+        # 指针文件：内容为首存真实文件的相对路径（相对 storage_root）
+        return os.path.join(self.root, "_blake", digest[:2], digest[2:4], digest + ".ptr")
+
+    def _legacy_blake_path(self, digest: str) -> str:
+        # 旧版 symlink/拷贝文件（.bin），向后兼容读取
         return os.path.join(self.root, "_blake", digest[:2], digest[2:4], digest + ".bin")
 
+    def _write_pointer(self, digest: str, full: str) -> None:
+        bp = self._blake_path(digest)
+        os.makedirs(os.path.dirname(bp), exist_ok=True)
+        rel = os.path.relpath(full, start=self.root).replace("\\", "/")
+        with open(bp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(rel)
+
     def _existing_for_digest(self, digest: str) -> Optional[str]:
-        p = self._blake_path(digest)
-        return p if os.path.exists(p) else None
+        """返回首存真实文件的绝对路径（而非 _blake 指纹路径）。"""
+        ptr = self._blake_path(digest)
+        if os.path.exists(ptr):
+            try:
+                with open(ptr, "r", encoding="utf-8") as f:
+                    rel = f.read().strip()
+                if rel:
+                    target = os.path.join(self.root, rel)
+                    if os.path.exists(target):
+                        return os.path.normpath(target)
+            except OSError:
+                pass
+            # 指针损坏/原件被删 -> 视为未命中，重新落盘
+            return None
+        # 向后兼容：旧版 .bin（symlink 或拷贝）
+        legacy = self._legacy_blake_path(digest)
+        if os.path.exists(legacy):
+            real = os.path.realpath(legacy)
+            return real if os.path.exists(real) else None
+        return None
 
     def save(self, data: bytes, component: "Component", ctx: SaveContext,
              *, mime: Optional[str] = None) -> SaveResult:
@@ -220,15 +264,12 @@ class Storage:
             f.write(data)
 
         if digest and self.dedupe:
-            bp = self._blake_path(digest)
-            os.makedirs(os.path.dirname(bp), exist_ok=True)
-            if not os.path.exists(bp):
+            # 记录指针：digest -> 首存真实文件相对路径（跨平台，不依赖 symlink）
+            if not os.path.exists(self._blake_path(digest)):
                 try:
-                    rel_target = os.path.relpath(full, start=os.path.dirname(bp))
-                    os.symlink(rel_target, bp)
-                except (OSError, NotImplementedError):
-                    import shutil
-                    shutil.copy2(full, bp)
+                    self._write_pointer(digest, full)
+                except OSError:
+                    pass
         return SaveResult(path=full, size=len(data), reused=False, blake16=digest)
 
     def _assert_within_root(self, path: str) -> None:

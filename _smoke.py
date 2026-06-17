@@ -467,9 +467,48 @@ def test_storage_save_roundtrip():
         # dedupe 复用:同 content 再来一次
         r2 = st.save(data, c, ctx)
         assert r2.reused is True
-        # 共享的 _blake 软链存在
-        assert r2.path.endswith(".bin") or "_blake" in r2.path
+        # 命中去重时返回首存真实路径（不是 _blake 指纹路径）
+        assert os.path.normpath(r2.path) == os.path.normpath(r.path), (r.path, r2.path)
+        assert "_blake" not in r2.path
         print("  OK ->", r.path, "reused:", r2.reused)
+
+
+def test_storage_dedupe_returns_original_location():
+    banner("storage: dedupe hit returns first-stored location via .ptr pointer")
+    with tempfile.TemporaryDirectory() as td:
+        st = Storage(root=td, pattern="{group_id}/{sender_id}/{date}_{kind}_{short_id}{ext}")
+        c = Component(kind="image", name="x.png")
+        ctx = SaveContext(platform="qq", group_id="g1", sender_id="u1",
+                          sender_name="a", msg_id="m1", idx=0, ts=1718600000)
+        data = b"PNGDATA-unique-content-123"
+        r1 = st.save(data, c, ctx)
+        assert r1.reused is False
+        # 指针文件存在且指向首存相对路径
+        ptr = st._blake_path(r1.blake16)
+        assert os.path.exists(ptr) and ptr.endswith(".ptr")
+        rel = open(ptr, encoding="utf-8").read().strip()
+        assert os.path.normpath(os.path.join(td, rel)) == os.path.normpath(r1.path)
+        # 同内容再发 -> 返回原位置，不重写
+        r2 = st.save(data, c, ctx)
+        assert r2.reused is True
+        assert os.path.normpath(r2.path) == os.path.normpath(r1.path)
+        print("  OK ->", os.path.basename(r1.path), "reused-at-same-path")
+
+
+def test_storage_digest_full_vs_partial():
+    banner("storage: small files full-hash (no front-1MB collision), big files partial")
+    from warden.storage import _blake_digest, _FULL_HASH_LIMIT
+    # 小文件全量哈希：前缀相同但末尾不同 -> 不同指纹
+    a = b"A" * 1000 + b"X"
+    b = b"A" * 1000 + b"Y"
+    assert _blake_digest(a) != _blake_digest(b)
+    # 大文件：前1MB相同 + size相同 -> 同指纹； size不同 -> 不同指纹
+    big1 = b"Z" * (_FULL_HASH_LIMIT + 10)
+    big2 = b"Z" * (_FULL_HASH_LIMIT + 10)
+    big3 = b"Z" * (_FULL_HASH_LIMIT + 11)
+    assert _blake_digest(big1) == _blake_digest(big2)
+    assert _blake_digest(big1) != _blake_digest(big3)
+    print("  OK")
 
 
 def test_storage_save_oversize_rejected():
@@ -796,6 +835,8 @@ PHASE2 = [
     test_storage_render_filename_pattern,
     test_storage_render_filename_blocks_traversal,
     test_storage_save_roundtrip,
+    test_storage_dedupe_returns_original_location,
+    test_storage_digest_full_vs_partial,
     test_storage_save_oversize_rejected,
     test_downloader_no_url,
     test_downloader_aiohttp_success_via_mock,

@@ -103,7 +103,7 @@ def format_batch(res: BatchResult) -> str:
         lines.append(f"  成功 ({len(ok_items)}):")
         for x in ok_items[:10]:
             sz = f" {x.size}B" if x.size else ""
-            tag = " （已保存过·去重复用）" if x.reused else ""
+            tag = " （已保存过·复用原位置）" if x.reused else ""
             lines.append(f"    - {x.kind}: {x.path}{sz}{tag}")
         if len(ok_items) > 10:
             lines.append(f"    ... (+{len(ok_items) - 10} more)")
