@@ -1,0 +1,72 @@
+﻿{
+  "target_groups": {
+    "type": "list",
+    "default": [],
+    "description": "监听的群 ID（格式: platform:group_id，如 aiocqhttp:123456）。空表示不限。"
+  },
+  "target_users": {
+    "type": "list",
+    "default": [],
+    "description": "监听的用户 sender_id 列表。空表示不限。"
+  },
+  "match_mode": {
+    "type": "string",
+    "default": "whitelist",
+    "description": "匹配模式: whitelist(白名单) | blacklist(黑名单)"
+  },
+  "storage_root": {
+    "type": "string",
+    "default": "data/warden",
+    "description": "存储根目录，相对 AstrBot 工作目录"
+  },
+  "filename_pattern": {
+    "type": "string",
+    "default": "{platform}/{group_id}/{date}/{sender_id}_{msg_id}_{idx}_{safe_name}.{ext}",
+    "description": "文件相对路径模板，可用变量: {platform}/{group_id}/{sender_id}/{sender_name}/{date}/{time}/{msg_id}/{idx}/{safe_name}/{ext}/{kind}"
+  },
+  "forward_render_mode": {
+    "type": "string",
+    "default": "image",
+    "description": "转发链处理方式: image(渲染成图片) | json(保存为结构化JSON) | both(两者都生成)"
+  },
+  "forward_image_engine": {
+    "type": "string",
+    "default": "pil",
+    "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)"
+  },
+  "forward_image_width": {
+    "type": "int",
+    "default": 720,
+    "description": "转发渲染图宽度(像素)"
+  },
+  "reply_to_original": {
+    "type": "bool",
+    "default": true,
+    "description": "回复时是否引用原消息"
+  },
+  "reply_preview": {
+    "type": "bool",
+    "default": true,
+    "description": "回复时是否附带第一张图片作为预览缩略图"
+  },
+  "max_file_size_mb": {
+    "type": "int",
+    "default": 100,
+    "description": "单文件大小上限(MB)，超过则跳过"
+  },
+  "dedupe": {
+    "type": "bool",
+    "default": true,
+    "description": "对相同内容做去重（基于 blake2b 头 1MB 哈希）"
+  },
+  "enable_index_db": {
+    "type": "bool",
+    "default": true,
+    "description": "是否启用 SQLite 索引"
+  },
+  "log_to_stdout": {
+    "type": "bool",
+    "default": true,
+    "description": "是否把每条匹配消息打到 stdout 日志"
+  }
+}
