@@ -1,4 +1,4 @@
-﻿"""MediaWardenConfig —— 从 AstrBot 传入的配置 dict 构造 dataclass.
+"""MediaWardenConfig —— 从 AstrBot 传入的配置 dict 构造 dataclass.
 
 Phase 3 (v1.2) 仅做字段归一与合法性校验,不接触文件系统.
 """

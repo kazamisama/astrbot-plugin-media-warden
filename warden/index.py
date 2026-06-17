@@ -1,4 +1,4 @@
-﻿"""SQLite 索引 —— 记录每条保存的资产.
+"""SQLite 索引 —— 记录每条保存的资产.
 
 Schema:
   assets(

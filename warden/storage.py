@@ -1,4 +1,4 @@
-﻿"""存储层 —— 命名模板渲染 + 落盘 + blake2b 头 1MB dedupe.
+"""存储层 —— 命名模板渲染 + 落盘 + blake2b 头 1MB dedupe.
 
 设计:
   - 模板变量: {platform} {group_id} {sender_id} {sender_name}

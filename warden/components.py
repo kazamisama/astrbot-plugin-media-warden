@@ -1,4 +1,4 @@
-﻿"""消息组件归一化 —— 把 event.message_obj 拆成 Component[].
+"""消息组件归一化 —— 把 event.message_obj 拆成 Component[].
 
 Phase 1 仅识别,不做下载.Phase 2 接入 downloader 后会沿用 Component 抽象.
 

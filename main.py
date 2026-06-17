@@ -1,4 +1,4 @@
-﻿"""astrbot-plugin-media-warden 入口.
+"""astrbot-plugin-media-warden 入口.
 
 v1.3 增量:
   - /warden lookup <msg_id> 反向查询

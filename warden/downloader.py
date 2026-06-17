@@ -1,4 +1,4 @@
-﻿"""异步下载器 —— 把 Component 抓成本地 bytes.
+"""异步下载器 —— 把 Component 抓成本地 bytes.
 
 Phase 2 抽象: downloader 接受一个 Component 和一个 fetcher 协议,产出 bytes.
 默认 fetcher 用 aiohttp 走 URL 公开链接.平台协议(OneBot download_file / TG getFile)
