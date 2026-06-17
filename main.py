@@ -224,7 +224,7 @@ class MediaWardenStar(Star):
         preview = sr.path if comp.kind == "image" else None
         return AssetResult(
             kind=comp.kind, ok=True, path=sr.path,
-            size=dl.size, preview_path=preview,
+            size=dl.size, preview_path=preview, reused=sr.reused,
         )
 
     # ----------------- 内部:转发处理(同 v1.2) -----------------
@@ -267,7 +267,8 @@ class MediaWardenStar(Star):
                     except Exception:
                         pass
                 results.append(AssetResult(kind="forward", ok=True,
-                                           path=sr.path, size=len(payload)))
+                                           path=sr.path, size=len(payload),
+                                           reused=sr.reused))
             except ValueError as e:
                 results.append(AssetResult(kind="forward", ok=False, err=f"json save: {e}"))
 
@@ -321,7 +322,7 @@ class MediaWardenStar(Star):
                         pass
                 results.append(AssetResult(
                     kind="forward_render", ok=True, path=sr.path, size=sr.size,
-                    preview_path=sr.path,
+                    preview_path=sr.path, reused=sr.reused,
                 ))
             except Exception as e:
                 results.append(AssetResult(

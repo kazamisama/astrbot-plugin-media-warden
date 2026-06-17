@@ -99,13 +99,31 @@ pip install Pillow  # forwarder 自绘气泡
    ```
    [Warden] ✅ 已保存
      用时: 0.42s
-     类型: image×1, forward_render×1
-     路径: data/warden/aiocqhttp/g1/20240617/
+     类型: image×1, forward_image×1
+     路径: data/warden/961583271/2510536451/
      成功 (2):
-       - image: .../u1_m42_0_abc.png 19B
-       - forward_render: .../u1_m42_1_forward_m42_1.png 3249B
+       - image: .../20260617_144530_image_a1b2c3d4.jpg 19B
+       - forward_image: .../20260617_144530_forward_image_73c0c94d.png 3249B
    ```
 8. **预览回传**（3c）—— 第一张 `forward_render > image` 走 `event.image_result(path)`;无该方法时降级为 `预览: <path>`;`reply_preview=False` 时跳过
+
+## 存储目录产物
+
+默认落盘结构（`filename_pattern` 可改）：
+
+```
+<storage_root>/
+  <group_id>/<sender_id>/<date>_<time>_<kind>_<short_id><ext>
+  _warden.db          # SQLite 资产索引（可查台账）
+  _blake/<aa>/<bb>/<hex>.bin   # 去重指纹库
+```
+
+例：`data/warden/961583271/2510536451/20260617_144530_image_a1b2c3d4.jpg`
+
+两个以 `_` 开头的是插件副产物，不是素材本体：
+
+- **`_warden.db`**（`enable_index_db` 控制，默认开）—— 每存一个文件记一条元数据（群/发送者/msg_id/kind/路径/大小/哈希/转发信息），支撑 `/warden list|stats|lookup|export|prune`。删了仅丢台账，已存文件不受影响，下次启动重建空库。
+- **`_blake/`**（`dedupe` 控制，默认开）—— 保存每份内容的 blake2b 指纹（取前 1MB 算，`digest_size=16`），并用 symlink（不支持时 copy）指向真实文件。落盘前先查指纹：**命中则不重复写盘，直接复用已有文件**，回执会标注“（已保存过·去重复用）”。删了仅丢去重记忆，下次相同内容会被当新文件再存一遍。
 
 ## 命令
 

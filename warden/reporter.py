@@ -16,6 +16,7 @@ class AssetResult:
     err: Optional[str] = None
     size: Optional[int] = None
     preview_path: Optional[str] = None
+    reused: bool = False
 
 
 def _lcp_dir(paths: List[str]) -> Optional[str]:
@@ -74,12 +75,18 @@ def format_batch(res: BatchResult) -> str:
     if res.total == 0:
         return "[Warden] (no assets)"
 
+    reused_count = sum(1 for x in res.items if x.ok and x.reused)
     if res.fail_count == 0:
-        head = "[Warden] ✅ 已保存"
+        if reused_count == res.ok_count and res.ok_count > 0:
+            head = "[Warden] ✅ 已保存（全部为已保存过的重复内容）"
+        else:
+            head = "[Warden] ✅ 已保存"
     else:
         head = f"[Warden] ⚠️ 部分保存失败 ({res.ok_count}/{res.total})"
 
     lines = [head]
+    if reused_count and reused_count != res.ok_count:
+        lines.append(f"  去重: {reused_count} 项为已保存过的重复内容")
     lines.append(f"  用时: {res.duration_s:.2f}s")
 
     from collections import Counter
@@ -96,7 +103,8 @@ def format_batch(res: BatchResult) -> str:
         lines.append(f"  成功 ({len(ok_items)}):")
         for x in ok_items[:10]:
             sz = f" {x.size}B" if x.size else ""
-            lines.append(f"    - {x.kind}: {x.path}{sz}")
+            tag = " （已保存过·去重复用）" if x.reused else ""
+            lines.append(f"    - {x.kind}: {x.path}{sz}{tag}")
         if len(ok_items) > 10:
             lines.append(f"    ... (+{len(ok_items) - 10} more)")
 

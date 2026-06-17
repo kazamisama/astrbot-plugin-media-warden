@@ -325,6 +325,25 @@ def test_reporter_format_batch_partial():
     print(txt)
 
 
+def test_reporter_marks_reused():
+    banner("reporter: reused (dedupe hit) items are flagged in receipt")
+    # 部分重复
+    br = BatchResult(items=[
+        AssetResult(kind="image", ok=True, path="/d/a.jpg", size=10, reused=False),
+        AssetResult(kind="image", ok=True, path="/d/b.jpg", size=10, reused=True),
+    ], duration_s=0.1)
+    txt = format_batch(br)
+    assert "已保存过" in txt, txt
+    assert "去重: 1 项" in txt, txt
+    # 全部重复
+    br2 = BatchResult(items=[
+        AssetResult(kind="image", ok=True, path="/d/a.jpg", size=10, reused=True),
+    ], duration_s=0.1)
+    txt2 = format_batch(br2)
+    assert "全部为已保存过的重复内容" in txt2, txt2
+    print("  OK")
+
+
 def test_reporter_storage_root_no_common_prefix():
     banner("reporter: storage_root returns None when paths diverge")
     br = BatchResult(items=[
@@ -764,6 +783,7 @@ PHASE1 = [
     test_components_no_message_obj,
     test_reporter_format_batch_ok,
     test_reporter_format_batch_partial,
+    test_reporter_marks_reused,
     test_reporter_storage_root_no_common_prefix,
     test_plugin_register_metadata,
     test_plugin_construct_with_default_config,
