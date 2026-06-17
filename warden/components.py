@@ -42,8 +42,90 @@ class Component:
         return self.kind == "text"
 
 
+def _comp_type_name(item: Any) -> Optional[str]:
+    """AstrBot Pydantic 组件对象的 type 是 ComponentType 枚举，取其字符串名."""
+    t = getattr(item, "type", None)
+    if t is None:
+        return None
+    val = getattr(t, "value", None)
+    name = str(val if val is not None else t)
+    return name.lower()
+
+
+def _coerce_obj(item: Any) -> Component:
+    """处理 AstrBot 消息组件对象（Image/Face/Video/Record/File/Node/Forward/Json/Plain/At ...）."""
+    tn = _comp_type_name(item)
+    g = lambda *names: next(
+        (v for n in names for v in [getattr(item, n, None)] if v not in (None, "")),
+        None,
+    )
+
+    if tn == "image":
+        # Image.file 可能是 url / file:// / base64:// / 本地路径
+        f = g("url") or g("file")
+        return Component(
+            kind="image",
+            url=g("url") or (f if isinstance(f, str) and f.startswith("http") else None),
+            file_id=g("file"),
+            meta={"path": getattr(item, "path", None)},
+            raw=item,
+        )
+    if tn == "video":
+        f = g("file")
+        return Component(
+            kind="video",
+            url=g("url") or (f if isinstance(f, str) and f.startswith("http") else None),
+            file_id=g("file"),
+            raw=item,
+        )
+    if tn in ("record", "voice", "audio"):
+        f = g("file")
+        return Component(
+            kind="voice",
+            url=g("url") or (f if isinstance(f, str) and f.startswith("http") else None),
+            file_id=g("file"),
+            raw=item,
+        )
+    if tn == "file":
+        size = None
+        for n in ("size", "file_size"):
+            v = getattr(item, n, None)
+            if v not in (None, ""):
+                try:
+                    size = int(v)
+                    break
+                except (TypeError, ValueError):
+                    pass
+        return Component(
+            kind="file",
+            url=g("url"),
+            file_id=g("file"),
+            name=g("name"),
+            size=size,
+            raw=item,
+        )
+    if tn == "face":
+        # QQ 内置表情：只有 id，无图片数据，归为 json 元数据保存
+        return Component(
+            kind="json",
+            meta={"data": {"face_id": getattr(item, "id", None)}},
+            raw=item,
+        )
+    if tn == "json":
+        return Component(kind="json", meta={"data": g("data")}, raw=item)
+    if tn in ("node", "nodes", "forward"):
+        nodes = getattr(item, "content", None)
+        return Component(kind="forward", meta={"nodes": nodes}, raw=item)
+    if tn == "plain":
+        return Component(kind="text", name=g("text"), raw=item)
+
+    return Component(kind="unknown", meta={"type": tn}, raw=item)
+
+
 def _coerce_one(item: Any) -> Component:
     if not isinstance(item, dict):
+        if getattr(item, "type", None) is not None:
+            return _coerce_obj(item)
         return Component(kind="unknown", raw=item)
 
     t = (item.get("type") or "").lower()

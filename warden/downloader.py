@@ -115,6 +115,78 @@ async def aiohttp_fetcher(component: "Component",
             await session.close()
 
 
+async def astrbot_component_fetcher(component: "Component",
+                                    *,
+                                    timeout_s: float = 30.0,
+                                    max_bytes: int = 200 * 1024 * 1024,
+                                    session=None) -> Downloaded:
+    """优先走 url；没 url 时回退到 AstrBot 组件对象的 convert_to_file_path / convert_to_base64.
+
+    商城表情 / napcat / lagrange 的 Image 常常只有 file_id 而无 http url，
+    AstrBot 组件自带的 convert_to_file_path() 能把 file_id / file:// / base64:// 统一解析为本地文件。
+    """
+    if component.url:
+        return await aiohttp_fetcher(
+            component, timeout_s=timeout_s, max_bytes=max_bytes, session=session
+        )
+
+    raw = getattr(component, "raw", None)
+    if raw is None:
+        raise DownloadError(
+            f"component has no url and no raw object (kind={component.kind}, file_id={component.file_id!r})"
+        )
+
+    to_path = getattr(raw, "convert_to_file_path", None)
+    if callable(to_path):
+        try:
+            path = await to_path()
+        except Exception as e:
+            raise DownloadError(f"convert_to_file_path failed: {e!r}") from e
+        return _read_local_file(path, max_bytes)
+
+    to_b64 = getattr(raw, "convert_to_base64", None)
+    if callable(to_b64):
+        try:
+            import base64 as _b64
+            b64 = await to_b64()
+            data = _b64.b64decode(b64.split(",", 1)[-1])
+        except Exception as e:
+            raise DownloadError(f"convert_to_base64 failed: {e!r}") from e
+        if len(data) > max_bytes:
+            raise DownloadError(f"data {len(data)} > max_bytes {max_bytes}")
+        return Downloaded(data=data, mime=None, size=len(data))
+
+    raise DownloadError(
+        f"component has no url and raw object cannot resolve bytes (kind={component.kind})"
+    )
+
+
+def _read_local_file(path: str, max_bytes: int) -> Downloaded:
+    import os
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        raise DownloadError(f"local file stat failed: {e!r}") from e
+    if size > max_bytes:
+        raise DownloadError(f"local file {size} > max_bytes {max_bytes}")
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        raise DownloadError(f"local file read failed: {e!r}") from e
+    mime = None
+    low = path.lower()
+    for ext, m in (
+        (".png", "image/png"), (".jpg", "image/jpeg"), (".jpeg", "image/jpeg"),
+        (".gif", "image/gif"), (".webp", "image/webp"), (".mp4", "video/mp4"),
+        (".amr", "audio/amr"), (".silk", "audio/silk"),
+    ):
+        if low.endswith(ext):
+            mime = m
+            break
+    return Downloaded(data=data, mime=mime, size=len(data))
+
+
 # ----------------- 顶层 download(带重试) -----------------
 
 async def download(component: "Component",

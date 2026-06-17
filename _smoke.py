@@ -244,6 +244,41 @@ def test_components_extract_onebot_segments():
     print("  OK ->", kinds)
 
 
+def test_components_extract_astrbot_objects():
+    banner("components: extract from AstrBot Pydantic component objects")
+
+    class _CT:
+        def __init__(self, v): self.value = v
+
+    class _Comp:
+        def __init__(self, type_name, **kw):
+            self.type = _CT(type_name)
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    msg = [
+        _Comp("Plain", text="hi"),
+        _Comp("Image", file="abc.image", url="https://x/a.jpg"),
+        _Comp("Image", file="market_emoji_fileid", url=""),   # 商城表情: 无 url, 有 file_id
+        _Comp("Face", id=178),                                  # QQ 内置表情: 只有 id
+        _Comp("Video", file="v.mp4", url="https://x/v.mp4"),
+        _Comp("Record", file="r.amr", url=""),
+        _Comp("File", name="f.zip", file="f.zip", url="https://x/f.zip"),
+        _Comp("Node", content=[_Comp("Plain", text="m")]),
+    ]
+    e = _fake_event(message=msg)
+    cs = extract_components(e)
+    kinds = [c.kind for c in cs]
+    assert kinds == ["text", "image", "image", "json", "video", "voice", "file", "forward"], kinds
+    # 商城表情: 无 url 但保留 file_id + raw（供 component fetcher 回退）
+    assert cs[2].kind == "image" and cs[2].url is None and cs[2].file_id == "market_emoji_fileid"
+    assert cs[2].raw is msg[2]
+    # 表情存为 json 元数据
+    assert cs[3].kind == "json" and cs[3].meta["data"]["face_id"] == 178
+    assert cs[1].url == "https://x/a.jpg" and cs[1].is_media
+    print("  OK ->", kinds)
+
+
 def test_components_text_only_fallback():
     banner("components: text-only event returns single text component")
     e = _fake_event(message=[{"type": "text", "data": {"text": "hello"}}])
@@ -724,6 +759,7 @@ PHASE1 = [
     test_policy_blacklist,
     test_policy_private_skipped,
     test_components_extract_onebot_segments,
+    test_components_extract_astrbot_objects,
     test_components_text_only_fallback,
     test_components_no_message_obj,
     test_reporter_format_batch_ok,

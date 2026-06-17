@@ -33,7 +33,8 @@ from .warden import (
 )
 from .warden.components import Component
 from .warden.downloader import (
-    aiohttp_fetcher, download, download_many, DownloadError,
+    aiohttp_fetcher, astrbot_component_fetcher,
+    download, download_many, DownloadError,
 )
 from .warden.storage import Storage, SaveContext
 
@@ -194,8 +195,9 @@ class MediaWardenStar(Star):
             async with sem:
                 try:
                     return await download(
-                        c, fetcher=aiohttp_fetcher,
+                        c, fetcher=astrbot_component_fetcher,
                         retries=self.cfg.download_retries,
+                        max_bytes=self.cfg.max_file_size_bytes,
                     )
                 except DownloadError as e:
                     return e
