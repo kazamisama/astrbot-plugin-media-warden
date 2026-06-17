@@ -102,16 +102,26 @@ def _format_ctx(ctx: SaveContext) -> dict:
 
 
 def render_filename(pattern: str, component: "Component", ctx: SaveContext,
-                    *, mime: Optional[str] = None) -> str:
+                    *, mime: Optional[str] = None, short_id: Optional[str] = None) -> str:
     fmt = _format_ctx(ctx)
     vars = dict(fmt)
-    vars["safe_name"] = _safe_name(component.name or component.file_id or "asset")
-    vars["ext"] = _guess_ext(component, mime)
+    ext = _guess_ext(component, mime)
+    # safe_name 去掉末尾与 ext 重复的后缀，避免 ".jpg..jpg" 双扩展名
+    raw_name = component.name or component.file_id or "asset"
+    base_name, name_ext = os.path.splitext(raw_name)
+    if name_ext and name_ext.lower() == ext.lower():
+        raw_name = base_name
+    vars["safe_name"] = _safe_name(raw_name)
+    vars["ext"] = ext
     vars["kind"] = component.kind
+    vars["short_id"] = (short_id or "")[:8] or "noid"
     try:
         rel = pattern.format(**vars)
     except KeyError as e:
         raise ValueError(f"unknown template variable: {e.args[0]!r}") from e
+    # 收尾再保险一道：压掉连续重复的同名扩展
+    if ext and rel.endswith(ext + ext):
+        rel = rel[: -len(ext)]
     rel = rel.replace("\\", "/")
     rel = re.sub(r"/+", "/", rel)
     if rel.startswith("/"):
@@ -142,8 +152,7 @@ class Storage:
     """本地落盘 + dedupe 复用."""
 
     def __init__(self, root: str, *, dedupe: bool = True,
-                 pattern: str = "{platform}/{group_id}/{date}/"
-                 "{sender_id}_{msg_id}_{idx}_{safe_name}.{ext}",
+                 pattern: str = "{date}/{group_id}/{sender_name}-{sender_id}/{time}_{kind}_{short_id}{ext}",
                  max_bytes: int = 100 * 1024 * 1024):
         self.root = os.path.abspath(root)
         self.dedupe = dedupe
@@ -176,7 +185,10 @@ class Storage:
                 return SaveResult(path=existing, size=len(data),
                                   reused=True, blake16=digest)
 
-        rel = render_filename(self.pattern, component, ctx, mime=mime)
+        rel = render_filename(
+            self.pattern, component, ctx, mime=mime,
+            short_id=(digest or _blake_digest(data)),
+        )
         full = os.path.join(self.root, rel)
         if os.path.exists(full) and digest:
             try:

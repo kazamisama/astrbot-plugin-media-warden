@@ -21,8 +21,8 @@
   },
   "filename_pattern": {
     "type": "string",
-    "default": "{platform}/{group_id}/{date}/{sender_id}_{msg_id}_{idx}_{safe_name}.{ext}",
-    "description": "文件相对路径模板，可用变量: {platform}/{group_id}/{sender_id}/{sender_name}/{date}/{time}/{msg_id}/{idx}/{safe_name}/{ext}/{kind}"
+    "default": "{date}/{group_id}/{sender_name}-{sender_id}/{time}_{kind}_{short_id}{ext}",
+    "description": "文件相对路径模板。可用变量: {platform} {group_id} {sender_id} {sender_name} {date} {time} {msg_id} {idx} {kind} {short_id} {safe_name} {ext}。{ext} 以 . 开头(如 .jpg)，直接接在模板末尾，勿再写额外的 . 号。"
   },
   "forward_render_mode": {
     "type": "string",

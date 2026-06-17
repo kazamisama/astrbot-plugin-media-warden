@@ -250,7 +250,7 @@ class MediaWardenStar(Star):
                 ensure_ascii=False, indent=2,
             )
             comp_json = Component(
-                kind="json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
+                kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
                 raw=comp.raw,
             )
             try:
@@ -304,7 +304,7 @@ class MediaWardenStar(Star):
                     nodes, node_imgs=node_imgs,
                 )
                 comp_png = Component(
-                    kind="image", name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
+                    kind="forward_image", name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
                     raw=comp.raw,
                 )
                 sr = self._storage.save(png, comp_png, ctx, mime="image/png")

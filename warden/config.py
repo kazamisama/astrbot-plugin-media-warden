@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.3.7"
+VERSION = "1.4.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -18,8 +18,7 @@ class MediaWardenConfig:
     match_mode: str = "whitelist"
     storage_root: str = "data/warden"
     filename_pattern: str = (
-        "{platform}/{group_id}/{date}/"
-        "{sender_id}_{msg_id}_{idx}_{safe_name}.{ext}"
+        "{date}/{group_id}/{sender_name}-{sender_id}/{time}_{kind}_{short_id}{ext}"
     )
     forward_render_mode: str = "image"
     forward_image_engine: str = "pil"
