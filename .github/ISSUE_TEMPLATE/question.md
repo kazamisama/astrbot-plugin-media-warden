@@ -1,4 +1,4 @@
-﻿name: Question
+name: Question
 about: 使用问题 / 求助
 title: "[q] "
 labels: question

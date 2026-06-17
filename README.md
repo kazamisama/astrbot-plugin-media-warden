@@ -1,4 +1,4 @@
-﻿# astrbot-plugin-media-warden
+# astrbot-plugin-media-warden
 
 [![smoke](https://github.com/kazamisama/astrbot-plugin-media-warden/actions/workflows/smoke.yml/badge.svg)](https://github.com/kazamisama/astrbot-plugin-media-warden/actions/workflows/smoke.yml)
 

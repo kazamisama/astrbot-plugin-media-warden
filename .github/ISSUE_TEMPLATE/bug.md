@@ -1,4 +1,4 @@
-﻿name: Bug report
+name: Bug report
 about: 报告 v1.3 warden 插件的 bug
 title: "[bug] "
 labels: bug

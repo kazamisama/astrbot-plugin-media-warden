@@ -1,4 +1,4 @@
-﻿# Contributing
+# Contributing
 
 感谢想为 `astrbot-plugin-media-warden` 添砖加瓦.下面是最常见的几种参与方式.
 

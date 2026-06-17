@@ -1,4 +1,4 @@
-﻿name: smoke
+name: smoke
 
 on:
   push:
