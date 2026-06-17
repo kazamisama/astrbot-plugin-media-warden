@@ -142,6 +142,8 @@ def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
                 nickname=None, message_id="m42", timestamp=None):
     class _PM:
         def __init__(self, p, g):
+            self.name = p
+            self.id = p
             self.platform = p
             self.channel_id = g
 
@@ -151,19 +153,33 @@ def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
             self.nickname = nick
 
     class _MO:
-        def __init__(self, m):
+        def __init__(self, m, gid, sender, mid, ts):
             self.message = m
+            self.group_id = gid
+            self.sender = sender
+            self.message_id = mid
+            self.timestamp = ts
 
     class _Result:
         def __init__(self, t): self.text = t
 
     class _Ev:
         def plain_result(self, t): return _Result(t)
+        def get_platform_name(self): return self.platform_meta.name
+        def get_group_id(self): return self.message_obj.group_id or ""
+        def get_sender_id(self):
+            s = getattr(self.message_obj, "sender", None)
+            return getattr(s, "user_id", "") if s else ""
+        def get_sender_name(self):
+            s = getattr(self.message_obj, "sender", None)
+            return (getattr(s, "nickname", None) or "") if s else ""
 
+    gid = group_id if is_group else None
+    sender_obj = _Sender(user_id, nickname)
     e = _Ev()
-    e.platform_meta = _PM(platform, group_id if is_group else None)
-    e.sender = _Sender(user_id, nickname)
-    e.message_obj = _MO(message) if message is not None else _MO(None)
+    e.platform_meta = _PM(platform, gid)
+    e.sender = sender_obj
+    e.message_obj = _MO(message, gid, sender_obj, message_id, timestamp)
     e.message_str = message_str
     e.message_id = message_id
     e.timestamp = timestamp

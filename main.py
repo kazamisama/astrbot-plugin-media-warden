@@ -20,6 +20,10 @@ from astrbot.api.event import filter, AstrMessageEvent
 from .warden import (
     MediaWardenConfig,
     evaluate,
+    event_platform,
+    event_group_id,
+    event_sender_id,
+    event_sender_name,
     extract_components,
     summarize,
     AssetResult,
@@ -123,16 +127,21 @@ class MediaWardenStar(Star):
                 )
             return
 
-        pm = getattr(event, "platform_meta", None)
-        platform = (getattr(pm, "platform", None) or "unknown").lower()
-        group_id = getattr(pm, "channel_id", None) or "unknown"
-        sender = getattr(event, "sender", None)
-        sender_id = (getattr(sender, "user_id", None) or "anon") if sender else "anon"
-        sender_name = (
-            getattr(sender, "nickname", None) or getattr(sender, "name", None) or sender_id
+        platform = (event_platform(event) or "unknown").lower()
+        group_id = event_group_id(event) or "unknown"
+        sender_id = event_sender_id(event) or "anon"
+        sender_name = event_sender_name(event) or sender_id
+        msg_obj = getattr(event, "message_obj", None)
+        msg_id = (
+            getattr(event, "message_id", None)
+            or (getattr(msg_obj, "message_id", None) if msg_obj else None)
+            or "nomsg"
         )
-        msg_id = getattr(event, "message_id", None) or "nomsg"
-        ts = int(getattr(event, "timestamp", None) or time.time())
+        ts = int(
+            getattr(event, "timestamp", None)
+            or (getattr(msg_obj, "timestamp", None) if msg_obj else None)
+            or time.time()
+        )
 
         if self.cfg.log_to_stdout:
             self._log(
