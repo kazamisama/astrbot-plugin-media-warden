@@ -342,6 +342,83 @@ class MediaWardenStar(Star):
         self._log(f"forward fetched: {len(messages)} nodes for id={fwd_id}")
         return messages
 
+    @staticmethod
+    def _forward_node_content(node: Any):
+        if not isinstance(node, dict):
+            return None
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        return (
+            data.get("content")
+            or node.get("content")
+            or data.get("message")
+            or node.get("message")
+        )
+
+    @staticmethod
+    def _forward_seg_id(seg: Any):
+        if not isinstance(seg, dict):
+            return None
+        data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+        return data.get("id") or data.get("resid") or data.get("res_id")
+
+    @staticmethod
+    def _forward_seg_inline_nodes(seg: Any):
+        if not isinstance(seg, dict):
+            return None
+        data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+        nodes = (
+            data.get("content")
+            or seg.get("content")
+            or data.get("message")
+            or seg.get("message")
+        )
+        return nodes if isinstance(nodes, list) else None
+
+    async def _expand_forward_nodes(self, raw_nodes, event: AstrMessageEvent | None,
+                                    *, depth: int = 0, max_depth: int = 2):
+        """展开节点内容里嵌套的合并转发,最多展开 max_depth 层."""
+        if not isinstance(raw_nodes, list):
+            return raw_nodes
+        if depth >= max_depth:
+            return raw_nodes
+
+        expanded = []
+        for node in raw_nodes:
+            expanded.append(node)
+            content = self._forward_node_content(node)
+            if not isinstance(content, list):
+                continue
+            for seg in content:
+                if not isinstance(seg, dict):
+                    continue
+                seg_type = (seg.get("type") or "").lower()
+                if seg_type not in ("node", "nodes", "forward"):
+                    continue
+                nested_nodes = self._forward_seg_inline_nodes(seg)
+                if not nested_nodes:
+                    fwd_id = self._forward_seg_id(seg)
+                    if fwd_id:
+                        nested_nodes = await self._fetch_forward_nodes(
+                            Component(
+                                kind="forward",
+                                meta={"nodes": None, "forward_id": fwd_id},
+                                raw=seg,
+                            ),
+                            event,
+                        )
+                if nested_nodes:
+                    nested_nodes = await self._expand_forward_nodes(
+                        nested_nodes, event, depth=depth + 1,
+                        max_depth=max_depth,
+                    )
+                    expanded.extend(nested_nodes)
+        if len(expanded) != len(raw_nodes):
+            self._log(
+                f"forward nested expanded: {len(raw_nodes)} -> {len(expanded)} "
+                f"nodes (depth<={max_depth})"
+            )
+        return expanded
+
     async def _save_forward(self, comp: Component, ctx: SaveContext,
                             event: AstrMessageEvent | None = None
                             ) -> list[AssetResult]:
@@ -353,6 +430,9 @@ class MediaWardenStar(Star):
             fetched = await self._fetch_forward_nodes(comp, event)
             if fetched:
                 comp.meta["nodes"] = fetched
+        raw_nodes = (comp.meta or {}).get("nodes")
+        if raw_nodes:
+            comp.meta["nodes"] = await self._expand_forward_nodes(raw_nodes, event)
         nodes = from_component(comp)
         results: list[AssetResult] = []
 

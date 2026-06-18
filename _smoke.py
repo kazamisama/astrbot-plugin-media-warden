@@ -1182,6 +1182,94 @@ def test_plugin_e2e_forward_too_large_falls_back_to_json():
         print("  OK -> JSON only (over limit), jsons=%d" % jsons)
 
 
+def test_plugin_e2e_forward_expands_nested_two_levels():
+    """端到端: 嵌套合并转发最多展开 2 层后再保存 JSON."""
+    import asyncio
+    import json
+    ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(ctx, config={
+            "storage_root": td,
+            "target_groups": ["aiocqhttp:g1"],
+            "target_users": ["u1"],
+            "forward_render_mode": "json",
+            "enable_index_db": True,
+        })
+        asyncio.run(inst.initialize())
+
+        responses = {
+            "inner1": [
+                {"type": "node", "data": {
+                    "user_id": "u3", "nickname": "carol",
+                    "time": 1718600001,
+                    "content": [
+                        {"type": "text", "data": {"text": "inner one"}},
+                        {"type": "forward", "data": {"id": "inner2"}},
+                    ],
+                }},
+            ],
+            "inner2": [
+                {"type": "node", "data": {
+                    "user_id": "u4", "nickname": "dave",
+                    "time": 1718600002,
+                    "content": [
+                        {"type": "text", "data": {"text": "inner two"}},
+                    ],
+                }},
+            ],
+        }
+        calls = []
+
+        class _Bot:
+            async def call_action(self, action, **kwargs):
+                assert action == "get_forward_msg"
+                fwd_id = kwargs.get("message_id") or kwargs.get("id")
+                calls.append(fwd_id)
+                return {"messages": responses[fwd_id]}
+
+        ev = _fake_event(
+            group_id="g1", user_id="u1", nickname="alice",
+            message=[{"type": "node", "data": {"content": [
+                {"type": "node", "data": {
+                    "user_id": "u2", "nickname": "bob",
+                    "time": 1718600000,
+                    "content": [
+                        {"type": "text", "data": {"text": "outer"}},
+                        {"type": "forward", "data": {"id": "inner1"}},
+                    ],
+                }},
+            ]}}],
+            message_id="m301", timestamp=1718600000,
+        )
+        ev.bot = _Bot()
+
+        async def _drive():
+            gen = inst.on_group_message(ev)
+            return await anext(gen)
+
+        first = asyncio.run(_drive())
+        text = first.text if hasattr(first, "text") else str(first)
+        assert "forward×1" in text, text
+        assert calls == ["inner1", "inner2"], calls
+
+        found = []
+        for root, _, fs in os.walk(td):
+            for f in fs:
+                p = os.path.join(root, f)
+                if p.endswith(".json") and "forward" in f:
+                    with open(p, "r", encoding="utf-8") as fh:
+                        found.append(json.load(fh))
+        assert found, "no forward sidecar"
+        payload = found[0]
+        assert payload["node_count"] == 3, payload
+        dumped = json.dumps(payload, ensure_ascii=False)
+        assert "outer" in dumped and "inner one" in dumped and "inner two" in dumped
+        if inst._index is not None:
+            inst._index.close()
+            inst._index = None
+        print("  OK -> nested calls=%s node_count=%s" % (calls, payload["node_count"]))
+
+
 def _close_index_safely(inst):
     if inst is not None and getattr(inst, "_index", None) is not None:
         try:
@@ -1602,6 +1690,7 @@ PHASE3 = [
     test_index_export_json,
     test_plugin_e2e_forward_both_modes,
     test_plugin_e2e_forward_too_large_falls_back_to_json,
+    test_plugin_e2e_forward_expands_nested_two_levels,
     test_plugin_warden_stats_command,
     test_plugin_warden_list_command,
     test_plugin_warden_export_command,

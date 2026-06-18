@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.10
+
+### Added
+- Expand nested forwarded chat records up to 2 levels before JSON saving and image rendering.
+
 ## v1.4.9
 
 ### Fixed
