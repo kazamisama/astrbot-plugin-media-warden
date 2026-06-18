@@ -76,14 +76,26 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
         data = nd.get("data") or {}
         if not isinstance(data, dict):
             data = {}
-        sender_id = str(data.get("user_id") or data.get("sender_id") or data.get("uin") or "?")
-        sender_name = str(data.get("nickname") or data.get("name") or sender_id)
+        # napcat get_forward_msg 返回的节点: sender 是嵌套 dict, 内容在顶层 message,
+        # time 在顶层; OneBot node 段: 信息在 data.* 里。两者都兼容。
+        sender = nd.get("sender") if isinstance(nd.get("sender"), dict) else {}
+        sender_id = str(
+            data.get("user_id") or data.get("sender_id") or data.get("uin")
+            or sender.get("user_id") or sender.get("uin") or "?"
+        )
+        sender_name = str(
+            data.get("nickname") or data.get("name")
+            or sender.get("nickname") or sender.get("card")
+            or sender_id
+        )
         ts = data.get("time")
+        if ts is None:
+            ts = nd.get("time")
         try:
             ts = int(ts) if ts is not None else 0
         except (TypeError, ValueError):
             ts = 0
-        # content: 优先 data.content (OneBot), 退到 data.message / nd.message
+        # content: 优先 data.content (OneBot), 退到 data.message / nd.message / nd.content
         content = (
             data.get("content")
             or nd.get("content")
@@ -134,8 +146,8 @@ class _RenderCfg:
     padding: int = 16
     gap: int = 12
     bubble_radius: int = 10
-    max_image_width: int = 360
-    max_image_height: int = 480
+    max_image_width: int = 720
+    max_image_height: int = 720
     title: str = "[合并转发]"
 
 
@@ -234,10 +246,12 @@ class Forwarder:
                 h += line_h(self._font, ln) + 2
             if nd.time:
                 h += 6 + line_h(self._font_time, _fmt_time(nd.time))
+            if imgs:
+                h += 8
             for im in imgs:
                 # 缩放到 max_image_width
                 w, ih = im.size
-                scale = min(cfg.max_image_width / max(w, 1), 1.0)
+                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh = max(1, int(ih * scale))
                 # 高度上限
@@ -289,9 +303,11 @@ class Forwarder:
                           font=self._font_time)
                 ty += line_h(self._font_time, _fmt_time(nd.time))
             # 图片
+            if imgs:
+                ty += 8
             for im in imgs:
                 w, ih = im.size
-                scale = min(cfg.max_image_width / max(w, 1), 1.0)
+                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh_im = max(1, int(ih * scale))
                 if nh_im > cfg.max_image_height:
@@ -299,7 +315,7 @@ class Forwarder:
                     scale2 = cfg.max_image_height / nh_im
                     nw = max(1, int(nw * scale2))
                     nh_im = cfg.max_image_height
-                im2 = im.resize((nw, nh_im))
+                im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
                 img.paste(im2, (tx, ty))
                 ty += nh_im + 6
             y += nh + cfg.gap
@@ -380,9 +396,11 @@ class Forwarder:
                 h += line_h(self._font, ln) + 2
             if nd.time:
                 h += 6 + line_h(self._font_time, _fmt_time(nd.time))
+            if imgs:
+                h += 8
             for im in imgs:
                 w, ih = im.size
-                scale = min(cfg.max_image_width / max(w, 1), 1.0)
+                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh_im = max(1, int(ih * scale))
                 if nh_im > cfg.max_image_height:
@@ -429,16 +447,18 @@ class Forwarder:
                 draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
                           font=self._font_time)
                 ty += line_h(self._font_time, _fmt_time(nd.time))
+            if imgs:
+                ty += 8
             for im in imgs:
                 w, ih = im.size
-                scale = min(cfg.max_image_width / max(w, 1), 1.0)
+                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh_im = max(1, int(ih * scale))
                 if nh_im > cfg.max_image_height:
                     scale2 = cfg.max_image_height / nh_im
                     nw = max(1, int(nw * scale2))
                     nh_im = cfg.max_image_height
-                im2 = im.resize((nw, nh_im))
+                im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
                 img.paste(im2, (tx, ty))
                 ty += nh_im + 6
             y += nh + cfg.gap

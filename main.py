@@ -40,6 +40,22 @@ from .warden.downloader import (
 from .warden.storage import Storage, SaveContext
 
 
+def _upgrade_qq_image_url(url: str) -> str:
+    """把 QQ 图床的缩略图 url 升级为原图 url。
+
+    napcat/OneBot 合并转发节点里的 image url 多为缩略 jpeg，
+    gchat.qpic.cn 域带 is_origin=0。把它改成 is_origin=1 即可拿原图。
+    不是 QQ 图床 url / 拿不准时原样返回，由调用方回退。
+    """
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return url
+    if "gchat.qpic.cn" not in url and "multimedia.nt.qq" not in url:
+        return url
+    if "is_origin=0" in url:
+        return url.replace("is_origin=0", "is_origin=1")
+    return url
+
+
 @register(
     "media-warden",
     "shirley",
@@ -177,7 +193,7 @@ class MediaWardenStar(Star):
                 platform=platform, group_id=group_id, sender_id=sender_id,
                 sender_name=sender_name, msg_id=msg_id, idx=idx, ts=ts,
             )
-            for r in await self._save_forward(comp, ctx):
+            for r in await self._save_forward(comp, ctx, event):
                 batch.items.append(r)
 
         batch.duration_s = time.time() - t0
@@ -272,9 +288,71 @@ class MediaWardenStar(Star):
 
     # ----------------- 内部:转发处理(同 v1.2) -----------------
 
-    async def _save_forward(self, comp: Component, ctx: SaveContext
+    async def _fetch_forward_nodes(self, comp: Component,
+                                   event: AstrMessageEvent | None):
+        """用 OneBot get_forward_msg 拉取合并转发的节点内容。
+
+        返回 OneBot node 风格的 list, 失败返回 None。
+        """
+        if event is None:
+            return None
+        fwd_id = (comp.meta or {}).get("forward_id")
+        if not fwd_id:
+            # 从 raw_message 兑底找 forward id
+            obj = getattr(event, "message_obj", None)
+            raw = getattr(obj, "raw_message", None) if obj is not None else None
+            segs = None
+            if isinstance(raw, dict):
+                segs = raw.get("message")
+            if isinstance(segs, list):
+                for seg in segs:
+                    if isinstance(seg, dict) and (seg.get("type") or "").lower() == "forward":
+                        d = seg.get("data") or {}
+                        fwd_id = d.get("id") or d.get("resid") or d.get("res_id")
+                        if fwd_id:
+                            break
+        if not fwd_id:
+            self._log("forward fetch: no forward_id, fallback to JSON")
+            return None
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            self._log("forward fetch: event has no bot (non-aiocqhttp?), fallback")
+            return None
+        call = getattr(bot, "call_action", None)
+        if not callable(call):
+            self._log("forward fetch: bot has no call_action, fallback")
+            return None
+        try:
+            resp = await call("get_forward_msg", message_id=str(fwd_id))
+        except Exception as e:
+            try:
+                resp = await call("get_forward_msg", id=str(fwd_id))
+            except Exception as e2:
+                self._log(f"forward fetch failed: {e!r} / {e2!r}")
+                return None
+        messages = None
+        if isinstance(resp, dict):
+            messages = resp.get("messages") or resp.get("message")
+            data = resp.get("data")
+            if messages is None and isinstance(data, dict):
+                messages = data.get("messages") or data.get("message")
+        if not isinstance(messages, list) or not messages:
+            self._log(f"forward fetch: empty messages for id={fwd_id}")
+            return None
+        self._log(f"forward fetched: {len(messages)} nodes for id={fwd_id}")
+        return messages
+
+    async def _save_forward(self, comp: Component, ctx: SaveContext,
+                            event: AstrMessageEvent | None = None
                             ) -> list[AssetResult]:
         from .warden.forwarder import from_component
+        # napcat 等 OneBot 实现的合并转发只携带 forward id,
+        # 节点内容不在消息体里, 需要用 get_forward_msg 主动拉取。
+        inline_nodes = (comp.meta or {}).get("nodes")
+        if not inline_nodes:
+            fetched = await self._fetch_forward_nodes(comp, event)
+            if fetched:
+                comp.meta["nodes"] = fetched
         nodes = from_component(comp)
         results: list[AssetResult] = []
 
@@ -326,6 +404,17 @@ class MediaWardenStar(Star):
             node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
             if all_urls:
                 async def _fetch(url: str) -> bytes:
+                    hi = _upgrade_qq_image_url(url)
+                    if hi != url:
+                        try:
+                            dl = await download(
+                                Component(kind="image", url=hi),
+                                fetcher=aiohttp_fetcher,
+                                retries=self.cfg.download_retries,
+                            )
+                            return dl.data
+                        except DownloadError:
+                            pass
                     dl = await download(
                         Component(kind="image", url=url),
                         fetcher=aiohttp_fetcher,
