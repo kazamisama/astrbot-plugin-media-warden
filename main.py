@@ -374,17 +374,28 @@ class MediaWardenStar(Star):
         )
         return nodes if isinstance(nodes, list) else None
 
+    @staticmethod
+    def _tag_forward_node_depth(node: Any, depth: int):
+        if not isinstance(node, dict):
+            return node
+        tagged = dict(node)
+        tagged["__warden_nested_depth"] = max(0, int(depth))
+        return tagged
+
     async def _expand_forward_nodes(self, raw_nodes, event: AstrMessageEvent | None,
                                     *, depth: int = 0, max_depth: int = 2):
         """展开节点内容里嵌套的合并转发,最多展开 max_depth 层."""
         if not isinstance(raw_nodes, list):
             return raw_nodes
-        if depth >= max_depth:
+        if depth > max_depth:
             return raw_nodes
+        can_expand_nested = depth < max_depth
 
         expanded = []
         for node in raw_nodes:
-            expanded.append(node)
+            expanded.append(self._tag_forward_node_depth(node, depth))
+            if not can_expand_nested:
+                continue
             content = self._forward_node_content(node)
             if not isinstance(content, list):
                 continue
@@ -426,10 +437,15 @@ class MediaWardenStar(Star):
         # napcat 等 OneBot 实现的合并转发只携带 forward id,
         # 节点内容不在消息体里, 需要用 get_forward_msg 主动拉取。
         inline_nodes = (comp.meta or {}).get("nodes")
-        if not inline_nodes:
+        fetched = None
+        if (comp.meta or {}).get("forward_id") or not inline_nodes:
             fetched = await self._fetch_forward_nodes(comp, event)
-            if fetched:
-                comp.meta["nodes"] = fetched
+        if fetched:
+            if inline_nodes:
+                self._log(
+                    "forward fetch: replace inline nodes with fetched nodes"
+                )
+            comp.meta["nodes"] = fetched
         raw_nodes = (comp.meta or {}).get("nodes")
         if raw_nodes:
             comp.meta["nodes"] = await self._expand_forward_nodes(raw_nodes, event)

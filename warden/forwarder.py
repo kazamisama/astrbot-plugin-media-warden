@@ -59,6 +59,7 @@ class ForwardNode:
     text: str
     time: int          # unix seconds
     image_urls: List[str]   # 节点内图片 URL 列表
+    nesting_depth: int = 0
 
 
 def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
@@ -95,6 +96,15 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
             ts = int(ts) if ts is not None else 0
         except (TypeError, ValueError):
             ts = 0
+        try:
+            nesting_depth = int(
+                nd.get("__warden_nested_depth")
+                or data.get("__warden_nested_depth")
+                or 0
+            )
+        except (TypeError, ValueError):
+            nesting_depth = 0
+        nesting_depth = max(0, min(nesting_depth, 2))
         # content: 优先 data.content (OneBot), 退到 data.message / nd.message / nd.content
         content = (
             data.get("content")
@@ -126,6 +136,7 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
             text="\n".join([p for p in text_parts if p]),
             time=ts,
             image_urls=image_urls,
+            nesting_depth=nesting_depth,
         ))
     return out
 
@@ -149,6 +160,27 @@ class _RenderCfg:
     max_image_width: int = 720
     max_image_height: int = 720
     title: str = "[合并转发]"
+
+
+def _node_depth(node: ForwardNode) -> int:
+    try:
+        return max(0, min(int(getattr(node, "nesting_depth", 0)), 2))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bubble_layout(cfg: _RenderCfg, node: ForwardNode):
+    depth = _node_depth(node)
+    indent = depth * 24
+    bubble_x = cfg.padding + indent
+    bubble_w = max(160, cfg.width - cfg.padding * 2 - indent)
+    return depth, bubble_x, bubble_w
+
+
+def _bubble_style(cfg: _RenderCfg, node: ForwardNode):
+    if _node_depth(node) <= 0:
+        return cfg.bubble_bg, cfg.bubble_border
+    return (250, 252, 255), (174, 195, 224)
 
 
 class Forwarder:
@@ -234,9 +266,8 @@ class Forwarder:
             node_images = [[] for _ in nodes]
 
         # 逐节点计算高度
-        inner_w = cfg.width - cfg.padding * 2
-        bubble_w = inner_w
         for nd, imgs in zip(nodes, node_images):
+            _, _, bubble_w = _bubble_layout(cfg, nd)
             text_w = bubble_w - cfg.padding * 2
             lines = wrap_text(nd.text, self._font, text_w)
             h = cfg.padding  # 顶 padding
@@ -276,14 +307,22 @@ class Forwarder:
         y += line_h(self._font_header, cfg.title) + 8
 
         for nd, imgs, nh in zip(nodes, node_images, node_heights):
+            depth, bubble_x, bubble_w = _bubble_layout(cfg, nd)
+            bubble_bg, bubble_border = _bubble_style(cfg, nd)
             # 气泡背景
             draw.rounded_rectangle(
-                (cfg.padding, y, cfg.padding + bubble_w, y + nh),
+                (bubble_x, y, bubble_x + bubble_w, y + nh),
                 radius=cfg.bubble_radius,
-                fill=cfg.bubble_bg,
-                outline=cfg.bubble_border,
+                fill=bubble_bg,
+                outline=bubble_border,
             )
-            tx = cfg.padding + cfg.padding
+            if depth:
+                draw.line(
+                    (bubble_x + 7, y + 10, bubble_x + 7, y + nh - 10),
+                    fill=bubble_border,
+                    width=3,
+                )
+            tx = bubble_x + cfg.padding
             ty = y + cfg.padding
             draw.text((tx, ty), nd.sender_name or "anon",
                       fill=cfg.header_color, font=self._font_header)
@@ -374,10 +413,9 @@ class Forwarder:
                     lines.append(cur)
             return lines
 
-        inner_w = cfg.width - cfg.padding * 2
-        bubble_w = inner_w
         node_heights: List[int] = []
         for nd, imgs in zip(nodes, node_pil):
+            _, _, bubble_w = _bubble_layout(cfg, nd)
             text_w = bubble_w - cfg.padding * 2
             lines = wrap_text(nd.text, self._font, text_w)
             h = cfg.padding
@@ -415,13 +453,21 @@ class Forwarder:
         y += line_h(self._font_header, cfg.title) + 8
 
         for nd, imgs, nh in zip(nodes, node_pil, node_heights):
+            depth, bubble_x, bubble_w = _bubble_layout(cfg, nd)
+            bubble_bg, bubble_border = _bubble_style(cfg, nd)
             draw.rounded_rectangle(
-                (cfg.padding, y, cfg.padding + bubble_w, y + nh),
+                (bubble_x, y, bubble_x + bubble_w, y + nh),
                 radius=cfg.bubble_radius,
-                fill=cfg.bubble_bg,
-                outline=cfg.bubble_border,
+                fill=bubble_bg,
+                outline=bubble_border,
             )
-            tx = cfg.padding + cfg.padding
+            if depth:
+                draw.line(
+                    (bubble_x + 7, y + 10, bubble_x + 7, y + nh - 10),
+                    fill=bubble_border,
+                    width=3,
+                )
+            tx = bubble_x + cfg.padding
             ty = y + cfg.padding
             draw.text((tx, ty), nd.sender_name or "anon",
                       fill=cfg.header_color, font=self._font_header)

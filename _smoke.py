@@ -998,6 +998,25 @@ def test_forwarder_can_handle_node_limit():
     print("  OK")
 
 
+def test_forwarder_render_nested_frame():
+    banner("forwarder: render nested nodes with framed indentation")
+    import asyncio
+    import io
+    from PIL import Image
+    from warden.forwarder import Forwarder, ForwardNode
+
+    fwd = Forwarder(width=400, max_nodes=30)
+    nodes = [
+        ForwardNode("alice", "u1", "outer", 1718600000, []),
+        ForwardNode("bob", "u2", "inner", 1718600001, [], nesting_depth=1),
+        ForwardNode("carol", "u3", "inner again", 1718600002, [], nesting_depth=2),
+    ]
+    png = asyncio.run(fwd.render(nodes))
+    img = Image.open(io.BytesIO(png))
+    assert img.size[0] == 400 and img.size[1] > 200
+    print("  OK ->", img.size)
+
+
 def test_index_record_and_recent():
     banner("index: record + recent roundtrip")
     import tempfile
@@ -1262,12 +1281,90 @@ def test_plugin_e2e_forward_expands_nested_two_levels():
         assert found, "no forward sidecar"
         payload = found[0]
         assert payload["node_count"] == 3, payload
+        assert [n.get("__warden_nested_depth") for n in payload["nodes"]] == [0, 1, 2]
         dumped = json.dumps(payload, ensure_ascii=False)
         assert "outer" in dumped and "inner one" in dumped and "inner two" in dumped
         if inst._index is not None:
             inst._index.close()
             inst._index = None
         print("  OK -> nested calls=%s node_count=%s" % (calls, payload["node_count"]))
+
+
+def test_plugin_e2e_forward_prefers_fetched_sender_names():
+    """端到端: 顶层有 forward id 时优先用 get_forward_msg 的完整昵称."""
+    import asyncio
+    import json
+    ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(ctx, config={
+            "storage_root": td,
+            "target_groups": ["aiocqhttp:g1"],
+            "target_users": ["u1"],
+            "forward_render_mode": "json",
+            "enable_index_db": True,
+        })
+        asyncio.run(inst.initialize())
+        calls = []
+
+        class _Bot:
+            async def call_action(self, action, **kwargs):
+                assert action == "get_forward_msg"
+                fwd_id = kwargs.get("message_id") or kwargs.get("id")
+                calls.append(fwd_id)
+                assert fwd_id == "outer-full"
+                return {"messages": [
+                    {"type": "node", "data": {
+                        "user_id": "u2", "nickname": "真实昵称",
+                        "time": 1718600000,
+                        "content": [
+                            {"type": "text", "data": {"text": "fetched"}},
+                        ],
+                    }},
+                ]}
+
+        ev = _fake_event(
+            group_id="g1", user_id="u1", nickname="alice",
+            message=[{"type": "node", "data": {
+                "id": "outer-full",
+                "content": [
+                    {"type": "node", "data": {
+                        "user_id": "u2", "nickname": "QQ用户",
+                        "time": 1718600000,
+                        "content": [
+                            {"type": "text", "data": {"text": "inline"}},
+                        ],
+                    }},
+                ],
+            }}],
+            message_id="m302", timestamp=1718600000,
+        )
+        ev.bot = _Bot()
+
+        async def _drive():
+            gen = inst.on_group_message(ev)
+            return await anext(gen)
+
+        first = asyncio.run(_drive())
+        text = first.text if hasattr(first, "text") else str(first)
+        assert "forward×1" in text, text
+        assert calls == ["outer-full"], calls
+
+        found = []
+        for root, _, fs in os.walk(td):
+            for f in fs:
+                p = os.path.join(root, f)
+                if p.endswith(".json") and "forward" in f:
+                    with open(p, "r", encoding="utf-8") as fh:
+                        found.append(json.load(fh))
+        assert found, "no forward sidecar"
+        dumped = json.dumps(found[0], ensure_ascii=False)
+        assert "真实昵称" in dumped, dumped
+        assert "QQ用户" not in dumped, dumped
+        assert "fetched" in dumped and "inline" not in dumped, dumped
+        if inst._index is not None:
+            inst._index.close()
+            inst._index = None
+        print("  OK -> fetched sender name wins")
 
 
 def _close_index_safely(inst):
@@ -1684,6 +1781,7 @@ PHASE3 = [
     test_forwarder_render_text_only,
     test_forwarder_render_with_image,
     test_forwarder_can_handle_node_limit,
+    test_forwarder_render_nested_frame,
     test_index_record_and_recent,
     test_index_find_by_sha,
     test_index_stats,
@@ -1691,6 +1789,7 @@ PHASE3 = [
     test_plugin_e2e_forward_both_modes,
     test_plugin_e2e_forward_too_large_falls_back_to_json,
     test_plugin_e2e_forward_expands_nested_two_levels,
+    test_plugin_e2e_forward_prefers_fetched_sender_names,
     test_plugin_warden_stats_command,
     test_plugin_warden_list_command,
     test_plugin_warden_export_command,

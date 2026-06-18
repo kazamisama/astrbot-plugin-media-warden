@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.11
+
+### Added
+- Render nested forwarded chat records with indented framed bubbles.
+
+### Fixed
+- Prefer `get_forward_msg` nodes over inline nodes when a top-level forward id is available, so first-level sender names can use the full fetched metadata instead of generic `QQ用户`.
+
 ## v1.4.10
 
 ### Added
