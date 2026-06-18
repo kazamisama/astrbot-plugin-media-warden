@@ -171,7 +171,7 @@ def _node_depth(node: ForwardNode) -> int:
 
 def _bubble_layout(cfg: _RenderCfg, node: ForwardNode):
     depth = _node_depth(node)
-    indent = depth * 24
+    indent = 0
     bubble_x = cfg.padding + indent
     bubble_w = max(160, cfg.width - cfg.padding * 2 - indent)
     return depth, bubble_x, bubble_w

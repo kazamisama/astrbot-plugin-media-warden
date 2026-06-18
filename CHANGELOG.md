@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.12
+
+### Changed
+- Reduce nested forwarded-message indentation so framed replies keep more content width.
+
 ## v1.4.11
 
 ### Added
