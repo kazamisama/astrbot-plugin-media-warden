@@ -239,7 +239,10 @@ def test_components_extract_onebot_segments():
         {"type": "file",  "data": {"file": "f.zip", "name": "f.zip", "file_size": "2048"}},
         {"type": "video", "data": {"file": "v.mp4"}},
         {"type": "json",  "data": {"data": "{\"a\":1}"}},
-        {"type": "node",  "data": {"content": [{"type": "text", "data": {"text": "merged"}}]}},
+        {"type": "node",  "data": {
+            "resid": "outer-resid",
+            "content": [{"type": "text", "data": {"text": "merged"}}],
+        }},
     ])
     cs = extract_components(e)
     kinds = [c.kind for c in cs]
@@ -247,6 +250,7 @@ def test_components_extract_onebot_segments():
     assert cs[1].url == "https://x/a.jpg"
     assert cs[3].name == "f.zip" and cs[3].size == 2048
     assert cs[6].is_forward and isinstance(cs[6].meta.get("nodes"), list)
+    assert cs[6].meta.get("forward_id") == "outer-resid"
     print("  OK ->", kinds)
 
 
@@ -1325,7 +1329,7 @@ def test_plugin_e2e_forward_prefers_fetched_sender_names():
         ev = _fake_event(
             group_id="g1", user_id="u1", nickname="alice",
             message=[{"type": "node", "data": {
-                "id": "outer-full",
+                "resid": "outer-full",
                 "content": [
                     {"type": "node", "data": {
                         "user_id": "u2", "nickname": "QQ用户",

@@ -298,6 +298,8 @@ class MediaWardenStar(Star):
             return None
         fwd_id = (comp.meta or {}).get("forward_id")
         if not fwd_id:
+            fwd_id = self._forward_seg_id(comp.raw)
+        if not fwd_id:
             # 从 raw_message 兑底找 forward id
             obj = getattr(event, "message_obj", None)
             raw = getattr(obj, "raw_message", None) if obj is not None else None
@@ -306,9 +308,10 @@ class MediaWardenStar(Star):
                 segs = raw.get("message")
             if isinstance(segs, list):
                 for seg in segs:
-                    if isinstance(seg, dict) and (seg.get("type") or "").lower() == "forward":
-                        d = seg.get("data") or {}
-                        fwd_id = d.get("id") or d.get("resid") or d.get("res_id")
+                    if isinstance(seg, dict):
+                        seg_type = (seg.get("type") or "").lower()
+                        if seg_type in ("node", "nodes", "forward"):
+                            fwd_id = self._forward_seg_id(seg)
                         if fwd_id:
                             break
         if not fwd_id:
@@ -356,10 +359,16 @@ class MediaWardenStar(Star):
 
     @staticmethod
     def _forward_seg_id(seg: Any):
-        if not isinstance(seg, dict):
+        if isinstance(seg, dict):
+            data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+            return data.get("id") or data.get("resid") or data.get("res_id")
+        if seg is None:
             return None
-        data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
-        return data.get("id") or data.get("resid") or data.get("res_id")
+        for name in ("id", "resid", "res_id"):
+            val = getattr(seg, name, None)
+            if val:
+                return val
+        return None
 
     @staticmethod
     def _forward_seg_inline_nodes(seg: Any):
@@ -438,7 +447,11 @@ class MediaWardenStar(Star):
         # 节点内容不在消息体里, 需要用 get_forward_msg 主动拉取。
         inline_nodes = (comp.meta or {}).get("nodes")
         fetched = None
-        if (comp.meta or {}).get("forward_id") or not inline_nodes:
+        if (
+            (comp.meta or {}).get("forward_id")
+            or self._forward_seg_id(comp.raw)
+            or not inline_nodes
+        ):
             fetched = await self._fetch_forward_nodes(comp, event)
         if fetched:
             if inline_nodes:

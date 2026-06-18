@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.13
+
+### Fixed
+- Extract top-level forward ids from `resid` / `res_id` and `nodes` segments so fetched sender names can replace generic inline names like `QQ用户`.
+
 ## v1.4.12
 
 ### Changed

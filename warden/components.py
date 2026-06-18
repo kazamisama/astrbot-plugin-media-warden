@@ -115,7 +115,7 @@ def _coerce_obj(item: Any) -> Component:
         return Component(kind="json", meta={"data": g("data")}, raw=item)
     if tn in ("node", "nodes", "forward"):
         nodes = getattr(item, "content", None)
-        fwd_id = getattr(item, "id", None)
+        fwd_id = g("id", "resid", "res_id")
         return Component(
             kind="forward",
             meta={"nodes": nodes, "forward_id": fwd_id},
@@ -176,9 +176,11 @@ def _coerce_one(item: Any) -> Component:
         )
     if t == "json":
         return Component(kind="json", meta={"data": data.get("data")}, raw=item)
-    if t in ("node", "forward"):
+    if t in ("node", "nodes", "forward"):
         nodes = data.get("content") if isinstance(data, dict) else None
-        fwd_id = data.get("id") if isinstance(data, dict) else None
+        fwd_id = (
+            data.get("id") or data.get("resid") or data.get("res_id")
+        ) if isinstance(data, dict) else None
         return Component(
             kind="forward",
             meta={"nodes": nodes, "forward_id": fwd_id},
