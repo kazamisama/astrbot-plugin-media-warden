@@ -171,7 +171,7 @@ def _node_depth(node: ForwardNode) -> int:
 
 def _bubble_layout(cfg: _RenderCfg, node: ForwardNode):
     depth = _node_depth(node)
-    indent = 0
+    indent = depth * 6
     bubble_x = cfg.padding + indent
     bubble_w = max(160, cfg.width - cfg.padding * 2 - indent)
     return depth, bubble_x, bubble_w
@@ -181,6 +181,15 @@ def _bubble_style(cfg: _RenderCfg, node: ForwardNode):
     if _node_depth(node) <= 0:
         return cfg.bubble_bg, cfg.bubble_border
     return (250, 252, 255), (174, 195, 224)
+
+
+def _nested_line_color(node: ForwardNode):
+    depth = _node_depth(node)
+    if depth == 1:
+        return (104, 151, 217)
+    if depth == 2:
+        return (151, 122, 214)
+    return (174, 195, 224)
 
 
 class Forwarder:
@@ -319,7 +328,7 @@ class Forwarder:
             if depth:
                 draw.line(
                     (bubble_x + 7, y + 10, bubble_x + 7, y + nh - 10),
-                    fill=bubble_border,
+                    fill=_nested_line_color(nd),
                     width=3,
                 )
             tx = bubble_x + cfg.padding
@@ -464,7 +473,7 @@ class Forwarder:
             if depth:
                 draw.line(
                     (bubble_x + 7, y + 10, bubble_x + 7, y + nh - 10),
-                    fill=bubble_border,
+                    fill=_nested_line_color(nd),
                     width=3,
                 )
             tx = bubble_x + cfg.padding

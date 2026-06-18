@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.14
+
+### Changed
+- Restore a subtle 6px-per-level indentation for nested forwarded messages.
+- Use distinct left-rail colors for different nested forwarded-message levels.
+
 ## v1.4.13
 
 ### Fixed
