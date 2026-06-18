@@ -254,10 +254,6 @@ class Forwarder:
                 scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh = max(1, int(ih * scale))
-                # 高度上限
-                if nh > cfg.max_image_height:
-                    extra = nh - cfg.max_image_height
-                    nh = cfg.max_image_height
                 h += nh + 6
             h += cfg.padding  # 底 padding
             node_heights.append(h)
@@ -310,11 +306,6 @@ class Forwarder:
                 scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh_im = max(1, int(ih * scale))
-                if nh_im > cfg.max_image_height:
-                    # 等比缩到高度上限
-                    scale2 = cfg.max_image_height / nh_im
-                    nw = max(1, int(nw * scale2))
-                    nh_im = cfg.max_image_height
                 im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
                 img.paste(im2, (tx, ty))
                 ty += nh_im + 6
@@ -403,9 +394,6 @@ class Forwarder:
                 scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh_im = max(1, int(ih * scale))
-                if nh_im > cfg.max_image_height:
-                    extra = nh_im - cfg.max_image_height
-                    nh_im = cfg.max_image_height
                 h += nh_im + 6
             h += cfg.padding
             node_heights.append(h)
@@ -454,10 +442,6 @@ class Forwarder:
                 scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
                 nw = max(1, int(w * scale))
                 nh_im = max(1, int(ih * scale))
-                if nh_im > cfg.max_image_height:
-                    scale2 = cfg.max_image_height / nh_im
-                    nw = max(1, int(nw * scale2))
-                    nh_im = cfg.max_image_height
                 im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
                 img.paste(im2, (tx, ty))
                 ty += nh_im + 6

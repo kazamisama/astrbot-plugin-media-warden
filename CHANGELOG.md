@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.9
+
+### Fixed
+- Keep forwarded portrait images at full bubble width and render their full height without cropping.
+- Keep forward-render height pre-calculation consistent with the actual PIL image draw size.
+
 ## v1.4.8
 
 ### ??
