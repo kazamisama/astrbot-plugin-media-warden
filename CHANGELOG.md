@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.5.0
+
+### Added
+- New config `download_timeout_s` (default 30): per-download timeout in seconds for media and forward-node images.
+- New config `at_on_save_failure` (default true): when any asset fails to save, @-mention the listened sender as a reminder.
+
+### Changed
+- Forward render now treats a node image that fails after all retries as a hard failure: the whole forward image is not rendered or saved (`forward_render` -> ok=False), instead of silently dropping the image.
+
+### Fixed
+- Forward image collection mapped downloaded bytes to nodes via `all_urls.index(url)`, which mis-assigned images when the same URL appeared in multiple nodes; now mapped by position.
+
+
 ## v1.4.14
 
 ### Changed

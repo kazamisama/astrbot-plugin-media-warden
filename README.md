@@ -73,6 +73,8 @@ pip install Pillow  # forwarder 自绘气泡
 | `log_to_stdout` | `true` | 是否把每条匹配消息打到日志 |
 | `download_retries` | `2` | 失败重试次数（transient: 5xx / 超时 / 连接错） |
 | `max_concurrent` | `4` | 单消息多组件 / 转发节点图的并发上限 |
+| `download_timeout_s` | `30` | 单次下载超时秒数（媒体 / 转发节点图，须 > 0） |
+| `at_on_save_failure` | `true` | 保存出现失败时，额外 @ 触发该消息的监听对象提醒 |
 
 **默认命名模板**：
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.4.14"
+VERSION = "1.5.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -31,11 +31,17 @@ class MediaWardenConfig:
     log_to_stdout: bool = True
     download_retries: int = 2
     max_concurrent: int = 4
+    download_timeout_s: float = 30.0
+    at_on_save_failure: bool = True
 
     max_file_size_bytes: int = field(init=False)
 
     def __post_init__(self):
         self.max_file_size_bytes = self.max_file_size_mb * 1024 * 1024
+        if self.download_timeout_s <= 0:
+            raise ValueError(
+                f"download_timeout_s must be > 0, got {self.download_timeout_s!r}"
+            )
         if self.match_mode not in ("whitelist", "blacklist"):
             raise ValueError(f"invalid match_mode: {self.match_mode!r}")
         if self.forward_render_mode not in ("image", "json", "both"):

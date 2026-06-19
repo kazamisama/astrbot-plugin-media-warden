@@ -14,6 +14,7 @@ def _install_stub():
     ai = types.ModuleType("astrbot.api")
     sm = types.ModuleType("astrbot.api.star")
     em = types.ModuleType("astrbot.api.event")
+    mc = types.ModuleType("astrbot.api.message_components")
 
     class Star:
         def __init__(self, context):
@@ -57,10 +58,23 @@ def _install_stub():
     em.filter = _F
     em.AstrMessageEvent = AstrMessageEvent
     em.EventMessageType = _MT
+
+    class At:
+        def __init__(self, qq=None, name=""):
+            self.qq = qq
+            self.name = name
+
+    class Plain:
+        def __init__(self, text=""):
+            self.text = text
+
+    mc.At = At
+    mc.Plain = Plain
     sys.modules["astrbot"] = a
     sys.modules["astrbot.api"] = ai
     sys.modules["astrbot.api.star"] = sm
     sys.modules["astrbot.api.event"] = em
+    sys.modules["astrbot.api.message_components"] = mc
 
 
 _install_stub()
@@ -171,6 +185,8 @@ def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
 
     class _Ev:
         def plain_result(self, t): return _Result(t)
+        def chain_result(self, chain): return _Result(chain)
+        def image_result(self, p): return _Result(p)
         def get_platform_name(self): return self.platform_meta.name
         def get_group_id(self): return self.message_obj.group_id or ""
         def get_sender_id(self):
@@ -769,6 +785,76 @@ def test_plugin_e2e_group_message_image_saved():
             inst._index = None
         print("  OK ->", text.replace(chr(10), " | "))
 
+def test_plugin_e2e_forward_image_all_fail_not_saved_and_at():
+    """端到端: 转发图内某图全部下载失败 -> 整图判失败不落盘, 且 @ 监听对象."""
+    import asyncio
+    ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(ctx, config={
+            "storage_root": td,
+            "target_groups": ["aiocqhttp:g1"],
+            "target_users": ["u1"],
+            "forward_render_mode": "image",
+            "download_retries": 0,
+            "enable_index_db": False,
+            "reply_preview": False,
+        })
+        asyncio.run(inst.initialize())
+        if inst._forwarder is None:
+            print("  SKIP -> PIL unavailable")
+            return
+        # 让所有图片下载失败(patch main 模块里引用的 download 名)
+        _m = plugin_main
+        DownloadError = _m.DownloadError
+        orig_download = _m.download
+
+        async def _fail_download(comp, *a, **k):
+            raise DownloadError("forced timeout")
+
+        _m.download = _fail_download
+        try:
+            ev = _fake_event(
+                group_id="g1", user_id="u1", nickname="alice",
+                message=[
+                    {"type": "node", "data": {"content": [
+                        {"type": "node", "data": {
+                            "user_id": "u2", "nickname": "bob",
+                            "time": 1718600000,
+                            "content": [
+                                {"type": "text", "data": {"text": "hi"}},
+                                {"type": "image", "data": {"url": "https://x/y.jpg"}},
+                            ],
+                        }},
+                    ]}},
+                ],
+                message_id="mfail", timestamp=1718600000,
+            )
+
+            async def _drive():
+                out = []
+                async for x in inst.on_group_message(ev):
+                    out.append(x)
+                return out
+
+            out = asyncio.run(_drive())
+        finally:
+            _m.download = orig_download
+        # 1) 没有 PNG 落盘
+        pngs = [os.path.join(r, f) for r, _, fs in os.walk(td)
+                for f in fs if f.endswith(".png")]
+        assert not pngs, f"unexpected png saved: {pngs}"
+        # 2) 文本里报告失败
+        head = out[0].text if hasattr(out[0], "text") else str(out[0])
+        assert "失败" in head, head
+        # 3) 末尾有一条 @ 链(chain_result -> list, 首元素是 At, qq=sender)
+        at_msgs = [x for x in out if hasattr(x, "text") and isinstance(x.text, list)]
+        assert at_msgs, "no @ chain yielded"
+        chain = at_msgs[-1].text
+        assert chain and chain[0].__class__.__name__ == "At", chain
+        assert str(chain[0].qq) == "u1", chain[0].qq
+        print("  OK -> no png saved, sender @ed:", chain[0].qq)
+
+
 
 def test_plugin_e2e_forward_saved_as_json_sidecar():
     """端到端: 转发节点 -> JSON sidecar (mode=json 强制)."""
@@ -908,6 +994,7 @@ PHASE2 = [
     test_downloader_aiohttp_oversize_aborts,
     test_plugin_e2e_group_message_image_saved,
     test_plugin_e2e_forward_saved_as_json_sidecar,
+    test_plugin_e2e_forward_image_all_fail_not_saved_and_at,
     test_plugin_skip_text_only,
 ]
 

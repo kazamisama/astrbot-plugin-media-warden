@@ -68,5 +68,25 @@
     "type": "bool",
     "default": true,
     "description": "是否把每条匹配消息打到 stdout 日志"
+  },
+  "download_retries": {
+    "type": "int",
+    "default": 2,
+    "description": "单个媒体下载失败后的最大重试次数（仅对超时/连接错/5xx/429 等瞬时错误重试）"
+  },
+  "max_concurrent": {
+    "type": "int",
+    "default": 4,
+    "description": "同一条消息内媒体的最大并发下载数"
+  },
+  "download_timeout_s": {
+    "type": "int",
+    "default": 30,
+    "description": "单次媒体/转发图下载的超时秒数（必须 > 0）"
+  },
+  "at_on_save_failure": {
+    "type": "bool",
+    "default": true,
+    "description": "保存出现失败时，是否额外 @ 触发该消息的监听对象进行提醒"
   }
 }

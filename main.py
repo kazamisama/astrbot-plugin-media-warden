@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from astrbot.api.star import Star, register, Context
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.message_components import At, Plain
 
 from .warden import (
     MediaWardenConfig,
@@ -59,7 +60,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.3: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传",
+    "群聊素材守门人 v1.5: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -201,6 +202,16 @@ class MediaWardenStar(Star):
         yield event.plain_result(text)
         for extra in self._build_previews(event, batch):
             yield extra
+        if self.cfg.at_on_save_failure and batch.fail_count > 0:
+            try:
+                yield event.chain_result([
+                    At(qq=sender_id),
+                    Plain(
+                        f" 有 {batch.fail_count}/{batch.total} 个媒体保存失败"
+                    ),
+                ])
+            except Exception as e:
+                self._log(f"at-on-failure notify failed: {e!r}")
 
     # ----------------- 内部:并发下载 + 落盘 -----------------
 
@@ -257,6 +268,7 @@ class MediaWardenStar(Star):
                         c, fetcher=astrbot_component_fetcher,
                         retries=self.cfg.download_retries,
                         max_bytes=self.cfg.max_file_size_bytes,
+                        timeout_s=self.cfg.download_timeout_s,
                     )
                 except DownloadError as e:
                     return e
@@ -511,6 +523,7 @@ class MediaWardenStar(Star):
                     all_urls.append(u)
                     url_to_node.append(ni)
             node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
+            failed_urls = 0
             if all_urls:
                 async def _fetch(url: str) -> bytes:
                     hi = _upgrade_qq_image_url(url)
@@ -520,6 +533,7 @@ class MediaWardenStar(Star):
                                 Component(kind="image", url=hi),
                                 fetcher=aiohttp_fetcher,
                                 retries=self.cfg.download_retries,
+                                timeout_s=self.cfg.download_timeout_s,
                             )
                             return dl.data
                         except DownloadError:
@@ -528,6 +542,7 @@ class MediaWardenStar(Star):
                         Component(kind="image", url=url),
                         fetcher=aiohttp_fetcher,
                         retries=self.cfg.download_retries,
+                        timeout_s=self.cfg.download_timeout_s,
                     )
                     return dl.data
                 # 并发拉
@@ -535,40 +550,52 @@ class MediaWardenStar(Star):
                     *(_fetch(u) for u in all_urls),
                     return_exceptions=True,
                 )
-                for url, r in zip(all_urls, results_dl):
+                for pos, r in enumerate(results_dl):
                     if isinstance(r, BaseException):
+                        failed_urls += 1
                         continue
-                    ni = url_to_node[all_urls.index(url)]
+                    ni = url_to_node[pos]
                     node_imgs[ni].append(r)
-            try:
-                # render 仍走原来的 PIL 路径,但喂预下载的 bytes
-                png = await self._forwarder.render_with_images(
-                    nodes, node_imgs=node_imgs,
+            if failed_urls:
+                # 节点内有图片全部重试后仍失败:整图判失败,不落盘
+                self._log(
+                    f"forward render aborted: {failed_urls}/{len(all_urls)} "
+                    f"node image(s) failed to download"
                 )
-                comp_png = Component(
-                    kind="forward_image", name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
-                    raw=comp.raw,
-                )
-                sr = self._storage.save(png, comp_png, ctx, mime="image/png")
-                if self._index is not None:
-                    try:
-                        self._index.record(
-                            platform=ctx.platform, group_id=ctx.group_id,
-                            sender_id=ctx.sender_id, msg_id=ctx.msg_id,
-                            idx=ctx.idx + 100,
-                            kind="forward_render", path=sr.path, size=sr.size,
-                            sha16=sr.blake16,
-                        )
-                    except Exception:
-                        pass
                 results.append(AssetResult(
-                    kind="forward_render", ok=True, path=sr.path, size=sr.size,
-                    preview_path=sr.path, reused=sr.reused,
+                    kind="forward_render", ok=False,
+                    err=f"image download failed ({failed_urls}/{len(all_urls)})",
                 ))
-            except Exception as e:
-                results.append(AssetResult(
-                    kind="forward_render", ok=False, err=f"render: {e}",
-                ))
+            else:
+                try:
+                    # render 仍走原来的 PIL 路径,但喂预下载的 bytes
+                    png = await self._forwarder.render_with_images(
+                        nodes, node_imgs=node_imgs,
+                    )
+                    comp_png = Component(
+                        kind="forward_image", name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
+                        raw=comp.raw,
+                    )
+                    sr = self._storage.save(png, comp_png, ctx, mime="image/png")
+                    if self._index is not None:
+                        try:
+                            self._index.record(
+                                platform=ctx.platform, group_id=ctx.group_id,
+                                sender_id=ctx.sender_id, msg_id=ctx.msg_id,
+                                idx=ctx.idx + 100,
+                                kind="forward_render", path=sr.path, size=sr.size,
+                                sha16=sr.blake16,
+                            )
+                        except Exception:
+                            pass
+                    results.append(AssetResult(
+                        kind="forward_render", ok=True, path=sr.path, size=sr.size,
+                        preview_path=sr.path, reused=sr.reused,
+                    ))
+                except Exception as e:
+                    results.append(AssetResult(
+                        kind="forward_render", ok=False, err=f"render: {e}",
+                    ))
 
         if not results:
             results.append(AssetResult(
