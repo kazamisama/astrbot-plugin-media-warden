@@ -209,6 +209,15 @@ class Forwarder:
         self._font_time = _find_font(self.cfg.header_size - 2)
         self._fonts_loaded = True
 
+    def _scale_image(self, im: "Image.Image", text_w: int):
+        """按 text_w 和 cfg.max_image_width 双轴上界缩放,返回 (nw, nh).
+
+        max(w, 1) 防 0 除;最小 1x1 防 PIL 拒绝 0 尺寸。
+        """
+        w, ih = im.size
+        scale = min(text_w / max(w, 1), self.cfg.max_image_width / max(w, 1))
+        return max(1, int(w * scale)), max(1, int(ih * scale))
+
     def can_handle(self, nodes: List[ForwardNode]) -> bool:
         return 1 <= len(nodes) <= self.max_nodes
 
@@ -289,11 +298,7 @@ class Forwarder:
             if imgs:
                 h += 8
             for im in imgs:
-                # 缩放到 max_image_width
-                w, ih = im.size
-                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
-                nw = max(1, int(w * scale))
-                nh = max(1, int(ih * scale))
+                _, nh = self._scale_image(im, text_w)
                 h += nh + 6
             h += cfg.padding  # 底 padding
             node_heights.append(h)
@@ -350,10 +355,7 @@ class Forwarder:
             if imgs:
                 ty += 8
             for im in imgs:
-                w, ih = im.size
-                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
-                nw = max(1, int(w * scale))
-                nh_im = max(1, int(ih * scale))
+                nw, nh_im = self._scale_image(im, text_w)
                 im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
                 img.paste(im2, (tx, ty))
                 ty += nh_im + 6
@@ -386,8 +388,7 @@ class Forwarder:
                     continue
             converted.append(pil_imgs)
         # 走原来的"无 fetcher"渲染路径
-        return await self.render(nodes, image_downloader=None) \
-            if False else await self._render_with_pil(nodes, converted)
+        return await self._render_with_pil(nodes, converted)
 
     async def _render_with_pil(self, nodes: List[ForwardNode],
                                 node_pil: List[List["Image.Image"]]) -> bytes:
@@ -493,10 +494,7 @@ class Forwarder:
             if imgs:
                 ty += 8
             for im in imgs:
-                w, ih = im.size
-                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
-                nw = max(1, int(w * scale))
-                nh_im = max(1, int(ih * scale))
+                nw, nh_im = self._scale_image(im, text_w)
                 im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
                 img.paste(im2, (tx, ty))
                 ty += nh_im + 6
