@@ -9,6 +9,7 @@ from .policy import (
 )
 from .components import Component, extract_components, summarize, recover_raw_media_refs
 from .reporter import AssetResult, BatchResult, format_batch
+from .avatar import AvatarCache, qq_avatar_url, fetch_many as fetch_many_avatars
 
 __version__ = VERSION
 __all__ = [
@@ -26,6 +27,9 @@ __all__ = [
     "AssetResult",
     "BatchResult",
     "format_batch",
+    "AvatarCache",
+    "qq_avatar_url",
+    "fetch_many_avatars",
     "__version__",
     "EXPORT_FORMAT_VERSION",
 ]

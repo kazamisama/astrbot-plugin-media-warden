@@ -173,6 +173,16 @@ def _line_h_mixed(line, font_text, font_emoji, base_size: int) -> int:
     return h
 
 
+# ----------------- 头像圆形 mask -----------------
+
+def _circle_mask(size: int):
+    """生成 size×size 'L' 模式圆形 mask(白圆黑底)。用于 img.paste(avatar, pos, mask=mask) 切圆。"""
+    from PIL import Image, ImageDraw
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    return mask
+
+
 # ----------------- 节点归一化 -----------------
 
 @dataclass
@@ -183,6 +193,7 @@ class ForwardNode:
     time: int          # unix seconds
     image_urls: List[str]   # 节点内图片 URL 列表
     nesting_depth: int = 0
+    avatar_path: Optional[str] = None   # v1.7.0: 本地头像文件路径,None = 不画头像
 
 
 def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
@@ -283,6 +294,9 @@ class _RenderCfg:
     max_image_width: int = 720
     max_image_height: int = 720
     title: str = "[合并转发]"
+    # v1.7.0: 头像(与 MediaWardenConfig 默认对齐,Forwarder 可独立使用)
+    enable_user_avatar: bool = True
+    avatar_size: int = 36
 
 
 def _node_depth(node: ForwardNode) -> int:
@@ -416,7 +430,10 @@ class Forwarder:
             else:
                 lines = wrap_text(nd.text, self._font, text_w)
             h = cfg.padding  # 顶 padding
-            h += line_h(self._font_header, nd.sender_name or "anon")
+            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
+            if nd.avatar_path is not None and self.cfg.enable_user_avatar:
+                _hdr_h = max(_hdr_h, self.cfg.avatar_size)
+            h += _hdr_h
             h += 4
             for ln in lines:
                 if self._font_emoji is not None:
@@ -468,9 +485,26 @@ class Forwarder:
                 )
             tx = bubble_x + cfg.padding
             ty = y + cfg.padding
+            _avatar_im = None
+            if nd.avatar_path is not None and self.cfg.enable_user_avatar:
+                try:
+                    _avatar_im = Image.open(nd.avatar_path).convert("RGBA")
+                    _avatar_im = _avatar_im.resize(
+                        (self.cfg.avatar_size, self.cfg.avatar_size),
+                        getattr(getattr(Image, "Resampling", Image), "LANCZOS"),
+                    )
+                except Exception:
+                    _avatar_im = None
+            if _avatar_im is not None:
+                _mask = _circle_mask(self.cfg.avatar_size)
+                img.paste(_avatar_im, (tx, ty), mask=_mask)
+                tx += self.cfg.avatar_size + 6
             draw.text((tx, ty), nd.sender_name or "anon",
                       fill=cfg.header_color, font=self._font_header)
-            ty += line_h(self._font_header, nd.sender_name or "anon") + 4
+            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
+            if _avatar_im is not None:
+                _hdr_h = max(_hdr_h, self.cfg.avatar_size)
+            ty += _hdr_h + 4
             # 文本(混合 layout:emoji 段走 emoji 字体)
             text_w = bubble_w - cfg.padding * 2
             if self._font_emoji is not None:
@@ -572,7 +606,10 @@ class Forwarder:
             else:
                 lines = wrap_text(nd.text, self._font, text_w)
             h = cfg.padding
-            h += line_h(self._font_header, nd.sender_name or "anon")
+            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
+            if nd.avatar_path is not None and self.cfg.enable_user_avatar:
+                _hdr_h = max(_hdr_h, self.cfg.avatar_size)
+            h += _hdr_h
             h += 4
             for ln in lines:
                 if self._font_emoji is not None:
@@ -625,9 +662,26 @@ class Forwarder:
                 )
             tx = bubble_x + cfg.padding
             ty = y + cfg.padding
+            _avatar_im = None
+            if nd.avatar_path is not None and self.cfg.enable_user_avatar:
+                try:
+                    _avatar_im = Image.open(nd.avatar_path).convert("RGBA")
+                    _avatar_im = _avatar_im.resize(
+                        (self.cfg.avatar_size, self.cfg.avatar_size),
+                        getattr(getattr(Image, "Resampling", Image), "LANCZOS"),
+                    )
+                except Exception:
+                    _avatar_im = None
+            if _avatar_im is not None:
+                _mask = _circle_mask(self.cfg.avatar_size)
+                img.paste(_avatar_im, (tx, ty), mask=_mask)
+                tx += self.cfg.avatar_size + 6
             draw.text((tx, ty), nd.sender_name or "anon",
                       fill=cfg.header_color, font=self._font_header)
-            ty += line_h(self._font_header, nd.sender_name or "anon") + 4
+            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
+            if _avatar_im is not None:
+                _hdr_h = max(_hdr_h, self.cfg.avatar_size)
+            ty += _hdr_h + 4
             text_w = bubble_w - cfg.padding * 2
             if self._font_emoji is not None:
                 _mixed = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)

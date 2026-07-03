@@ -88,5 +88,29 @@
     "type": "bool",
     "default": true,
     "description": "保存出现失败时，是否额外 @ 触发该消息的监听对象进行提醒"
+  },
+  "enable_user_avatar": {
+    "type": "bool",
+    "default": true,
+    "description": "启用转发节点用户头像",
+    "hint": "开启后，转发渲染时会在每条节点头部左侧画圆形头像（QQ qlogo.cn 抓取）。抓取失败静默跳过，不影响其他内容渲染。"
+  },
+  "avatar_size": {
+    "type": "int",
+    "default": 36,
+    "description": "头像直径（像素）",
+    "hint": "圆形头像的直径，建议 24-48。"
+  },
+  "avatar_timeout_s": {
+    "type": "int",
+    "default": 5,
+    "description": "单头像抓取超时（秒）",
+    "hint": "单次 GET 超时上限，超时则当失败处理（不画头像）。"
+  },
+  "avatar_cache_size_mb": {
+    "type": "int",
+    "default": 50,
+    "description": "头像缓存容量上限（MB）",
+    "hint": "头像缓存总大小超过该值时按 mtime LRU 删旧文件。"
   }
 }

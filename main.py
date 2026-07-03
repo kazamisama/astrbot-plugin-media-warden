@@ -32,6 +32,8 @@ from .warden import (
     BatchResult,
     format_batch,
     VERSION,
+    AvatarCache,
+    fetch_many_avatars,
 )
 from .warden.components import Component
 from .warden.downloader import (
@@ -74,6 +76,7 @@ class MediaWardenStar(Star):
         self._storage: Optional[Storage] = None
         self._forwarder = None
         self._index = None
+        self._avatar_cache = None
         self._log(
             f"loaded: v{VERSION} | mode={self.cfg.match_mode} "
             f"| groups={len(self.cfg.target_groups)} "
@@ -90,6 +93,15 @@ class MediaWardenStar(Star):
             pattern=self.cfg.filename_pattern,
             max_bytes=self.cfg.max_file_size_bytes,
         )
+        try:
+            self._avatar_cache = AvatarCache(
+                root=os.path.join(self.cfg.storage_root, "_avatars"),
+                timeout_s=self.cfg.avatar_timeout_s,
+                max_bytes=self.cfg.avatar_cache_size_mb * 1024 * 1024,
+            )
+        except Exception as e:
+            self._log(f"avatar cache init failed: {e!r} — runs without avatars")
+            self._avatar_cache = None
         try:
             from .warden.forwarder import Forwarder
             self._forwarder = Forwarder(
@@ -112,7 +124,8 @@ class MediaWardenStar(Star):
         self._log(
             f"initialize: storage={self._storage.root} "
             f"forwarder={'on' if self._forwarder else 'off'} "
-            f"index={'on' if self._index else 'off'}"
+            f"index={'on' if self._index else 'off'} "
+            f"avatars={'on' if (self.cfg.enable_user_avatar and self._avatar_cache) else 'off'}"
         )
         return None
 
@@ -476,6 +489,26 @@ class MediaWardenStar(Star):
             comp.meta["nodes"] = await self._expand_forward_nodes(raw_nodes, event)
         nodes = from_component(comp)
         results: list[AssetResult] = []
+
+        # v1.7.0: 并发抓所有节点发送者的头像(QQ qlogo.cn),失败静默跳过
+        if self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes:
+            try:
+                seen = set()
+                pairs = []
+                for nd in nodes:
+                    key = (ctx.platform, nd.sender_id)
+                    if nd.sender_id and key not in seen:
+                        seen.add(key)
+                        pairs.append(key)
+                if pairs:
+                    avatar_map = await fetch_many_avatars(
+                        self._avatar_cache, pairs,
+                        concurrency=self.cfg.max_concurrent,
+                    )
+                    for nd in nodes:
+                        nd.avatar_path = avatar_map.get((ctx.platform, nd.sender_id))
+            except Exception as e:
+                self._log(f"avatar fetch failed: {e!r} — proceed without")
 
         want_image = self.cfg.forward_render_mode in ("image", "both")
         want_json = self.cfg.forward_render_mode in ("json", "both")

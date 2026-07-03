@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -33,6 +33,11 @@ class MediaWardenConfig:
     max_concurrent: int = 4
     download_timeout_s: float = 30.0
     at_on_save_failure: bool = True
+    # v1.7.0: 转发节点头像
+    enable_user_avatar: bool = True
+    avatar_size: int = 36
+    avatar_timeout_s: int = 5
+    avatar_cache_size_mb: int = 50
 
     max_file_size_bytes: int = field(init=False)
 
@@ -41,6 +46,14 @@ class MediaWardenConfig:
         if self.download_timeout_s <= 0:
             raise ValueError(
                 f"download_timeout_s must be > 0, got {self.download_timeout_s!r}"
+            )
+        if self.avatar_timeout_s <= 0:
+            raise ValueError(
+                f"avatar_timeout_s must be > 0, got {self.avatar_timeout_s!r}"
+            )
+        if self.avatar_size <= 0:
+            raise ValueError(
+                f"avatar_size must be > 0, got {self.avatar_size!r}"
             )
         if self.match_mode not in ("whitelist", "blacklist"):
             raise ValueError(f"invalid match_mode: {self.match_mode!r}")

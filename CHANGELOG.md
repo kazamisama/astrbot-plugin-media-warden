@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.7.0
+
+### Added
+- Forward node rendering now draws circular user avatars next to the sender name. Avatars are fetched via `https://q1.qlogo.cn/g?b=qq&nk={sender_id}&s={size}` and cached as JPEG in `<storage_root>/_avatars/{platform}_{sender_id}.jpg`.
+- New module `warden/avatar.py` exposing `AvatarCache` (file-based with LRU eviction by mtime), `qq_avatar_url(sender_id, size)`, and `fetch_many_avatars(cache, pairs, concurrency=N)` for concurrent batch fetch.
+- New `ForwardNode.avatar_path: Optional[str]` field. Forwarder's `render()` and `_render_with_pil()` paste the avatar as a circle on the left of the sender name when set.
+- Four new config items: `enable_user_avatar` (default `true`), `avatar_size` (default `36` px diameter), `avatar_timeout_s` (default `5`), `avatar_cache_size_mb` (default `50`, LRU eviction).
+- `_RenderCfg` (Forwarder's internal render-config dataclass) gains `enable_user_avatar` and `avatar_size` fields so the Forwarder can render avatars standalone (without going through MediaWardenStar).
+
+### Behavior
+- Concurrent fetch via `Semaphore(max_concurrent)`; failures silently fall through (no avatar drawn, no error logged per node).
+- Cache miss → fetch → write to disk → evict if total size exceeds cap. Cache hits skip the network entirely.
+- Avatar fetch failures (404, network timeout, etc.) do not block rendering — nodes render without avatars.
+- Avatar JPEG with non-transparent background is pasted via circular mask (visible result: white halo around circular avatar). Acceptable for v1.7.0; documented limitation.
+
+### Follow-ups (separate PRs)
+- v1.7.1: color avatar via twemoji PNG set (no Pillow CBDT dependency).
+- v1.7.2: 1px border around avatar to mask white halo from JPEG backgrounds.
+
+
 ## v1.6.0
 
 ### Added
