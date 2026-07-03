@@ -1108,6 +1108,79 @@ def test_forwarder_render_nested_frame():
     print("  OK ->", img.size)
 
 
+def test_forwarder_emoji_mixed_layout():
+    banner("forwarder: emoji mixed-layout render (v1.6.0)")
+    import asyncio
+    import io
+    from PIL import Image
+    from warden.forwarder import (
+        Forwarder, ForwardNode,
+        _is_emoji_char, _wrap_mixed,
+    )
+
+    # 1. _is_emoji_char 单元
+    assert _is_emoji_char("a") is False
+    assert _is_emoji_char("中") is False
+    assert _is_emoji_char(" ") is False
+    assert _is_emoji_char("😊") is True
+    assert _is_emoji_char("😀") is True
+    assert _is_emoji_char("❤") is True
+    assert _is_emoji_char("✨") is True
+    assert _is_emoji_char("\u200d") is True   # ZWJ
+    assert _is_emoji_char("\ufe0f") is True   # VS-16
+    assert _is_emoji_char("\u20e3") is True   # keycap
+    assert _is_emoji_char("🚩") is True      # SMP flag
+    assert _is_emoji_char("") is False       # empty
+
+    # 2. _wrap_mixed 切段
+    fwd = Forwarder(width=400, max_nodes=30)
+    fwd._ensure_fonts()
+    if fwd._font_emoji is None:
+        print("  SKIP (no system emoji font on this host)")
+        return
+
+    # 中文 + emoji 混合
+    lines = _wrap_mixed("你好😊世界👍", fwd._font, fwd._font_emoji, 336)
+    flat = [(seg, is_emoji) for line in lines for seg, is_emoji in line]
+    assert flat == [("你好", False), ("😊", True), ("世界", False), ("👍", True)], flat
+
+    # ZWJ family emoji 必须保持原子(不拆开)
+    lines = _wrap_mixed("👨‍👩‍👧‍👦 test", fwd._font, fwd._font_emoji, 336)
+    flat = [(seg, is_emoji) for line in lines for seg, is_emoji in line]
+    assert flat[0] == ("👨\u200d👩\u200d👧\u200d👦", True), flat
+    assert flat[1] == (" test", False), flat
+
+    # VS-16 (variation selector) 不拆
+    lines = _wrap_mixed("❤ test ❤️", fwd._font, fwd._font_emoji, 336)
+    flat = [(seg, is_emoji) for line in lines for seg, is_emoji in line]
+    assert flat[0] == ("❤", True), flat
+    assert flat[2] == ("❤️", True), flat
+
+    # 纯文本(无 emoji)必须切成一个段 + 整段 is_emoji=False
+    lines = _wrap_mixed("plain ascii text", fwd._font, fwd._font_emoji, 336)
+    flat = [(seg, is_emoji) for line in lines for seg, is_emoji in line]
+    assert flat == [("plain ascii text", False)], flat
+
+    # \n 强制换行 —— 不能合并段
+    lines = _wrap_mixed("line1\nline2", fwd._font, fwd._font_emoji, 336)
+    assert len(lines) == 2, lines
+    assert lines[0] == [("line1", False)]
+    assert lines[1] == [("line2", False)]
+
+    # 3. 端到端渲染不崩(尺寸校验 + 字节大小合理)
+    nodes = [
+        ForwardNode("alice", "u1", "中文 + 😊 emoji + 👍 测试", 1718600000, []),
+        ForwardNode("bob", "u2", "🚩🇨🇳🇯🇵 flags", 1718600100, []),
+    ]
+    png = asyncio.run(fwd.render(nodes))
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    im = Image.open(io.BytesIO(png))
+    assert im.size[0] == 400
+    assert im.size[1] > 100
+    assert len(png) > 5000
+    print("  OK -> mixed-layout + ZWJ + VS-16 + render all pass")
+
+
 def test_index_record_and_recent():
     banner("index: record + recent roundtrip")
     import tempfile
@@ -2343,6 +2416,7 @@ def test_recover_raw_no_http_keeps_local():
 PHASE4 += [
     test_recover_raw_url_overrides_local_jpeg,
     test_recover_raw_no_http_keeps_local,
+    test_forwarder_emoji_mixed_layout,
 ]
 
 
