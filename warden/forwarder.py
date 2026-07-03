@@ -50,6 +50,129 @@ def _find_font(size: int):
     return ImageFont.load_default()
 
 
+# ----------------- emoji 探测 + 字体探测 + 混合 layout -----------------
+
+_EMOJI_RANGES = (
+    (0x2600, 0x27BF),       # Misc Symbols + Dingbats
+    (0x1F000, 0x1FFFF),     # 整个 SMP emoji 区段(含 1F300-1FAFF + 旗 1F1E6-1F1FF)
+)
+
+_EMOJI_SINGLES = frozenset({
+    0xFE0F, 0x200D, 0x20E3,             # VS-16, ZWJ, Keycap
+    0x2B05, 0x2B06, 0x2B07,             # Arrows
+    0x2B1B, 0x2B1C, 0x2B50, 0x2B55,     # Squares / Star / Circle
+})
+
+
+def _is_emoji_char(ch: str) -> bool:
+    """判断单字符是否在 emoji 段(含 ZWJ / variation selector / keycap)。"""
+    if not ch:
+        return False
+    cp = ord(ch)
+    if cp in _EMOJI_SINGLES:
+        return True
+    for lo, hi in _EMOJI_RANGES:
+        if lo <= cp <= hi:
+            return True
+    return False
+
+
+_EMOJI_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\seguiemj.ttf",
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/opentype/noto/NotoColorEmoji.ttf",
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+]
+
+
+def _find_emoji_font(size: int):
+    """探测系统 emoji 字体(通常 CBDT / Apple color)。
+    Pillow 12 仅能渲染出 B&W glyph(不解析 CBDT 彩表),但足够消除豆腐。
+    返回 None 时调用方应回退纯文本 layout(不切段)。"""
+    from PIL import ImageFont
+    for path in _EMOJI_FONT_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except OSError:
+                continue
+    return None
+
+
+def _char_w(ch: str, font) -> int:
+    bbox = font.getbbox(ch)
+    return (bbox[2] - bbox[0]) if bbox else 0
+
+
+def _wrap_mixed(text: str, font_text, font_emoji, max_w: int):
+    """text → list[list[(seg, is_emoji)]]。emoji 段保持原子(ZWJ 链 + VS 一并吞),不跨行拆。
+    \\n 视为强制换行(等价于 wrap_text 行为)。
+    """
+    if not text:
+        return []
+    lines = [[]]
+    cur_w = 0
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            lines.append([])
+            cur_w = 0
+            continue
+        if cur_w > 0:
+            # 上一段已有内容 —— \\n 必须开新行,等价 wrap_text 的 lines.append(cur)
+            lines.append([])
+            cur_w = 0
+        i = 0
+        while i < len(paragraph):
+            ch = paragraph[i]
+            is_emoji = _is_emoji_char(ch)
+            cluster = [ch]
+            j = i + 1
+            if is_emoji:
+                # 扩展 ZWJ 链 + 后续 emoji / VS-16
+                while j < len(paragraph):
+                    cj = paragraph[j]
+                    if cj == "\u200d" and j + 1 < len(paragraph) and _is_emoji_char(paragraph[j + 1]):
+                        cluster.append(cj)
+                        cluster.append(paragraph[j + 1])
+                        j += 2
+                    elif cj == "\ufe0f" or _is_emoji_char(cj):
+                        cluster.append(cj)
+                        j += 1
+                    else:
+                        break
+            else:
+                # 合并连续非 emoji 字符(确保 wrap_text 行为等价:一次性 draw 整段字符串)
+                while j < len(paragraph) and not _is_emoji_char(paragraph[j]):
+                    cluster.append(paragraph[j])
+                    j += 1
+            cluster_str = "".join(cluster)
+            font = font_emoji if is_emoji else font_text
+            cw = sum(_char_w(c, font) for c in cluster)
+            if cur_w + cw > max_w and lines[-1]:
+                lines.append([])
+                cur_w = 0
+            lines[-1].append((cluster_str, is_emoji))
+            cur_w += cw
+            i = j
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def _line_h_mixed(line, font_text, font_emoji, base_size: int) -> int:
+    """混合行高 = 段内最大 bbox 高度。"""
+    if not line:
+        return 0
+    h = 0
+    for seg, is_emoji in line:
+        font = font_emoji if is_emoji else font_text
+        bbox = font.getbbox(seg)
+        seg_h = (bbox[3] - bbox[1]) if bbox else base_size + 4
+        if seg_h > h:
+            h = seg_h
+    return h
+
+
 # ----------------- 节点归一化 -----------------
 
 @dataclass
@@ -207,6 +330,7 @@ class Forwarder:
         self._font = _find_font(self.cfg.font_size)
         self._font_header = _find_font(self.cfg.header_size)
         self._font_time = _find_font(self.cfg.header_size - 2)
+        self._font_emoji = _find_emoji_font(self.cfg.font_size)
         self._fonts_loaded = True
 
     def _scale_image(self, im: "Image.Image", text_w: int):
@@ -283,16 +407,22 @@ class Forwarder:
         else:
             node_images = [[] for _ in nodes]
 
-        # 逐节点计算高度
+        # 逐节点计算高度(混合 layout:emoji 段走 emoji 字体)
         for nd, imgs in zip(nodes, node_images):
             _, _, bubble_w = _bubble_layout(cfg, nd)
             text_w = bubble_w - cfg.padding * 2
-            lines = wrap_text(nd.text, self._font, text_w)
+            if self._font_emoji is not None:
+                lines = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
+            else:
+                lines = wrap_text(nd.text, self._font, text_w)
             h = cfg.padding  # 顶 padding
             h += line_h(self._font_header, nd.sender_name or "anon")
             h += 4
             for ln in lines:
-                h += line_h(self._font, ln) + 2
+                if self._font_emoji is not None:
+                    h += _line_h_mixed(ln, self._font, self._font_emoji, self.cfg.font_size) + 2
+                else:
+                    h += line_h(self._font, ln) + 2
             if nd.time:
                 h += 6 + line_h(self._font_time, _fmt_time(nd.time))
             if imgs:
@@ -341,11 +471,21 @@ class Forwarder:
             draw.text((tx, ty), nd.sender_name or "anon",
                       fill=cfg.header_color, font=self._font_header)
             ty += line_h(self._font_header, nd.sender_name or "anon") + 4
-            # 文本
+            # 文本(混合 layout:emoji 段走 emoji 字体)
             text_w = bubble_w - cfg.padding * 2
-            for ln in wrap_text(nd.text, self._font, text_w):
-                draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
-                ty += line_h(self._font, ln) + 2
+            if self._font_emoji is not None:
+                _mixed = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
+                for ln_runs in _mixed:
+                    cur_x = tx
+                    for seg, is_emoji in ln_runs:
+                        _f = self._font_emoji if is_emoji else self._font
+                        draw.text((cur_x, ty), seg, fill=cfg.text_color, font=_f)
+                        cur_x += sum(_char_w(c, _f) for c in seg)
+                    ty += _line_h_mixed(ln_runs, self._font, self._font_emoji, self.cfg.font_size) + 2
+            else:
+                for ln in wrap_text(nd.text, self._font, text_w):
+                    draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
+                    ty += line_h(self._font, ln) + 2
             if nd.time:
                 ty += 6
                 draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
@@ -427,12 +567,18 @@ class Forwarder:
         for nd, imgs in zip(nodes, node_pil):
             _, _, bubble_w = _bubble_layout(cfg, nd)
             text_w = bubble_w - cfg.padding * 2
-            lines = wrap_text(nd.text, self._font, text_w)
+            if self._font_emoji is not None:
+                lines = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
+            else:
+                lines = wrap_text(nd.text, self._font, text_w)
             h = cfg.padding
             h += line_h(self._font_header, nd.sender_name or "anon")
             h += 4
             for ln in lines:
-                h += line_h(self._font, ln) + 2
+                if self._font_emoji is not None:
+                    h += _line_h_mixed(ln, self._font, self._font_emoji, self.cfg.font_size) + 2
+                else:
+                    h += line_h(self._font, ln) + 2
             if nd.time:
                 h += 6 + line_h(self._font_time, _fmt_time(nd.time))
             if imgs:
@@ -483,9 +629,19 @@ class Forwarder:
                       fill=cfg.header_color, font=self._font_header)
             ty += line_h(self._font_header, nd.sender_name or "anon") + 4
             text_w = bubble_w - cfg.padding * 2
-            for ln in wrap_text(nd.text, self._font, text_w):
-                draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
-                ty += line_h(self._font, ln) + 2
+            if self._font_emoji is not None:
+                _mixed = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
+                for ln_runs in _mixed:
+                    cur_x = tx
+                    for seg, is_emoji in ln_runs:
+                        _f = self._font_emoji if is_emoji else self._font
+                        draw.text((cur_x, ty), seg, fill=cfg.text_color, font=_f)
+                        cur_x += sum(_char_w(c, _f) for c in seg)
+                    ty += _line_h_mixed(ln_runs, self._font, self._font_emoji, self.cfg.font_size) + 2
+            else:
+                for ln in wrap_text(nd.text, self._font, text_w):
+                    draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
+                    ty += line_h(self._font, ln) + 2
             if nd.time:
                 ty += 6
                 draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
