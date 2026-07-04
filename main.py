@@ -106,7 +106,7 @@ class MediaWardenStar(Star):
             from .warden.forwarder import Forwarder
             self._forwarder = Forwarder(
                 width=self.cfg.forward_image_width,
-                max_nodes=30,
+                max_nodes=self.cfg.forward_render_max_nodes,
             )
         except ImportError as e:
             self._log(f"forwarder init failed: {e!r} — falls back to JSON sidecar")

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 _QQ_AVATAR_BASE = "https://q1.qlogo.cn/g"
-_DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
+_DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024  # v1.7.1: 2MB -> 5MB
 
 
 def qq_avatar_url(sender_id: str, size: int = 640) -> str:

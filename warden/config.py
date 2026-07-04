@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -36,8 +36,10 @@ class MediaWardenConfig:
     # v1.7.0: 转发节点头像
     enable_user_avatar: bool = True
     avatar_size: int = 36
-    avatar_timeout_s: int = 5
+    avatar_timeout_s: int = 10
     avatar_cache_size_mb: int = 50
+    # v1.7.1: 转发渲染上限(超过此节点数自动降级 JSON-only)
+    forward_render_max_nodes: int = 30
 
     max_file_size_bytes: int = field(init=False)
 

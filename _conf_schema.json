@@ -1,116 +1,169 @@
 {
-  "target_groups": {
-    "type": "list",
-    "default": [],
-    "description": "监听的群 ID（格式: platform:group_id，如 aiocqhttp:123456）。空表示不限。"
+  "filter": {
+    "description": "监听范围",
+    "type": "object",
+    "hint": "配置监听哪些群 / 哪些用户的消息。空列表 = 该维度不限。",
+    "items": {
+      "target_groups": {
+        "type": "list",
+        "default": [],
+        "description": "监听的群 ID（格式: platform:group_id，如 aiocqhttp:123456）。空表示不限。",
+        "hint": "支持 `platform:group_id` 形式或裸 group_id。"
+      },
+      "target_users": {
+        "type": "list",
+        "default": [],
+        "description": "监听的用户 sender_id 列表。空表示不限。",
+        "hint": "支持裸 user_id 或 `platform:user_id` 形式。"
+      },
+      "match_mode": {
+        "type": "string",
+        "default": "whitelist",
+        "description": "匹配模式: whitelist(白名单) | blacklist(黑名单)",
+        "hint": "白名单：群 + 用户两个维度都允许才落盘。黑名单：任一维度命中即跳过。"
+      }
+    }
   },
-  "target_users": {
-    "type": "list",
-    "default": [],
-    "description": "监听的用户 sender_id 列表。空表示不限。"
+  "storage": {
+    "description": "保存与索引",
+    "type": "object",
+    "hint": "落盘路径、文件命名规则、去重、SQLite 索引。",
+    "items": {
+      "storage_root": {
+        "type": "string",
+        "default": "data/warden",
+        "description": "存储根目录，相对 AstrBot 工作目录",
+        "hint": "落盘的根路径。PluginInitializer 会 mkdir(root, exist_ok=True)。子目录 _blake/<aa>/<bb>/<hex>.ptr 是去重指针，_warden.db 是索引（可独立删除重建），_avatars/ 是头像缓存。"
+      },
+      "filename_pattern": {
+        "type": "string",
+        "default": "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}",
+        "description": "文件相对路径模板",
+        "hint": "可用变量: {platform} {group_id} {sender_id} {sender_name} {date} {time} {msg_id} {idx} {kind} {safe_name} {ext} {short_id}。{ext} 以 . 开头(如 .jpg)，直接接在模板末尾，勿再写额外的 . 号。模板里的 '..' 段会被压平防越权。"
+      },
+      "max_file_size_mb": {
+        "type": "int",
+        "default": 100,
+        "description": "单文件大小上限（MB），超过则跳过",
+        "hint": "对单个媒体 / 转发图 / 头像生效。超限直接丢弃对应项。"
+      },
+      "dedupe": {
+        "type": "bool",
+        "default": true,
+        "description": "对相同内容做去重（基于 blake2b 头 1MB 哈希）",
+        "hint": "命中已有文件则不重复落盘，用 .ptr 指针文件记录首存路径。索引里 size 字段是首次大小。"
+      },
+      "enable_index_db": {
+        "type": "bool",
+        "default": true,
+        "description": "是否启用 SQLite 索引",
+        "hint": "关闭后 /warden list/stats/export/lookup/prune 全部失效。索引文件 <storage_root>/_warden.db。"
+      }
+    }
   },
-  "match_mode": {
-    "type": "string",
-    "default": "whitelist",
-    "description": "匹配模式: whitelist(白名单) | blacklist(黑名单)"
+  "download": {
+    "description": "下载与并发",
+    "type": "object",
+    "hint": "媒体 / 节点图下载的重试、并发、超时。",
+    "items": {
+      "download_retries": {
+        "type": "int",
+        "default": 2,
+        "description": "单个媒体下载失败后的最大重试次数",
+        "hint": "仅对 transient 错误重试：超时 / 连接错 / 5xx / 429。4xx 立即抛。"
+      },
+      "max_concurrent": {
+        "type": "int",
+        "default": 4,
+        "description": "同一条消息内媒体的最大并发下载数",
+        "hint": "对节点图并发抓取、头像并发抓取都生效。值越大占用网络越多。"
+      },
+      "download_timeout_s": {
+        "type": "int",
+        "default": 30,
+        "description": "单次媒体/转发图下载的超时秒数（必须 > 0）",
+        "hint": "超过该秒数视作下载失败。"
+      }
+    }
   },
-  "storage_root": {
-    "type": "string",
-    "default": "data/warden",
-    "description": "存储根目录，相对 AstrBot 工作目录"
+  "forward": {
+    "description": "转发渲染",
+    "type": "object",
+    "hint": "合并转发消息渲染为图片的参数。render_mode=json 时本节大部分项无效。",
+    "items": {
+      "forward_render_mode": {
+        "type": "string",
+        "default": "image",
+        "description": "转发链处理方式: image(渲染成图片) | json(保存为结构化JSON) | both(两者都生成)",
+        "hint": "image / both 才会调用 PIL 渲染；json 总是会写 JSON 侧车。"
+      },
+      "forward_image_engine": {
+        "type": "string",
+        "default": "pil",
+        "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)",
+        "hint": "v1.2+ 仅 pil 落地；playwright/wkhtml 是预留槽位，切换会触发 'forwarder init failed' 并降级 JSON。"
+      },
+      "forward_image_width": {
+        "type": "int",
+        "default": 720,
+        "description": "转发渲染图宽度（像素）",
+        "hint": "节点气泡最大宽度受此限制。太大 PNG 体积爆炸。"
+      },
+      "forward_render_max_nodes": {
+        "type": "int",
+        "default": 30,
+        "description": "单条转发渲染的最大节点数（v1.7.1+）",
+        "hint": "超过此值的转发自动降级为 JSON-only（不渲染图片）。日志会打 'forward too large (N nodes) — JSON only'。61 节点的群聊转发用默认 30 不会出图，调到 60+ 可以强制渲染。"
+      },
+      "enable_user_avatar": {
+        "type": "bool",
+        "default": true,
+        "description": "启用转发节点用户头像",
+        "hint": "开启后，转发渲染时会在每条节点头部左侧画圆形头像（QQ qlogo.cn 抓取）。抓取失败静默跳过，不影响其他内容渲染。"
+      },
+      "avatar_size": {
+        "type": "int",
+        "default": 36,
+        "description": "头像直径（像素）",
+        "hint": "圆形头像的直径，建议 24-48。"
+      },
+      "avatar_timeout_s": {
+        "type": "int",
+        "default": 10,
+        "description": "单头像抓取超时（秒）（v1.7.1: 5 → 10）",
+        "hint": "q.qlogo.cn 冷启动可能 5s+ 才回，调到 10s 减少首抓超时。"
+      },
+      "avatar_cache_size_mb": {
+        "type": "int",
+        "default": 50,
+        "description": "头像缓存容量上限（MB）",
+        "hint": "头像缓存总大小超过该值时按 mtime LRU 删旧文件。"
+      }
+    }
   },
-  "filename_pattern": {
-    "type": "string",
-    "default": "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}",
-    "description": "文件相对路径模板。可用变量: {platform} {group_id} {sender_id} {sender_name} {date} {time} {msg_id} {idx} {kind} {short_id} {safe_name} {ext}。{ext} 以 . 开头(如 .jpg)，直接接在模板末尾，勿再写额外的 . 号。"
-  },
-  "forward_render_mode": {
-    "type": "string",
-    "default": "image",
-    "description": "转发链处理方式: image(渲染成图片) | json(保存为结构化JSON) | both(两者都生成)"
-  },
-  "forward_image_engine": {
-    "type": "string",
-    "default": "pil",
-    "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)"
-  },
-  "forward_image_width": {
-    "type": "int",
-    "default": 720,
-    "description": "转发渲染图宽度(像素)"
-  },
-  "reply_to_original": {
-    "type": "bool",
-    "default": true,
-    "description": "回复时是否引用原消息"
-  },
-  "reply_preview": {
-    "type": "bool",
-    "default": true,
-    "description": "回复时是否附带第一张图片作为预览缩略图"
-  },
-  "max_file_size_mb": {
-    "type": "int",
-    "default": 100,
-    "description": "单文件大小上限(MB)，超过则跳过"
-  },
-  "dedupe": {
-    "type": "bool",
-    "default": true,
-    "description": "对相同内容做去重（基于 blake2b 头 1MB 哈希）"
-  },
-  "enable_index_db": {
-    "type": "bool",
-    "default": true,
-    "description": "是否启用 SQLite 索引"
-  },
-  "log_to_stdout": {
-    "type": "bool",
-    "default": true,
-    "description": "是否把每条匹配消息打到 stdout 日志"
-  },
-  "download_retries": {
-    "type": "int",
-    "default": 2,
-    "description": "单个媒体下载失败后的最大重试次数（仅对超时/连接错/5xx/429 等瞬时错误重试）"
-  },
-  "max_concurrent": {
-    "type": "int",
-    "default": 4,
-    "description": "同一条消息内媒体的最大并发下载数"
-  },
-  "download_timeout_s": {
-    "type": "int",
-    "default": 30,
-    "description": "单次媒体/转发图下载的超时秒数（必须 > 0）"
-  },
-  "at_on_save_failure": {
-    "type": "bool",
-    "default": true,
-    "description": "保存出现失败时，是否额外 @ 触发该消息的监听对象进行提醒"
-  },
-  "enable_user_avatar": {
-    "type": "bool",
-    "default": true,
-    "description": "启用转发节点用户头像",
-    "hint": "开启后，转发渲染时会在每条节点头部左侧画圆形头像（QQ qlogo.cn 抓取）。抓取失败静默跳过，不影响其他内容渲染。"
-  },
-  "avatar_size": {
-    "type": "int",
-    "default": 36,
-    "description": "头像直径（像素）",
-    "hint": "圆形头像的直径，建议 24-48。"
-  },
-  "avatar_timeout_s": {
-    "type": "int",
-    "default": 5,
-    "description": "单头像抓取超时（秒）",
-    "hint": "单次 GET 超时上限，超时则当失败处理（不画头像）。"
-  },
-  "avatar_cache_size_mb": {
-    "type": "int",
-    "default": 50,
-    "description": "头像缓存容量上限（MB）",
-    "hint": "头像缓存总大小超过该值时按 mtime LRU 删旧文件。"
+  "reply": {
+    "description": "回复行为",
+    "type": "object",
+    "hint": "保存后是否回复原文 / 附预览图 / 失败时 @提醒。",
+    "items": {
+      "reply_to_original": {
+        "type": "bool",
+        "default": true,
+        "description": "回复时是否引用原消息",
+        "hint": "由 AstrBot adapter 实现；本插件只设置 plain_result。"
+      },
+      "reply_preview": {
+        "type": "bool",
+        "default": true,
+        "description": "回复时是否附带第一张图片作为预览缩略图",
+        "hint": "优先选 forward_render 渲染图；否则用第一张 image。无 image_result 实现时降级为 '预览: <path>' 文本。"
+      },
+      "at_on_save_failure": {
+        "type": "bool",
+        "default": true,
+        "description": "保存出现失败时，是否额外 @ 触发该消息的监听对象进行提醒",
+        "hint": "如果有失败项，会在 reply chain 末尾追加 @sender_id + ' 有 X/Y 个媒体保存失败'。"
+      }
+    }
   }
 }
