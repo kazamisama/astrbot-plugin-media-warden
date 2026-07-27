@@ -1178,7 +1178,46 @@ def test_forwarder_emoji_mixed_layout():
     assert im.size[0] == 400
     assert im.size[1] > 100
     assert len(png) > 5000
-    print("  OK -> mixed-layout + ZWJ + VS-16 + render all pass")
+
+    # 4. v1.7.2 regression: 长文本不再被塞到单行
+    # 旧 bug: cluster 自身 cw > max_w 且 lines[-1] 空 (falsy) 时,永不切行 → 整段超宽被画布截断
+    # 现 fix: 非 emoji cluster 超宽时退化为 char-level 切行
+    from warden.forwarder import _char_w as _cw_probe
+    long_cn = "中" * 80  # 80 * 18px = 1440px >> max_w=336
+    lines = _wrap_mixed(long_cn, fwd._font, fwd._font_emoji, 336)
+    assert len(lines) >= 4, f"长文本应切 ≥4 行,实际 {len(lines)} 行"
+    for ln in lines:
+        total_w = sum(
+            sum(_cw_probe(c, fwd._font_emoji if is_emoji else fwd._font) for c in seg)
+            for seg, is_emoji in ln
+        )
+        assert total_w <= 336, f"行宽 {total_w} 超 max_w=336: {[s for s,_ in ln]}"
+
+    # 5. v1.7.2 regression: text_w 扣除头像宽度,图片不越界画布
+    # 旧 bug: 有头像时 tx 已被推到 bubble_x + padding + avatar_size + 6,
+    #         但 text_w 仍按 bubble_w - padding*2 算,导致图片右边超 cfg.width
+    fwd2 = Forwarder(width=720, max_nodes=10)
+    fwd2._ensure_fonts()
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        from PIL import Image as PI
+        avatar = PI.new("RGBA", (36, 36), (255, 0, 0, 255))
+        avatar_path = os.path.join(td, "avatar.png")
+        avatar.save(avatar_path)
+        test_img = PI.new("RGB", (720, 100), (0, 255, 0))
+        buf = io.BytesIO()
+        test_img.save(buf, format="PNG")
+        nodes2 = [ForwardNode("alice", "u1", "测试", 1718600000, [], avatar_path=avatar_path)]
+        png2 = asyncio.run(fwd2.render_with_images(nodes2, node_imgs={0: [buf.getvalue()]}))
+        out = Image.open(io.BytesIO(png2))
+        # 扫描画布最右 2 列,确认没有图片像素(绿)或气泡像素(白)溢出
+        for y in range(50, min(out.size[1] - 50, 300)):
+            for x in (out.size[0] - 1, out.size[0] - 2):
+                p = out.getpixel((x, y))
+                assert p != (0, 255, 0), f"图片溢出画布右边 @ ({x},{y}): {p}"
+                assert p != (255, 255, 255), f"气泡溢出画布右边 @ ({x},{y}): {p}"
+
+    print("  OK -> mixed-layout + ZWJ + VS-16 + long-text-wrap + avatar-textw all pass")
 
 
 def test_index_record_and_recent():

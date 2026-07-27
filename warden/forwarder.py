@@ -148,11 +148,30 @@ def _wrap_mixed(text: str, font_text, font_emoji, max_w: int):
             cluster_str = "".join(cluster)
             font = font_emoji if is_emoji else font_text
             cw = sum(_char_w(c, font) for c in cluster)
-            if cur_w + cw > max_w and lines[-1]:
-                lines.append([])
-                cur_w = 0
-            lines[-1].append((cluster_str, is_emoji))
-            cur_w += cw
+            if not is_emoji and cw > max_w:
+                # 非 emoji cluster 自身超 max_w:char-level 切行
+                # (emoji cluster 必须保持原子,即便超宽也只能塞当前行)
+                cur_seg = ""
+                cur_seg_w = 0
+                for c in cluster:
+                    cw_c = _char_w(c, font)
+                    if cur_seg_w + cw_c > max_w and cur_seg:
+                        lines[-1].append((cur_seg, False))
+                        lines.append([])
+                        cur_seg = c
+                        cur_seg_w = cw_c
+                    else:
+                        cur_seg += c
+                        cur_seg_w += cw_c
+                if cur_seg:
+                    lines[-1].append((cur_seg, False))
+                cur_w = cur_seg_w
+            else:
+                if cur_w + cw > max_w and lines[-1]:
+                    lines.append([])
+                    cur_w = 0
+                lines[-1].append((cluster_str, is_emoji))
+                cur_w += cw
             i = j
     while lines and not lines[-1]:
         lines.pop()
@@ -424,7 +443,9 @@ class Forwarder:
         # 逐节点计算高度(混合 layout:emoji 段走 emoji 字体)
         for nd, imgs in zip(nodes, node_images):
             _, _, bubble_w = _bubble_layout(cfg, nd)
-            text_w = bubble_w - cfg.padding * 2
+            has_avatar = nd.avatar_path is not None and self.cfg.enable_user_avatar
+            avatar_offset = (self.cfg.avatar_size + 6) if has_avatar else 0
+            text_w = bubble_w - cfg.padding * 2 - avatar_offset
             if self._font_emoji is not None:
                 lines = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
             else:
@@ -506,7 +527,9 @@ class Forwarder:
                 _hdr_h = max(_hdr_h, self.cfg.avatar_size)
             ty += _hdr_h + 4
             # 文本(混合 layout:emoji 段走 emoji 字体)
-            text_w = bubble_w - cfg.padding * 2
+            has_avatar = nd.avatar_path is not None and self.cfg.enable_user_avatar
+            avatar_offset = (self.cfg.avatar_size + 6) if has_avatar else 0
+            text_w = bubble_w - cfg.padding * 2 - avatar_offset
             if self._font_emoji is not None:
                 _mixed = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
                 for ln_runs in _mixed:
@@ -600,7 +623,9 @@ class Forwarder:
         node_heights: List[int] = []
         for nd, imgs in zip(nodes, node_pil):
             _, _, bubble_w = _bubble_layout(cfg, nd)
-            text_w = bubble_w - cfg.padding * 2
+            has_avatar = nd.avatar_path is not None and self.cfg.enable_user_avatar
+            avatar_offset = (self.cfg.avatar_size + 6) if has_avatar else 0
+            text_w = bubble_w - cfg.padding * 2 - avatar_offset
             if self._font_emoji is not None:
                 lines = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
             else:
@@ -682,7 +707,9 @@ class Forwarder:
             if _avatar_im is not None:
                 _hdr_h = max(_hdr_h, self.cfg.avatar_size)
             ty += _hdr_h + 4
-            text_w = bubble_w - cfg.padding * 2
+            has_avatar = nd.avatar_path is not None and self.cfg.enable_user_avatar
+            avatar_offset = (self.cfg.avatar_size + 6) if has_avatar else 0
+            text_w = bubble_w - cfg.padding * 2 - avatar_offset
             if self._font_emoji is not None:
                 _mixed = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
                 for ln_runs in _mixed:
