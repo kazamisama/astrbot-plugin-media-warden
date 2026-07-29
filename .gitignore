@@ -43,3 +43,7 @@ data/warden_test/
 warden_test/
 *.tmp
 *.bak
+
+# 本地工具产物
+.codegraph/
+.irmia/
