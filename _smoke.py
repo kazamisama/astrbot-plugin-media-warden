@@ -8,6 +8,8 @@ import sys
 import tempfile
 import types
 
+PERMISSION_CALLS: list = []
+
 
 def _install_stub():
     a = types.ModuleType("astrbot")
@@ -37,8 +39,13 @@ def _install_stub():
         GROUP_MESSAGE = "group_message"
         PRIVATE_MESSAGE = "private_message"
 
+    class _PT:
+        ADMIN = "admin"
+        MEMBER = "member"
+
     class _F:
         EventMessageType = _MT
+        PermissionType = _PT
 
         def event_message_type(self, *a, **k):
             def deco(fn):
@@ -47,6 +54,14 @@ def _install_stub():
             return deco
 
         def command(self, *a, **k):
+            def deco(fn):
+                return fn
+
+            return deco
+
+        def permission_type(*a, **k):
+            PERMISSION_CALLS.append(a[0] if a else k)
+
             def deco(fn):
                 return fn
 
@@ -144,6 +159,20 @@ def test_config_rejects_invalid_mode():
     except ValueError as e:
         assert "match_mode" in str(e)
         print("  OK ->", e)
+
+
+def test_config_rejects_zero_concurrency():
+    banner("config: max_concurrent must be >= 1")
+    try:
+        MediaWardenConfig(max_concurrent=0)
+        raise AssertionError("should have raised")
+    except ValueError as e:
+        assert "max_concurrent" in str(e)
+    cfg = MediaWardenConfig(max_concurrent=1)
+    assert cfg.max_concurrent == 1
+    assert "aiocqhttp" in cfg.avatar_platforms
+    assert "qq_official" in cfg.avatar_platforms
+    print("  OK -> max_concurrent=0 rejected, default avatar whitelist present")
 
 
 def test_policy_key_format():
@@ -961,6 +990,7 @@ def test_plugin_skip_text_only():
 PHASE1 = [
     test_config_from_raw_with_overrides,
     test_config_rejects_invalid_mode,
+    test_config_rejects_zero_concurrency,
     test_policy_key_format,
     test_policy_whitelist_match_and_miss,
     test_policy_whitelist_empty_lists_means_unrestricted,
@@ -1635,18 +1665,41 @@ def test_plugin_warden_export_command():
         asyncio.run(inst.initialize())
         inst._index.record(platform="qq", group_id="g", sender_id="u",
                            msg_id="m", idx=0, kind="image", path="/x", size=10)
-        out_path = os.path.join(td, "exp.json")
-        async def _drive():
-            gen = inst.cmd_warden_export(_ResultE(), out_path)
+
+        async def _drive(arg):
+            gen = inst.cmd_warden_export(_ResultE(), arg)
             return await anext(gen)
-        out = asyncio.run(_drive())
-        text = out.text
-        assert "已导出 1" in text, text
+
+        # 根目录内绝对路径
+        out_path = os.path.join(td, "exp.json")
+        out = asyncio.run(_drive(out_path))
+        assert "已导出 1" in out.text, out.text
         with open(out_path, "r", encoding="utf-8") as f:
             d = _json.load(f)
         assert d["version"] == 1 and len(d["items"]) == 1
+
+        # 空参数 -> 默认 _export.json
+        out = asyncio.run(_drive(""))
+        assert "_export.json" in out.text, out.text
+        assert os.path.exists(os.path.join(td, "_export.json"))
+
+        # 相对路径 -> 根目录内
+        rel = os.path.join("sub", "rel.json")
+        out = asyncio.run(_drive(rel))
+        assert "已导出" in out.text, out.text
+        assert os.path.exists(os.path.join(td, rel))
+
+        # 越界绝对路径 / .. 相对路径 -> 拒绝
+        with tempfile.TemporaryDirectory(prefix="warden_outside_") as outside:
+            evil_abs = os.path.join(outside, "evil.json")
+            out = asyncio.run(_drive(evil_abs))
+            assert "导出路径非法" in out.text, out.text
+            assert not os.path.exists(evil_abs)
+        out = asyncio.run(_drive(os.path.join("..", "escape.json")))
+        assert "导出路径非法" in out.text, out.text
+
         _close_index_safely(inst)
-        print("  OK")
+        print("  OK -> default/relative/inside ok, outside/.. rejected")
 
 
 def _ResultE():
@@ -1656,6 +1709,14 @@ def _ResultE():
     class _E:
         def plain_result(self, t): return _R(t)
     return _E()
+
+
+def test_commands_require_admin_permission():
+    banner("commands: all five /warden commands registered ADMIN")
+    admin = plugin_main.filter.PermissionType.ADMIN
+    decorated = [c for c in PERMISSION_CALLS if c == admin]
+    assert len(decorated) == 5, PERMISSION_CALLS
+    print("  OK -> 5 commands registered with PermissionType.ADMIN")
 
 
 def test_plugin_e2e_image_triggers_image_result():
@@ -1996,6 +2057,7 @@ PHASE3 = [
     test_plugin_warden_stats_command,
     test_plugin_warden_list_command,
     test_plugin_warden_export_command,
+    test_commands_require_admin_permission,
     test_plugin_e2e_image_triggers_image_result,
     test_plugin_e2e_image_fallback_when_no_image_result,
     test_plugin_preview_disabled,
@@ -2121,6 +2183,84 @@ def test_storage_works_for_legit_paths():
     assert rp.startswith(os.path.realpath(root))
     assert os.path.exists(sr.path)
     print(f"  OK -> saved at {sr.path}")
+
+
+def test_storage_pointer_escape_ignored():
+    banner("storage: tampered .ptr pointing outside root is ignored")
+    root = tempfile.mkdtemp(prefix="warden_ptr_")
+    with tempfile.TemporaryDirectory(prefix="warden_ptr_out_") as outside:
+        evil = os.path.join(outside, "evil.jpg")
+        with open(evil, "wb") as f:
+            f.write(b"evil")
+        s = Storage(root=root, dedupe=True,
+                    pattern="{group_id}/{msg_id}_{short_id}{ext}", max_bytes=1000)
+        comp = Component(kind="image", name="a.jpg", url="http://x/a.jpg")
+        ctx1 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                           sender_name="alice", msg_id="m1", idx=0, ts=1718600000)
+        first = s.save(b"tamper-bytes", comp, ctx1, mime="image/jpeg")
+        assert not first.reused and first.blake16
+
+        ptr = s._blake_path(first.blake16)
+        rel_evil = os.path.relpath(evil, start=s.root)
+        with open(ptr, "w", encoding="utf-8") as f:
+            f.write(rel_evil)
+
+        ctx2 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                           sender_name="alice", msg_id="m2", idx=0, ts=1718600001)
+        second = s.save(b"tamper-bytes", comp, ctx2, mime="image/jpeg")
+        assert not second.reused, "tampered pointer must not be trusted"
+        assert os.path.realpath(second.path).startswith(
+            os.path.realpath(root) + os.sep
+        )
+        assert os.path.exists(second.path)
+    print("  OK -> escaped pointer ignored, re-saved inside root")
+
+
+def test_forward_avatar_platform_whitelist():
+    banner("forward: avatar fetch only on whitelisted platforms")
+    import asyncio
+    ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        pl = plugin_main.MediaWardenStar(ctx, config={
+            "storage_root": td, "enable_index_db": True,
+            "log_to_stdout": False,
+            "forward_render_mode": "json",
+            "enable_user_avatar": True,
+        })
+        asyncio.run(pl.initialize())
+        calls: list = []
+
+        async def fake_fetch(cache, pairs, concurrency=4):
+            calls.append(list(pairs))
+            return {p: None for p in pairs}
+
+        original = plugin_main.fetch_many_avatars
+        plugin_main.fetch_many_avatars = fake_fetch
+        try:
+            nodes = [{
+                "type": "node",
+                "data": {
+                    "user_id": "u1",
+                    "nickname": "alice",
+                    "content": [{"type": "text", "data": {"text": "hi"}}],
+                },
+            }]
+            comp = Component(kind="forward", meta={"nodes": nodes})
+
+            def _ctx(platform, msg_id):
+                return SaveContext(platform=platform, group_id="g1",
+                                   sender_id="sender", sender_name="sender",
+                                   msg_id=msg_id, idx=0, ts=1718600000)
+
+            asyncio.run(pl._save_forward(comp, _ctx("telegram", "m-tg"), None))
+            assert calls == [], calls
+
+            asyncio.run(pl._save_forward(comp, _ctx("aiocqhttp", "m-qq"), None))
+            assert len(calls) == 1 and ("aiocqhttp", "u1") in calls[0], calls
+        finally:
+            plugin_main.fetch_many_avatars = original
+            _close_index_safely(pl)
+    print("  OK -> telegram skipped, aiocqhttp fetched")
 
 
 def _drive_command(plugin, event, fn):
@@ -2376,6 +2516,32 @@ def test_forwarder_render_with_images():
     print(f"  OK -> {len(png)}B PNG (2 nodes, 1 pre-loaded image)")
 
 
+def test_forwarder_transparent_image_shows_bubble_bg():
+    banner("forwarder: transparent PNG composites onto bubble background")
+    import asyncio, io
+    from PIL import Image
+    from warden.forwarder import Forwarder, ForwardNode
+
+    src = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+    for x in range(15, 25):
+        for y in range(15, 25):
+            src.putpixel((x, y), (255, 0, 0, 255))
+    buf = io.BytesIO()
+    src.save(buf, format="PNG")
+
+    fwd = Forwarder(width=240, max_nodes=5)
+    nodes = [ForwardNode(sender_id="u1", sender_name="anon", text="",
+                         image_urls=["https://x/trans.png"], time=0)]
+    png = asyncio.run(fwd.render_with_images(nodes, node_imgs={0: [buf.getvalue()]}))
+    out = Image.open(io.BytesIO(png)).convert("RGB")
+    colors = out.getcolors(maxcolors=out.width * out.height)
+    color_map = {c: n for n, c in (colors or [])}
+    assert color_map.get((0, 0, 0), 0) == 0, "transparent pixels must not render black"
+    assert color_map.get((255, 0, 0), 0) > 0, "opaque image pixels must render"
+    assert color_map.get((255, 255, 255), 0) > 0, "bubble background must show through"
+    print("  OK -> transparent area shows bubble white, opaque center visible")
+
+
 PHASE4 = [
     test_downloader_retry_transient,
     test_downloader_no_retry_on_non_transient,
@@ -2385,12 +2551,15 @@ PHASE4 = [
     test_component_fetcher_fileurl_and_encoded,
     test_storage_path_safety_rejects_outside_root,
     test_storage_works_for_legit_paths,
+    test_storage_pointer_escape_ignored,
+    test_forward_avatar_platform_whitelist,
     test_plugin_warden_lookup_command,
     test_plugin_warden_prune_command,
     test_index_find_by_msg_filters,
     test_index_count_and_prune_older_than,
     test_plugin_e2e_concurrent_download_two_images,
     test_forwarder_render_with_images,
+    test_forwarder_transparent_image_shows_bubble_bg,
 ]
 
 

@@ -431,7 +431,7 @@ class Forwarder:
                     try:
                         data = await image_downloader(url)
                         from PIL import Image as _I
-                        im = _I.open(io.BytesIO(data))
+                        im = _I.open(io.BytesIO(data)).convert("RGBA")
                         im.load()
                         imgs.append(im)
                     except Exception:
@@ -554,7 +554,7 @@ class Forwarder:
             for im in imgs:
                 nw, nh_im = self._scale_image(im, text_w)
                 im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
-                img.paste(im2, (tx, ty))
+                img.paste(im2, (tx, ty), mask=im2.getchannel("A"))
                 ty += nh_im + 6
             y += nh + cfg.gap
 
@@ -578,7 +578,7 @@ class Forwarder:
             pil_imgs = []
             for b in imgs:
                 try:
-                    im = _I.open(io.BytesIO(b))
+                    im = _I.open(io.BytesIO(b)).convert("RGBA")
                     im.load()
                     pil_imgs.append(im)
                 except Exception:
@@ -733,7 +733,7 @@ class Forwarder:
             for im in imgs:
                 nw, nh_im = self._scale_image(im, text_w)
                 im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
-                img.paste(im2, (tx, ty))
+                img.paste(im2, (tx, ty), mask=im2.getchannel("A"))
                 ty += nh_im + 6
             y += nh + cfg.gap
 

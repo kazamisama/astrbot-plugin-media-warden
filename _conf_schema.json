@@ -44,6 +44,7 @@
       "max_file_size_mb": {
         "type": "int",
         "default": 100,
+        "min": 1,
         "description": "单文件大小上限（MB），超过则跳过",
         "hint": "对单个媒体 / 转发图 / 头像生效。超限直接丢弃对应项。"
       },
@@ -69,18 +70,21 @@
       "download_retries": {
         "type": "int",
         "default": 2,
+        "min": 0,
         "description": "单个媒体下载失败后的最大重试次数",
         "hint": "仅对 transient 错误重试：超时 / 连接错 / 5xx / 429。4xx 立即抛。"
       },
       "max_concurrent": {
         "type": "int",
         "default": 4,
+        "min": 1,
         "description": "同一条消息内媒体的最大并发下载数",
         "hint": "对节点图并发抓取、头像并发抓取都生效。值越大占用网络越多。"
       },
       "download_timeout_s": {
         "type": "int",
         "default": 30,
+        "min": 1,
         "description": "单次媒体/转发图下载的超时秒数（必须 > 0）",
         "hint": "超过该秒数视作下载失败。"
       }
@@ -106,12 +110,14 @@
       "forward_image_width": {
         "type": "int",
         "default": 720,
+        "min": 1,
         "description": "转发渲染图宽度（像素）",
         "hint": "节点气泡最大宽度受此限制。太大 PNG 体积爆炸。"
       },
       "forward_render_max_nodes": {
         "type": "int",
         "default": 30,
+        "min": 1,
         "description": "单条转发渲染的最大节点数（v1.7.1+）",
         "hint": "超过此值的转发自动降级为 JSON-only（不渲染图片）。日志会打 'forward too large (N nodes) — JSON only'。61 节点的群聊转发用默认 30 不会出图，调到 60+ 可以强制渲染。"
       },
@@ -124,20 +130,29 @@
       "avatar_size": {
         "type": "int",
         "default": 36,
+        "min": 1,
         "description": "头像直径（像素）",
         "hint": "圆形头像的直径，建议 24-48。"
       },
       "avatar_timeout_s": {
         "type": "int",
         "default": 10,
+        "min": 1,
         "description": "单头像抓取超时（秒）（v1.7.1: 5 → 10）",
         "hint": "q.qlogo.cn 冷启动可能 5s+ 才回，调到 10s 减少首抓超时。"
       },
       "avatar_cache_size_mb": {
         "type": "int",
         "default": 50,
+        "min": 0,
         "description": "头像缓存容量上限（MB）",
         "hint": "头像缓存总大小超过该值时按 mtime LRU 删旧文件。"
+      },
+      "avatar_platforms": {
+        "type": "list",
+        "default": ["aiocqhttp", "qq_official"],
+        "description": "允许抓取头像的平台白名单（v1.8.0+）",
+        "hint": "仅对名单内平台抓取转发节点头像（QQ qlogo.cn）。napcat/lagrange 等 OneBot 实现平台名为 aiocqhttp，已被默认覆盖。"
       }
     }
   },

@@ -242,6 +242,10 @@ class Storage:
                 if rel:
                     target = os.path.join(self.root, rel)
                     if os.path.exists(target):
+                        try:
+                            self._assert_within_root(target)
+                        except ValueError:
+                            return None
                         return os.path.normpath(target)
             except OSError:
                 pass
@@ -251,7 +255,12 @@ class Storage:
         legacy = self._legacy_blake_path(digest)
         if os.path.exists(legacy):
             real = os.path.realpath(legacy)
-            return real if os.path.exists(real) else None
+            if os.path.exists(real):
+                try:
+                    self._assert_within_root(real)
+                except ValueError:
+                    return None
+                return real
         return None
 
     def save(self, data: bytes, component: "Component", ctx: SaveContext,

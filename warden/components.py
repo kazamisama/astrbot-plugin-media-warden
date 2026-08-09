@@ -216,16 +216,16 @@ _RAW_MEDIA_KINDS = {
 
 
 def recover_raw_media_refs(event) -> List[dict]:
-    """? event.message_obj.raw_message ?????????????.
+    """从 event.message_obj.raw_message 恢复被 PreProcessStage 覆盖的媒体引用.
 
-    AstrBot 4.26 ? PreProcessStage ???? Image ????????? jpeg,
-    ?? component ? url/file/path; ? raw_message ?? napcat ??????,
-    ?? image ?? data.url ???? http ????(????? gif).
+    AstrBot 4.26 的 PreProcessStage 会把 Image 组件转成 jpeg 静帧,
+    并覆盖 component 的 url/file/path; 而 raw_message 里 napcat 保留原始数据,
+    其中 image 段的 data.url 通常是原始 http 链接(例如动图 gif).
 
     Returns:
-        List[dict]: ??????,?? media ???
-        {"kind","url","file","name","size"}; url/file ??? None.
-        ? OneBot ???? raw_message ??? [].
+        List[dict]: 恢复出的媒体引用列表, 每项包含
+        {"kind","url","file","name","size"}; url/file 可能为 None.
+        非 OneBot 形态或无 raw_message 时返回 [].
     """
     obj = getattr(event, "message_obj", None)
     raw = getattr(obj, "raw_message", None) if obj is not None else None

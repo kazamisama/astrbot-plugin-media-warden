@@ -62,7 +62,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.5: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传",
+    "群聊素材守门人 v1.8: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -184,10 +184,10 @@ class MediaWardenStar(Star):
         t0 = time.time()
         batch = BatchResult()
 
-        # 0) ???????? http ????.
-        #    AstrBot 4.26+ ? PreProcessStage ???? Image ???? jpeg ???
-        #    component.url/file/path; raw_message ??? napcat ??????(??? gif).
-        #    ????????? http url ??????,????????? jpeg ???.
+        # 0) 先从 raw_message 恢复原始 http url.
+        #    AstrBot 4.26+ 的 PreProcessStage 会把 Image 组件转成 jpeg 静帧,
+        #    并覆盖 component.url/file/path; raw_message 里 napcat 保留原始引用(例如 gif).
+        #    这里只恢复 http(s) url, 避免把本地缓存路径降级成 jpeg 静帧.
         self._recover_original_urls(event, media)
 
         # 1) 并发下载所有 media
@@ -229,10 +229,10 @@ class MediaWardenStar(Star):
     # ----------------- 内部:并发下载 + 落盘 -----------------
 
     def _recover_original_urls(self, event, media: list[Component]) -> None:
-        """? raw_message ???? http ????? PreProcessStage ????? url.
+        """从 raw_message 恢复被 PreProcessStage 覆盖的原始 http url.
 
-        ??????? http(s) url ????,?? kind ??? media ????;
-        ????????(?????????),???? OneBot ????.
+        只恢复 http(s) url, 并按 kind 顺序回填到对应 media 组件;
+        没有原始 http 引用时保持组件原样(兼容非 OneBot 平台).
         """
         try:
             refs = recover_raw_media_refs(event)
@@ -490,8 +490,10 @@ class MediaWardenStar(Star):
         nodes = from_component(comp)
         results: list[AssetResult] = []
 
-        # v1.7.0: 并发抓所有节点发送者的头像(QQ qlogo.cn),失败静默跳过
-        if self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes:
+        # v1.8.0: 仅在平台白名单内并发抓节点发送者头像,失败静默跳过
+        avatar_platforms = {p.lower() for p in self.cfg.avatar_platforms}
+        avatar_allowed = (ctx.platform or "").lower() in avatar_platforms
+        if avatar_allowed and self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes:
             try:
                 seen = set()
                 pairs = []
@@ -668,9 +670,24 @@ class MediaWardenStar(Star):
         except Exception:
             pass
 
+    def _resolve_export_path(self, arg: str) -> str:
+        """把 export 参数解析为 storage_root 内的绝对路径,越界抛 ValueError."""
+        root = self._storage.root if self._storage is not None else os.path.abspath(self.cfg.storage_root)
+        if not arg.strip():
+            return os.path.join(root, "_export.json")
+        raw = arg.strip()
+        if not os.path.isabs(raw):
+            raw = os.path.join(root, raw)
+        real = os.path.realpath(raw)
+        root_real = os.path.realpath(root)
+        if real != root_real and not real.startswith(root_real + os.sep):
+            raise ValueError(f"export path escapes storage root: {raw!r}")
+        return real
+
     # ----------------- 命令 -----------------
 
     @filter.command("warden list")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_list(self, event: AstrMessageEvent, arg: str = ""):
         if self._index is None:
             yield event.plain_result("[Warden] 索引未启用")
@@ -694,6 +711,7 @@ class MediaWardenStar(Star):
         yield event.plain_result("\n".join(lines))
 
     @filter.command("warden stats")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_stats(self, event: AstrMessageEvent):
         if self._index is None:
             yield event.plain_result("[Warden] 索引未启用")
@@ -708,11 +726,16 @@ class MediaWardenStar(Star):
         )
 
     @filter.command("warden export")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_export(self, event: AstrMessageEvent, arg: str = ""):
         if self._index is None:
             yield event.plain_result("[Warden] 索引未启用")
             return
-        path = arg.strip() or os.path.join(self.cfg.storage_root, "_export.json")
+        try:
+            path = self._resolve_export_path(arg)
+        except ValueError as e:
+            yield event.plain_result(f"[Warden] 导出路径非法: {e}")
+            return
         try:
             n = self._index.export_json(path)
             yield event.plain_result(
@@ -722,6 +745,7 @@ class MediaWardenStar(Star):
             yield event.plain_result(f"[Warden] 导出失败: {e!r}")
 
     @filter.command("warden lookup")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_lookup(self, event: AstrMessageEvent, arg: str = ""):
         """用法: /warden lookup <msg_id>  (可选加 #<idx>)"""
         if self._index is None:
@@ -761,6 +785,7 @@ class MediaWardenStar(Star):
         yield event.plain_result("\n".join(lines))
 
     @filter.command("warden prune")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_prune(self, event: AstrMessageEvent, arg: str = ""):
         """用法: /warden prune <days>   删除索引里 N 天前的记录(不删文件)"""
         if self._index is None:

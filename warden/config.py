@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -38,6 +38,8 @@ class MediaWardenConfig:
     avatar_size: int = 36
     avatar_timeout_s: int = 10
     avatar_cache_size_mb: int = 50
+    # v1.8.0: 允许抓取头像的平台白名单(其他平台直接跳过)
+    avatar_platforms: List[str] = field(default_factory=lambda: ["aiocqhttp", "qq_official"])
     # v1.7.1: 转发渲染上限(超过此节点数自动降级 JSON-only)
     forward_render_max_nodes: int = 30
 
@@ -66,6 +68,30 @@ class MediaWardenConfig:
         if self.forward_image_engine not in ("pil", "playwright", "wkhtml"):
             raise ValueError(
                 f"invalid forward_image_engine: {self.forward_image_engine!r}"
+            )
+        if self.max_concurrent < 1:
+            raise ValueError(
+                f"max_concurrent must be >= 1, got {self.max_concurrent!r}"
+            )
+        if self.download_retries < 0:
+            raise ValueError(
+                f"download_retries must be >= 0, got {self.download_retries!r}"
+            )
+        if self.max_file_size_mb < 1:
+            raise ValueError(
+                f"max_file_size_mb must be >= 1, got {self.max_file_size_mb!r}"
+            )
+        if self.forward_image_width < 1:
+            raise ValueError(
+                f"forward_image_width must be >= 1, got {self.forward_image_width!r}"
+            )
+        if self.forward_render_max_nodes < 1:
+            raise ValueError(
+                f"forward_render_max_nodes must be >= 1, got {self.forward_render_max_nodes!r}"
+            )
+        if self.avatar_cache_size_mb < 0:
+            raise ValueError(
+                f"avatar_cache_size_mb must be >= 0, got {self.avatar_cache_size_mb!r}"
             )
 
     @classmethod

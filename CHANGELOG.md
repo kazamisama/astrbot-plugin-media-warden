@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.8.0
+
+### Added
+- New config `avatar_platforms` (default `["aiocqhttp", "qq_official"]`): only whitelisted platforms fetch forward-node avatars; non-QQ platforms no longer hit qlogo.cn.
+
+### Changed
+- `/warden list / stats / lookup / export / prune` are now ADMIN-only via `@filter.permission_type(PermissionType.ADMIN)`.
+- `/warden export` now only writes inside `storage_root`; relative paths resolve under it and escaping paths are rejected.
+- `MediaWardenConfig` validates numeric bounds (`max_concurrent >= 1`, `download_retries >= 0`, `max_file_size_mb >= 1`, `forward_image_width >= 1`, `forward_render_max_nodes >= 1`, `avatar_cache_size_mb >= 0`); `_conf_schema.json` mirrors the same minimums.
+
+### Fixed
+- `Storage._existing_for_digest` now re-validates pointer targets inside the storage root, so a tampered `.ptr` cannot reuse an out-of-root path.
+- Restored Chinese comments/docstrings that had been replaced with `?` in `main.py` and `warden/components.py`.
+- Forwarder now alpha-composites transparent node images onto the bubble background; previously transparent PNG areas were pasted as raw RGB and could render as black.
+
 ## v1.7.2
 
 ### Fixed
