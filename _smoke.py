@@ -175,6 +175,28 @@ def test_config_rejects_zero_concurrency():
     print("  OK -> max_concurrent=0 rejected, default avatar whitelist present")
 
 
+def test_config_from_raw_lenient_preserves_valid_fields():
+    banner("config: lenient raw keeps valid fields, reports invalid ones")
+    cfg, errors = MediaWardenConfig.from_raw_lenient({
+        "storage_root": "/custom/root",
+        "max_concurrent": 0,
+        "match_mode": "whitelist",
+    })
+    assert cfg.storage_root == "/custom/root"
+    assert cfg.max_concurrent == 4  # invalid value skipped -> default
+    assert cfg.match_mode == "whitelist"
+    assert any("max_concurrent" in e for e in errors)
+
+    cfg2, errors2 = MediaWardenConfig.from_raw_lenient({
+        "avatar_platforms": "aiocqhttp",
+        "storage_root": "/custom/root2",
+    })
+    assert cfg2.avatar_platforms == ["aiocqhttp", "qq_official"]
+    assert cfg2.storage_root == "/custom/root2"
+    assert any("avatar_platforms" in e for e in errors2)
+    print(f"  OK -> valid fields kept, errors={errors} | avatar_platforms type skipped: {errors2}")
+
+
 def test_policy_key_format():
     banner("policy: group key normalizes platform/lower")
     from warden.policy import _key
@@ -243,6 +265,18 @@ def test_policy_whitelist_match_and_miss():
     assert evaluate(cfg, _fake_event(group_id="g1", user_id="u1")).allow is True
     assert evaluate(cfg, _fake_event(group_id="g2", user_id="u1")).allow is False
     assert evaluate(cfg, _fake_event(group_id="g1", user_id="u9")).allow is False
+    print("  OK")
+
+
+def test_policy_group_whitelist_case_insensitive():
+    banner("policy: group whitelist normalizes platform prefix case")
+    cfg = MediaWardenConfig(target_groups=["AIOCQHTTP:G1"], target_users=["u1"])
+    assert evaluate(cfg, _fake_event(platform="aiocqhttp",
+                                     group_id="g1", user_id="u1")).allow is True
+    cfg2 = MediaWardenConfig(match_mode="blacklist",
+                             target_groups=["AIOCQHTTP:G1"])
+    assert evaluate(cfg2, _fake_event(platform="aiocqhttp",
+                                      group_id="g1", user_id="u1")).allow is False
     print("  OK")
 
 
@@ -439,12 +473,22 @@ def test_plugin_construct_with_override():
     print("  OK")
 
 
-def test_plugin_construct_with_invalid_config_falls_back():
-    banner("plugin: invalid config string falls back to defaults gracefully")
+def test_plugin_construct_with_invalid_config_keeps_valid_fields():
+    banner("plugin: invalid config field skipped, valid fields preserved")
     ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
-    inst = plugin_main.MediaWardenStar(ctx, config={"match_mode": "nope"})
+    inst = plugin_main.MediaWardenStar(ctx, config={
+        "match_mode": "nope",
+        "target_users": ["u1"],
+        "storage_root": "/custom/root",
+        "max_file_size_mb": 33,
+    })
     assert inst.cfg.match_mode == "whitelist"
-    print("  OK")
+    assert "u1" in inst.cfg.matched_users_set()
+    assert inst.cfg.storage_root == "/custom/root"
+    assert inst.cfg.max_file_size_bytes == 33 * 1024 * 1024
+    assert inst._config_errors, "expected config warnings"
+    assert any("match_mode" in e for e in inst._config_errors)
+    print(f"  OK -> valid fields kept, warnings={inst._config_errors}")
 
 
 # =========================================================
@@ -991,8 +1035,10 @@ PHASE1 = [
     test_config_from_raw_with_overrides,
     test_config_rejects_invalid_mode,
     test_config_rejects_zero_concurrency,
+    test_config_from_raw_lenient_preserves_valid_fields,
     test_policy_key_format,
     test_policy_whitelist_match_and_miss,
+    test_policy_group_whitelist_case_insensitive,
     test_policy_whitelist_empty_lists_means_unrestricted,
     test_policy_blacklist,
     test_policy_private_skipped,
@@ -1007,7 +1053,7 @@ PHASE1 = [
     test_plugin_register_metadata,
     test_plugin_construct_with_default_config,
     test_plugin_construct_with_override,
-    test_plugin_construct_with_invalid_config_falls_back,
+    test_plugin_construct_with_invalid_config_keeps_valid_fields,
 ]
 PHASE2 = [
     test_storage_safe_name,
@@ -2216,15 +2262,51 @@ def test_storage_pointer_escape_ignored():
     print("  OK -> escaped pointer ignored, re-saved inside root")
 
 
+def test_storage_pointer_content_mismatch_ignored():
+    banner("storage: .ptr target with changed content is not reused")
+    root = tempfile.mkdtemp(prefix="warden_ptr_content_")
+    s = Storage(root=root, dedupe=True,
+                pattern="{group_id}/{msg_id}_{short_id}{ext}", max_bytes=1000)
+    comp = Component(kind="image", name="a.jpg", url="http://x/a.jpg")
+    data = b"original-bytes-abc"
+    ctx1 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                       sender_name="alice", msg_id="m1", idx=0, ts=1718600000)
+    first = s.save(data, comp, ctx1, mime="image/jpeg")
+    assert not first.reused and first.blake16
+
+    # 原地替换指针指向的目标文件内容(模拟文件被改动)
+    with open(first.path, "wb") as f:
+        f.write(b"mutated-bytes-xyz")
+
+    ctx2 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                       sender_name="alice", msg_id="m2", idx=0, ts=1718600001)
+    second = s.save(data, comp, ctx2, mime="image/jpeg")
+    assert not second.reused, "pointer target content mismatch must not be trusted"
+    with open(second.path, "rb") as f:
+        assert f.read() == data
+
+    ptr = s._blake_path(second.blake16)
+    rel = open(ptr, encoding="utf-8").read().strip()
+    assert os.path.normpath(os.path.join(root, rel)) == os.path.normpath(second.path), \
+        "pointer must be repaired to the new file"
+
+    ctx3 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                       sender_name="alice", msg_id="m3", idx=0, ts=1718600002)
+    third = s.save(data, comp, ctx3, mime="image/jpeg")
+    assert third.reused is True, "repaired pointer must be reused next time"
+    assert os.path.normpath(third.path) == os.path.normpath(second.path)
+    print("  OK -> changed target ignored, pointer repaired, third save reuses second path")
+
+
 def test_forward_avatar_platform_whitelist():
-    banner("forward: avatar fetch only on whitelisted platforms")
+    banner("forward: avatar fetch only for whitelisted platforms + image render")
     import asyncio
     ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
     with tempfile.TemporaryDirectory() as td:
         pl = plugin_main.MediaWardenStar(ctx, config={
             "storage_root": td, "enable_index_db": True,
             "log_to_stdout": False,
-            "forward_render_mode": "json",
+            "forward_render_mode": "image",
             "enable_user_avatar": True,
         })
         asyncio.run(pl.initialize())
@@ -2257,10 +2339,15 @@ def test_forward_avatar_platform_whitelist():
 
             asyncio.run(pl._save_forward(comp, _ctx("aiocqhttp", "m-qq"), None))
             assert len(calls) == 1 and ("aiocqhttp", "u1") in calls[0], calls
+
+            # json-only 模式不需要头像,不应再触发抓取
+            pl.cfg.forward_render_mode = "json"
+            asyncio.run(pl._save_forward(comp, _ctx("aiocqhttp", "m-qq-json"), None))
+            assert len(calls) == 1, calls
         finally:
             plugin_main.fetch_many_avatars = original
             _close_index_safely(pl)
-    print("  OK -> telegram skipped, aiocqhttp fetched")
+    print("  OK -> telegram skipped, image fetches, json skips avatar fetch")
 
 
 def _drive_command(plugin, event, fn):
@@ -2552,6 +2639,7 @@ PHASE4 = [
     test_storage_path_safety_rejects_outside_root,
     test_storage_works_for_legit_paths,
     test_storage_pointer_escape_ignored,
+    test_storage_pointer_content_mismatch_ignored,
     test_forward_avatar_platform_whitelist,
     test_plugin_warden_lookup_command,
     test_plugin_warden_prune_command,

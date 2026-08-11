@@ -93,6 +93,12 @@ class MediaWardenConfig:
             raise ValueError(
                 f"avatar_cache_size_mb must be >= 0, got {self.avatar_cache_size_mb!r}"
             )
+        if not isinstance(self.avatar_platforms, list) or not all(
+            isinstance(p, str) for p in self.avatar_platforms
+        ):
+            raise ValueError(
+                f"avatar_platforms must be a list of strings, got {self.avatar_platforms!r}"
+            )
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> "MediaWardenConfig":
@@ -101,8 +107,29 @@ class MediaWardenConfig:
         kwargs = {k: v for k, v in raw.items() if k in known}
         return cls(**kwargs)
 
+    @classmethod
+    def from_raw_lenient(cls, raw: dict | None) -> tuple["MediaWardenConfig", List[str]]:
+        """按字段容错构造:合法字段保留,非法字段跳过并记录错误."""
+        raw = raw or {}
+        known = {f.name for f in cls.__dataclass_fields__.values() if f.init}
+        errors: List[str] = []
+        kwargs: dict = {}
+        for key in sorted(known):
+            if key not in raw:
+                continue
+            candidate = dict(kwargs)
+            candidate[key] = raw[key]
+            try:
+                cls(**candidate)
+            except Exception as e:
+                errors.append(f"{key}: {e}")
+                continue
+            kwargs = candidate
+        return cls(**kwargs), errors
+
     def matched_groups_set(self) -> set[str]:
-        return {str(x) for x in self.target_groups if x}
+        # 平台名统一小写,与 policy._key 的归一规则对齐
+        return {str(x).lower() for x in self.target_groups if x}
 
     def matched_users_set(self) -> set[str]:
         return {str(x) for x in self.target_users if x}

@@ -68,11 +68,9 @@ def _upgrade_qq_image_url(url: str) -> str:
 class MediaWardenStar(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
-        try:
-            self.cfg = MediaWardenConfig.from_raw(config or {})
-        except Exception as e:
-            print(f"[media-warden] invalid config, fallback to defaults: {e!r}")
-            self.cfg = MediaWardenConfig()
+        self.cfg, self._config_errors = MediaWardenConfig.from_raw_lenient(config or {})
+        if self._config_errors:
+            print(f"[media-warden] config warnings: {self._config_errors}")
         self._storage: Optional[Storage] = None
         self._forwarder = None
         self._index = None
@@ -490,28 +488,6 @@ class MediaWardenStar(Star):
         nodes = from_component(comp)
         results: list[AssetResult] = []
 
-        # v1.8.0: 仅在平台白名单内并发抓节点发送者头像,失败静默跳过
-        avatar_platforms = {p.lower() for p in self.cfg.avatar_platforms}
-        avatar_allowed = (ctx.platform or "").lower() in avatar_platforms
-        if avatar_allowed and self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes:
-            try:
-                seen = set()
-                pairs = []
-                for nd in nodes:
-                    key = (ctx.platform, nd.sender_id)
-                    if nd.sender_id and key not in seen:
-                        seen.add(key)
-                        pairs.append(key)
-                if pairs:
-                    avatar_map = await fetch_many_avatars(
-                        self._avatar_cache, pairs,
-                        concurrency=self.cfg.max_concurrent,
-                    )
-                    for nd in nodes:
-                        nd.avatar_path = avatar_map.get((ctx.platform, nd.sender_id))
-            except Exception as e:
-                self._log(f"avatar fetch failed: {e!r} — proceed without")
-
         want_image = self.cfg.forward_render_mode in ("image", "both")
         want_json = self.cfg.forward_render_mode in ("json", "both")
 
@@ -519,6 +495,28 @@ class MediaWardenStar(Star):
             if nodes and not self._forwarder.can_handle(nodes):
                 self._log(f"forward too large ({len(nodes)} nodes) — JSON only")
             want_image = False
+
+        # v1.8.0: 仅在需要渲染图片时,按平台白名单并发抓节点发送者头像,失败静默跳过
+        if want_image and self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes:
+            avatar_platforms = {p.lower() for p in self.cfg.avatar_platforms}
+            if (ctx.platform or "").lower() in avatar_platforms:
+                try:
+                    seen = set()
+                    pairs = []
+                    for nd in nodes:
+                        key = (ctx.platform, nd.sender_id)
+                        if nd.sender_id and key not in seen:
+                            seen.add(key)
+                            pairs.append(key)
+                    if pairs:
+                        avatar_map = await fetch_many_avatars(
+                            self._avatar_cache, pairs,
+                            concurrency=self.cfg.max_concurrent,
+                        )
+                        for nd in nodes:
+                            nd.avatar_path = avatar_map.get((ctx.platform, nd.sender_id))
+                except Exception as e:
+                    self._log(f"avatar fetch failed: {e!r} — proceed without")
 
         if want_json or not want_image:
             payload = json.dumps(

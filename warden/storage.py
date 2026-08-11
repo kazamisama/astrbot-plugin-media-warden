@@ -195,6 +195,27 @@ def _blake_digest(data: bytes) -> str:
     return h.hexdigest()
 
 
+def _file_matches_digest(path: str, digest: str, size: int) -> bool:
+    """确认磁盘文件当前内容与已知指纹一致(按 _blake_digest 同规则)."""
+    try:
+        if os.path.getsize(path) != size:
+            return False
+        if size <= _FULL_HASH_LIMIT:
+            with open(path, "rb") as f:
+                return _blake_digest(f.read()) == digest
+        with open(path, "rb") as f:
+            head = f.read(1024 * 1024)
+        if len(head) < 1024 * 1024:
+            return False
+        h = hashlib.blake2b(digest_size=16)
+        h.update(head)
+        h.update(b"\x00")
+        h.update(str(size).encode("ascii"))
+        return h.hexdigest() == digest
+    except OSError:
+        return False
+
+
 @dataclass
 class SaveResult:
     path: str
@@ -232,8 +253,8 @@ class Storage:
         with open(bp, "w", encoding="utf-8", newline="\n") as f:
             f.write(rel)
 
-    def _existing_for_digest(self, digest: str) -> Optional[str]:
-        """返回首存真实文件的绝对路径（而非 _blake 指纹路径）。"""
+    def _existing_for_digest(self, digest: str, size: int) -> Optional[str]:
+        """返回内容仍匹配指纹的首存真实文件路径(而非 _blake 指纹路径)."""
         ptr = self._blake_path(digest)
         if os.path.exists(ptr):
             try:
@@ -246,10 +267,11 @@ class Storage:
                             self._assert_within_root(target)
                         except ValueError:
                             return None
-                        return os.path.normpath(target)
+                        if _file_matches_digest(target, digest, size):
+                            return os.path.normpath(target)
             except OSError:
                 pass
-            # 指针损坏/原件被删 -> 视为未命中，重新落盘
+            # 指针损坏/原件被删/内容已变 -> 视为未命中，重新落盘
             return None
         # 向后兼容：旧版 .bin（symlink 或拷贝）
         legacy = self._legacy_blake_path(digest)
@@ -260,7 +282,8 @@ class Storage:
                     self._assert_within_root(real)
                 except ValueError:
                     return None
-                return real
+                if _file_matches_digest(real, digest, size):
+                    return real
         return None
 
     def save(self, data: bytes, component: "Component", ctx: SaveContext,
@@ -274,7 +297,7 @@ class Storage:
         digest = _blake_digest(data) if self.dedupe else None
 
         if digest and self.dedupe:
-            existing = self._existing_for_digest(digest)
+            existing = self._existing_for_digest(digest, len(data))
             if existing is not None:
                 return SaveResult(path=existing, size=len(data),
                                   reused=True, blake16=digest)
@@ -286,14 +309,9 @@ class Storage:
         )
         full = os.path.join(self.root, rel)
         if os.path.exists(full) and digest:
-            try:
-                with open(full, "rb") as f:
-                    head = f.read(1024 * 1024)
-                if _blake_digest(head) == digest:
-                    return SaveResult(path=full, size=len(data),
-                                      reused=True, blake16=digest)
-            except OSError:
-                pass
+            if _file_matches_digest(full, digest, len(data)):
+                return SaveResult(path=full, size=len(data),
+                                  reused=True, blake16=digest)
 
         # 路径越权检查(防恶意模板或 symlink 把文件写到外面)
         self._assert_within_root(full)
@@ -315,12 +333,11 @@ class Storage:
             f.write(data)
 
         if digest and self.dedupe:
-            # 记录指针：digest -> 首存真实文件相对路径（跨平台，不依赖 symlink）
-            if not os.path.exists(self._blake_path(digest)):
-                try:
-                    self._write_pointer(digest, full)
-                except OSError:
-                    pass
+            # 记录/修复指针：digest -> 首存真实文件相对路径（跨平台，不依赖 symlink）
+            try:
+                self._write_pointer(digest, full)
+            except OSError:
+                pass
         return SaveResult(path=full, size=len(data), reused=False, blake16=digest)
 
     def _assert_within_root(self, path: str) -> None:

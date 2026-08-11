@@ -147,14 +147,14 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **77 项**（Phase 1: 20 / Phase 2: 16 / Phase 3: 21 / Phase 4: 20），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **80 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 21），覆盖：
 
-- 配置加载 / 校验 / 非法值降级
-- 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限
+- 配置加载 / 校验 / 非法字段按字段容错并保留有效值
+- 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
 - 组件识别与 raw_message URL 恢复
-- 落盘 roundtrip、blake2b 去重、路径越权防护、篡改指针拒绝
+- 落盘 roundtrip、blake2b 去重、路径越权防护、篡改/内容变更指针拒绝
 - 下载：aiohttp mock、超限中断、指数退避、并发保序
-- 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成
+- 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成 / json 模式不抓头像
 - 索引：写入 / recent / sha 查复用 / stats / export / lookup / prune
 - 预览回传与命令权限注册
 

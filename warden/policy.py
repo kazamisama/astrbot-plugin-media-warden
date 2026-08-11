@@ -94,12 +94,13 @@ def evaluate(cfg: "MediaWardenConfig", event) -> MatchDecision:
     if not _is_group_event(event):
         return MatchDecision(False, "non-group event (private/stray) skipped")
 
-    gk = _key(platform, gid)
+    gk = _key(platform, gid).lower()
     groups = cfg.matched_groups_set()
     users = cfg.matched_users_set()
+    gid_l = (gid or "").lower()
 
     if cfg.match_mode == "whitelist":
-        group_ok = (not groups) or (gk in groups) or (gid in groups)
+        group_ok = (not groups) or (gk in groups) or (gid_l in groups)
         user_ok = (not users) or ((uid or "") in users)
         allow = group_ok and user_ok
         if allow:
@@ -108,7 +109,7 @@ def evaluate(cfg: "MediaWardenConfig", event) -> MatchDecision:
             return MatchDecision(False, "group not in whitelist")
         return MatchDecision(False, "user not in whitelist")
 
-    group_blocked = (gk in groups) or (gid in groups)
+    group_blocked = (gk in groups) or (gid_l in groups)
     user_blocked = (uid or "") in users
     if group_blocked:
         return MatchDecision(False, "group blacklisted")

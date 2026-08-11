@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Config parsing is now field-tolerant: invalid fields are skipped with a recorded warning while valid settings are preserved, instead of falling back to a full default config.
+- Forward-node avatars are only fetched when image rendering is actually enabled; `json` mode no longer makes wasted avatar requests.
+
+### Fixed
+- Dedupe pointer reuse now re-verifies the target file's blake2b digest before returning a reused path, so a tampered or modified file is re-saved instead of trusted.
+- A stale dedupe pointer is now repaired after the re-save, so later identical content reuses the new file instead of creating another duplicate.
+- `avatar_platforms` must be a list of strings; invalid values are skipped with a recorded warning.
+- Group whitelist/blacklist matching normalizes platform prefix and group ID case on both config and event sides.
+
 ## v1.8.0
 
 ### Added
