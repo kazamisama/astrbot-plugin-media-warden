@@ -1,11 +1,11 @@
-# 交接文档 · astrbot-plugin-media-warden v1.8.0
+# 交接文档 · astrbot-plugin-media-warden v1.8.1
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.8.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
+- 版本：v1.8.1（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
 - 分支：`main`
-- Git：v1.8.0 已推送（commit ec8f94e，11 文件）；配置按字段容错的改进当前未提交
+- Git：v1.8.0（ec8f94e）与 v1.8.1 修复（8a347cd）已推送；v1.8.1 版本号与 changelog 待提交推送
 - 测试基线：`python -m pytest -q _smoke.py` 全量 80 passed
 
 ## 2. 本次改动清单
@@ -32,7 +32,7 @@
 ### 其他
 
 - 恢复 `main.py` 与 `warden/components.py` 中被替换为 `?` 的中文注释/docstring。
-- `CHANGELOG.md` 增加 v1.8.0 记录。
+- `CHANGELOG.md` 增加 v1.8.0 / v1.8.1 记录。
 
 ## 3. 主要修改文件
 
@@ -46,7 +46,7 @@
 | `warden/components.py` | docstring 修复 |
 | `_conf_schema.json` | min 约束、`avatar_platforms` |
 | `metadata.yaml` | 版本与描述同步 |
-| `CHANGELOG.md` | v1.8.0 变更记录 |
+| `CHANGELOG.md` | v1.8.0 / v1.8.1 变更记录 |
 | `_smoke.py` | stub 支持权限装饰器，新增 8 类回归用例 |
 
 ## 4. 验证记录
@@ -87,4 +87,4 @@ safe_edit rollback <file> [<backup_name>]
 1. 在真实 AstrBot 环境跑一遍：普通成员执行 `/warden list` 应被拒绝，管理员正常可用。
 2. 确认生产平台的 `get_platform_name()` 返回值，必要时在配置里扩展 `avatar_platforms`。
 3. 用真实透明 PNG 转发链验证渲染效果。
-4. 确认后提交 v1.8.0，并视需要同步更新 README 中的配置说明。
+4. 确认后提交 v1.8.1，并视需要同步更新 README 中的配置说明。

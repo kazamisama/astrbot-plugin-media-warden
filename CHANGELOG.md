@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.1
 
 ### Changed
 - Config parsing is now field-tolerant: invalid fields are skipped with a recorded warning while valid settings are preserved, instead of falling back to a full default config.
