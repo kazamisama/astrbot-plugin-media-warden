@@ -2629,6 +2629,121 @@ def test_forwarder_transparent_image_shows_bubble_bg():
     print("  OK -> transparent area shows bubble white, opaque center visible")
 
 
+def test_downloader_retries_aiohttp_client_error():
+    banner("downloader: retries aiohttp.ClientError then succeeds")
+    import asyncio
+    import sys
+    import warden.avatar as _avatar
+    sys.modules["aiohttp"] = _avatar.aiohttp
+    aiohttp = _avatar.aiohttp
+
+    class _Content:
+        async def iter_chunked(self, n):
+            yield b"PNG-bytes"
+
+    class _Resp:
+        status = 200
+        headers = {"Content-Type": "image/png"}
+        content = _Content()
+
+    class _CM:
+        def __init__(self, remaining):
+            self.remaining = remaining
+
+        async def __aenter__(self):
+            if self.remaining[0] > 0:
+                self.remaining[0] -= 1
+                raise aiohttp.ClientError("connection reset by peer")
+            return _Resp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Sess:
+        def __init__(self):
+            self.remaining = [1]
+
+        def get(self, url):
+            return _CM(self.remaining)
+
+        async def close(self):
+            pass
+
+    comp = Component(kind="image", url="https://x/a.png")
+    sess = _Sess()
+    out = asyncio.run(
+        download(
+            comp,
+            fetcher=aiohttp_fetcher,
+            session=sess,
+            retries=2,
+            backoff_base=0.001,
+            backoff_cap=0.01,
+        )
+    )
+    assert out.data == b"PNG-bytes"
+    assert sess.remaining[0] == 0
+    print("  OK -> retried transient ClientError then succeeded")
+
+
+def test_save_forward_falls_back_when_forwarder_missing():
+    banner("plugin: forwarder unavailable falls back to JSON sidecar")
+    import asyncio
+    import tempfile
+
+    context = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(context, config={
+            "storage_root": td,
+            "forward_render_mode": "image",
+            "enable_index_db": False,
+            "enable_user_avatar": False,
+        })
+        asyncio.run(inst.initialize())
+        inst._forwarder = None
+
+        comp = Component(kind="forward", meta={"nodes": [
+            {"type": "node", "data": {
+                "nickname": "alice",
+                "user_id": "u1",
+                "content": [{"type": "text", "data": {"text": "hello"}}],
+            }},
+        ]})
+        save_ctx = SaveContext(
+            platform="aiocqhttp", group_id="g1", sender_id="u1",
+            sender_name="alice", msg_id="m1", idx=0, ts=1718600000,
+        )
+        results = asyncio.run(inst._save_forward(comp, save_ctx, None))
+        assert results, "expected JSON fallback result"
+        assert all(r.ok for r in results), results
+        assert any(r.path and r.path.endswith(".json") for r in results), results
+        print("  OK -> JSON fallback path:", results[0].path)
+
+
+def test_store_dl_isolates_oserror():
+    banner("plugin: _store_dl isolates OSError as failed AssetResult")
+
+    class _Storage:
+        def save(self, data, comp, ctx, *, mime=None):
+            raise OSError("disk full")
+
+    inst = plugin_main.MediaWardenStar.__new__(plugin_main.MediaWardenStar)
+    inst._storage = _Storage()
+    inst._index = None
+    inst._log = lambda msg: None
+
+    comp = Component(kind="image", name="a.png")
+    save_ctx = SaveContext(
+        platform="aiocqhttp", group_id="g1", sender_id="u1",
+        sender_name="alice", msg_id="m1", idx=0, ts=1718600000,
+    )
+    dl = Downloaded(data=b"abc", mime="image/png", size=3)
+    res = inst._store_dl(comp, save_ctx, dl)
+    assert res.ok is False
+    assert "OSError" in (res.err or "")
+    print("  OK ->", res.err)
+
+
 PHASE4 = [
     test_downloader_retry_transient,
     test_downloader_no_retry_on_non_transient,
@@ -2648,6 +2763,9 @@ PHASE4 = [
     test_plugin_e2e_concurrent_download_two_images,
     test_forwarder_render_with_images,
     test_forwarder_transparent_image_shows_bubble_bg,
+    test_downloader_retries_aiohttp_client_error,
+    test_save_forward_falls_back_when_forwarder_missing,
+    test_store_dl_isolates_oserror,
 ]
 
 

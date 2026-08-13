@@ -39,6 +39,7 @@ class AvatarCache:
         self.max_bytes = max_bytes
         self.timeout_s = timeout_s
         self.max_file_bytes = max_file_bytes
+        self._locks: dict[str, asyncio.Lock] = {}
         os.makedirs(self.root, exist_ok=True)
 
     @staticmethod
@@ -124,29 +125,38 @@ class AvatarCache:
         fetcher: 可注入的下载函数,默认 aiohttp;测试时可用 mock 替身。
         """
         path = self._path_for(platform, sender_id)
-        existing = self._existing(path)
-        if existing is not None:
-            return existing
-        if url is None:
-            url = qq_avatar_url(sender_id)
-        if fetcher is not None:
-            try:
-                data = await fetcher(url)
-            except Exception:
+        lock = self._locks.setdefault(path, asyncio.Lock())
+        async with lock:
+            existing = self._existing(path)
+            if existing is not None:
+                return existing
+            if url is None:
+                url = qq_avatar_url(sender_id)
+            if fetcher is not None:
+                try:
+                    data = await fetcher(url)
+                except Exception:
+                    return None
+            else:
+                data = await self._fetch_bytes(url)
+            if not data:
                 return None
-        else:
-            data = await self._fetch_bytes(url)
-        if not data:
-            return None
-        if len(data) > self.max_file_bytes:
-            return None
-        try:
-            with open(path, "wb") as f:
-                f.write(data)
-        except OSError:
-            return None
-        self._evict_if_needed()
-        return os.path.realpath(path)
+            if len(data) > self.max_file_bytes:
+                return None
+            tmp_path = f"{path}.tmp"
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+                os.replace(tmp_path, path)
+            except OSError:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+                return None
+            self._evict_if_needed()
+            return os.path.realpath(path)
 
 
 async def fetch_many(cache: AvatarCache,

@@ -73,6 +73,9 @@ async def aiohttp_fetcher(component: "Component",
         raise DownloadError(
             "aiohttp not installed; pip install aiohttp to use URL fetcher"
         ) from e
+    _aiohttp_client_errors = (
+        (aiohttp.ClientError,) if hasattr(aiohttp, "ClientError") else ()
+    )
 
     own_session = False
     if session is None:
@@ -110,6 +113,8 @@ async def aiohttp_fetcher(component: "Component",
             )
     except asyncio.TimeoutError as e:
         raise DownloadError(f"timeout after {timeout_s}s for {component.url!r}") from e
+    except _aiohttp_client_errors as e:
+        raise DownloadError(f"connection error for {component.url!r}: {e}") from e
     finally:
         if own_session:
             await session.close()

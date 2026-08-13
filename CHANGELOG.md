@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.8.2
+
+### Changed
+- `aiohttp_fetcher` wraps `aiohttp.ClientError` as `DownloadError`, so connection failures participate in retry/backoff.
+- Download and save failures are isolated per asset; a downloader or filesystem error no longer aborts the whole group-message batch.
+- Forward render falls back to JSON when `Forwarder` is unavailable instead of dereferencing `None`.
+- Forward-node images now respect `max_file_size_mb` and `max_concurrent`.
+- Avatar cache writes are atomic and serialized per cache path.
+
+### Tests
+- Added regressions for transient `aiohttp.ClientError` retry, missing-forwarder JSON fallback, and `_store_dl` OSError isolation.
+
 ## v1.8.1
 
 ### Changed

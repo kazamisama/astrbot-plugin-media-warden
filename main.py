@@ -62,7 +62,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.8.1: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.8.2: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -283,6 +283,8 @@ class MediaWardenStar(Star):
                     )
                 except DownloadError as e:
                     return e
+                except Exception as e:
+                    return DownloadError(f"{type(e).__name__}: {e}")
 
         return await asyncio.gather(*(_one(c) for c in media))
 
@@ -291,8 +293,11 @@ class MediaWardenStar(Star):
             return AssetResult(kind=comp.kind, ok=False, err=f"download: {dl}")
         try:
             sr = self._storage.save(dl.data, comp, ctx, mime=dl.mime)
-        except ValueError as e:
-            return AssetResult(kind=comp.kind, ok=False, err=f"save: {e}")
+        except (ValueError, OSError, RuntimeError) as e:
+            return AssetResult(
+                kind=comp.kind, ok=False,
+                err=f"save: {type(e).__name__}: {e}",
+            )
         if self._index is not None:
             try:
                 self._index.record(
@@ -492,7 +497,9 @@ class MediaWardenStar(Star):
         want_json = self.cfg.forward_render_mode in ("json", "both")
 
         if want_image and (self._forwarder is None or not self._forwarder.can_handle(nodes)):
-            if nodes and not self._forwarder.can_handle(nodes):
+            if self._forwarder is None:
+                self._log("forwarder unavailable — JSON only")
+            elif nodes:
                 self._log(f"forward too large ({len(nodes)} nodes) — JSON only")
             want_image = False
 
@@ -558,26 +565,32 @@ class MediaWardenStar(Star):
             node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
             failed_urls = 0
             if all_urls:
+                sem = asyncio.Semaphore(self.cfg.max_concurrent)
+
                 async def _fetch(url: str) -> bytes:
-                    hi = _upgrade_qq_image_url(url)
-                    if hi != url:
-                        try:
-                            dl = await download(
-                                Component(kind="image", url=hi),
-                                fetcher=aiohttp_fetcher,
-                                retries=self.cfg.download_retries,
-                                timeout_s=self.cfg.download_timeout_s,
-                            )
-                            return dl.data
-                        except DownloadError:
-                            pass
-                    dl = await download(
-                        Component(kind="image", url=url),
-                        fetcher=aiohttp_fetcher,
-                        retries=self.cfg.download_retries,
-                        timeout_s=self.cfg.download_timeout_s,
-                    )
-                    return dl.data
+                    async with sem:
+                        hi = _upgrade_qq_image_url(url)
+                        if hi != url:
+                            try:
+                                dl = await download(
+                                    Component(kind="image", url=hi),
+                                    fetcher=aiohttp_fetcher,
+                                    retries=self.cfg.download_retries,
+                                    timeout_s=self.cfg.download_timeout_s,
+                                    max_bytes=self.cfg.max_file_size_bytes,
+                                )
+                                return dl.data
+                            except DownloadError:
+                                pass
+                        dl = await download(
+                            Component(kind="image", url=url),
+                            fetcher=aiohttp_fetcher,
+                            retries=self.cfg.download_retries,
+                            timeout_s=self.cfg.download_timeout_s,
+                            max_bytes=self.cfg.max_file_size_bytes,
+                        )
+                        return dl.data
+
                 # 并发拉
                 results_dl = await asyncio.gather(
                     *(_fetch(u) for u in all_urls),
