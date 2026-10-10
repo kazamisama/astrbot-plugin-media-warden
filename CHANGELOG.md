@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.9.0
+
+### Added
+- New config `get_media_fallback` (default `true`): 当媒体 url 是 http(s) 却下载失败时（典型：QQ rkey 授权链接过期 → 400），插件不再直接判失败，而是走三级补救链 —— ① 原 url 重试；② 向 bot 发 OneBot `get_image` 换一条新链接重下（新链接会记进回执 note `链接已重取: …`）；③ 回退组件本地副本（napcat 的 `.astrbot/data/temp`、`meta["path"]` 或 `raw.convert_to_file_path()`）。三级都失败才计失败，且**保留原始错误**（补救链失败原因挂在 `DownloadError.fallback_error` 上）。`event is None` 时第 ③ 级仍然生效。
+- New config `index_reuse_saved` (default `false`): 同一条消息的同一下标 `(msg_id, idx)` 已落盘过、且文件仍在磁盘时，跳过下载与落盘直接复用，回执中标 `索引复用`。文件已被删除则明确报 `reuse: stored file missing (<path>)` 并计为**落盘失败**，不伪装成功。
+- 失败入库：索引新增 `failures` 表（`ts/platform/group_id/sender_id/msg_id/idx/kind/err/subject/url/attempts`）。`subject` 优先用 `fileid:<id>`（从 url query 提取，能吸收 rkey/sign 变化），其次是 `url:<host><path>`，同一 subject 反复失败时 `attempts` 累加，回执 note 追加 `[历史第 N 次,上次 MM-DD HH:MM]`。失败资产不入 `assets` 表，所以以前只能靠日志统计，现在可查。
+- New command `/warden fail [N]`（ADMIN，默认 10、上限 50）：列出最近 N 条保存失败（时间 / kind / msg#idx / attempts / subject / err）。`/warden stats` 增加 `failures:` 与 `failures_by_kind:` 两行。
+- 失败原因区分：`warden/reporter.py` 新增 `classify_error()` / `failure_summary()` / `BatchResult.failure_breakdown()` / `failure_phrase()`。回执表头不再一律说「部分保存失败」，而是分「下载失败（源链接失效）」与「落盘失败」，并多一行 `原因:`；@ 触发者的文案也随原因分叉（`N 个媒体没能保存 —— 下载失败(源链接已失效)，X/Y 已保存`）。
+
+### Changed
+- `astrbot_component_fetcher` 接受 `refresher` 回调，`download()` 接受 `fallback` 回调；`astrbot_component_fetcher` 在 http 失败后先试 refresher 再试本地副本。
+- `Storage.save` 的异常路径与下载失败现在都经 `_failed()` 统一记账（写日志 + 失败入库 + 返回带 `failure_kind`/`note` 的 `AssetResult`）。
+- `main.py` 的 `_download_one()` 从「单次下载」改为三级回退；`_download_all()` 不变（仍并发 + 单资产隔离）。
+- `_find_saved_asset` 的判空从 `not idx` 修正为 `idx is None`：下标 0（第一条媒体）以前永远命中不了索引。
+
+### Known limits
+- 转发节点图（`_save_forward`）仍只按 `[hi, url]` 两个候选 url 试下载，**没有**接 `get_image` / 本地副本回退 —— 节点图 url 里没有 `file_id`，换链接无从下手。节点图仍按 v1.5.0 设计整体失败即不落盘。
+- `/warden fail` 只读索引库里的失败记录；`enable_index_db=false` 时该命令无效。
+
+### Tests
+- `_smoke.py` 新增 PHASE5（12 项）：`_url_fileid` 提取、fetch/save 分类、失败文案、三级回退（本地副本 / 保留主错误 / 重取新链接）、`_download_one` 的两条补救路径、失败入库 + attempts 累加、索引复用（命中 / 文件缺失）、`/warden fail` 与 `stats`、`failure_stats`/`prune` 覆盖 failures 表。
+- 冒烟总数 **83 → 95**（phase1=22 phase2=16 phase3=21 phase4=24 phase5=12）。
+
 ## v1.8.2
 
 ### Changed

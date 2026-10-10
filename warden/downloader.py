@@ -9,16 +9,22 @@ Phase 2 抽象: downloader 接受一个 Component 和一个 fetcher 协议,产�
 v1.3 增强:
   - 指数退避重试:transient 错误(超时/连接错误/5xx)最多 retries 次
   - 非 transient(4xx)立即抛
+
+v1.9 增强(http 源链接失效后的补救):
+  - astrbot_component_fetcher 的 http 分支失败后回退到组件本地副本
+    (meta["path"] / raw.convert_to_file_path / convert_to_base64)
+  - download(..., fallback=...) 在主 fetcher 重试耗尽后跑一次补救链
+    (OneBot get_image 重取值 / 本地副本)
+  - 补救链失败时把原因附到原始错误上(不覆盖主错误)
 """
 from __future__ import annotations
 import asyncio
 import io
 import random
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional, Tuple, Type, TYPE_CHECKING
+from typing import Awaitable, Callable, Optional
 
-if TYPE_CHECKING:
-    from .components import Component
+from .components import Component
 
 
 class DownloadError(Exception):
@@ -124,21 +130,62 @@ async def astrbot_component_fetcher(component: "Component",
                                     *,
                                     timeout_s: float = 30.0,
                                     max_bytes: int = 200 * 1024 * 1024,
-                                    session=None) -> Downloaded:
-    """优先走 url；没 url 时回退到 AstrBot 组件对象的 convert_to_file_path / convert_to_base64.
+                                    session=None,
+                                    refresher=None) -> Downloaded:
+    """优先走 url;http 失败或没 url 时回退到组件本地副本.
 
     商城表情 / napcat / lagrange 的 Image 常常 url 为空或直接是本地缓存路径（非 http），
     AstrBot 组件自带的 convert_to_file_path() 能把 file_id / file:// / base64:// 统一解析为本地文件。
+
+    v1.9: url 是 http(s) 但下载失败（典型: QQ rkey 授权链接过期 -> 400）时，
+    不再直接抛错，而是先给 refresher(OneBot get_image 重取链接)一次机会，
+    再回退到组件本地副本（PreProcessStage 可能已经落过一份）。
     """
     url = component.url or ""
     if url.startswith("http://") or url.startswith("https://"):
-        return await aiohttp_fetcher(
-            component, timeout_s=timeout_s, max_bytes=max_bytes, session=session
-        )
+        try:
+            return await aiohttp_fetcher(
+                component, timeout_s=timeout_s, max_bytes=max_bytes, session=session
+            )
+        except DownloadError as primary:
+            if callable(refresher):
+                try:
+                    fresh = await refresher(component)
+                except Exception:
+                    fresh = None
+                if fresh and fresh != url:
+                    try:
+                        dl = await aiohttp_fetcher(
+                            Component(kind=component.kind, url=fresh),
+                            timeout_s=timeout_s, max_bytes=max_bytes,
+                            session=session,
+                        )
+                        dl.origin = fresh
+                        return dl
+                    except DownloadError as e:
+                        primary.fallback_error = f"refreshed url {fresh!r}: {e}"
+            try:
+                return await _local_fallback(component, max_bytes)
+            except DownloadError as e:
+                primary.fallback_error = str(e)
+            raise
 
+    return await _local_fallback(component, max_bytes)
+
+
+async def _local_fallback(component: "Component",
+                          max_bytes: int) -> Downloaded:
+    """只用本地副本解析组件 (非 http 的 url / meta.path / raw 转换).
+
+    解析不出来时抛 DownloadError. 供 astrbot_component_fetcher 的 http 失败
+    回退链与 main 侧的 component 兜底复用.
+    """
+    url = component.url or ""
     # url 为本地路径 / file:// / base64:// / 空 都走本地解析
     # napcat 等环境下 Image.url 常直接是 \.astrbot\data\temp\... 本地缓存路径
     local = _url_to_local_path(url)
+    if not local:
+        local = _url_to_local_path((component.meta or {}).get("path") or "")
     if local:
         return _read_local_file(local, max_bytes)
 
@@ -154,7 +201,10 @@ async def astrbot_component_fetcher(component: "Component",
             path = await to_path()
         except Exception as e:
             raise DownloadError(f"convert_to_file_path failed: {e!r}") from e
-        return _read_local_file(path, max_bytes)
+        resolved = _url_to_local_path(str(path))
+        if resolved:
+            return _read_local_file(resolved, max_bytes)
+        raise DownloadError(f"convert_to_file_path gave no local file: {path!r}")
 
     to_b64 = getattr(raw, "convert_to_base64", None)
     if callable(to_b64):
@@ -237,12 +287,17 @@ async def download(component: "Component",
                    retries: int = 2,
                    backoff_base: float = 0.5,
                    backoff_cap: float = 4.0,
+                   fallback: Optional[Callable[[], Awaitable[Downloaded]]] = None,
                    **fetcher_kwargs) -> Downloaded:
     """统一入口 + 指数退避重试.
 
     retries=0 -> 不重试(默认失败 1 次立即抛)
     retries=N -> 最多重试 N 次
     backoff: 0.5s, 1s, 2s, ... jitter 0~0.5s,封顶 backoff_cap
+
+    v1.9: fallback 是主 fetcher(含重试)耗尽后跑一次的补救链
+    (OneBot get_image 重取链接 / 组件本地副本)。补救也失败时抛出**原始**错误,
+    补救失败原因挂在 e.fallback_error 上,不覆盖主错误。
     """
     fn = fetcher or aiohttp_fetcher
     attempt = 0
@@ -253,14 +308,20 @@ async def download(component: "Component",
         except DownloadError as e:
             last_exc = e
             if not _is_transient(e) or attempt >= retries:
-                raise
+                break
             # 指数退避 + 抖动
             delay = min(backoff_cap, backoff_base * (2 ** attempt))
             delay = delay * (0.5 + random.random() * 0.5)
             await asyncio.sleep(delay)
             attempt += 1
-    # 不可达,这里只是让类型检查器安心
-    raise DownloadError(f"unreachable: {last_exc!r}")
+    if last_exc is None:  # 不可达,这里只是让类型检查器安心
+        raise DownloadError("download failed without an exception")
+    if fallback is not None:
+        try:
+            return await fallback()
+        except Exception as fe:
+            last_exc.fallback_error = str(fe)
+    raise last_exc
 
 
 async def download_many(components: list, fetcher: Optional[Fetcher] = None,

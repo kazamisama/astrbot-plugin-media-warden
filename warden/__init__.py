@@ -8,7 +8,10 @@ from .policy import (
     event_platform, event_group_id, event_sender_id, event_sender_name,
 )
 from .components import Component, extract_components, summarize, recover_raw_media_refs
-from .reporter import AssetResult, BatchResult, format_batch
+from .reporter import (
+    AssetResult, BatchResult, format_batch,
+    classify_error, failure_summary,
+)
 from .avatar import AvatarCache, qq_avatar_url, fetch_many as fetch_many_avatars
 
 __version__ = VERSION
@@ -27,6 +30,8 @@ __all__ = [
     "AssetResult",
     "BatchResult",
     "format_batch",
+    "classify_error",
+    "failure_summary",
     "AvatarCache",
     "qq_avatar_url",
     "fetch_many_avatars",

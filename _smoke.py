@@ -94,6 +94,41 @@ def _install_stub():
 
 _install_stub()
 
+
+def _install_aiohttp_stub_if_missing():
+    """没有 aiohttp 时给个导入期占位符.
+
+    warden/avatar.py 与 warden/downloader.py 在模块层 import aiohttp;
+    开发机上通常没有这个包(它由 AstrBot 运行环境提供),没有桩就 import 不进 main.py.
+    这里只做导入期兼容:任何真正的 HTTP 调用都会显式报错.
+    有真 aiohttp 的环境不受影响(立即 return).
+    """
+    try:
+        import aiohttp  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    class ClientError(Exception):
+        pass
+
+    class ClientTimeout:
+        def __init__(self, total=None, **kw):
+            self.total = total
+
+    class ClientSession:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("aiohttp 未安装:测试请注入 fetcher 替身")
+
+    cc = types.ModuleType("aiohttp")
+    cc.ClientError = ClientError
+    cc.ClientTimeout = ClientTimeout
+    cc.ClientSession = ClientSession
+    sys.modules["aiohttp"] = cc
+
+
+_install_aiohttp_stub_if_missing()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))  # for parent package import
@@ -108,6 +143,8 @@ pkg.__path__ = [HERE]
 sys.modules[_pname] = pkg
 main = importlib.import_module(_pname + ".main")
 plugin_main = main
+# 插件自己的 warden 包(与顶层 'warden' 是两份模块);打桩要打在插件这一份上
+plugin_warden = importlib.import_module(_pname + ".warden")
 from warden import (
     MediaWardenConfig,
     MatchDecision,
@@ -125,6 +162,17 @@ from warden.downloader import (
     download, download_many, DownloadError, Downloaded,
 )
 from warden.storage import Storage, SaveContext, render_filename, _safe_name, _guess_ext
+
+# 关键: 上面这些名字来自顶层的 warden.*,而插件内部用的是它自己包里的
+# <pkg>.warden.* —— 两份 DownloadError 是**不同的类对象**。测试里若是用顶层
+# 那个类抛错,插件的 except DownloadError 根本不会匹配(回退链被整段跳过)。
+# 这里统一改成插件那一份,保证测试与插件判的是同一个类。
+DownloadError = plugin_warden.downloader.DownloadError
+Downloaded = plugin_warden.downloader.Downloaded
+download = plugin_warden.downloader.download
+download_many = plugin_warden.downloader.download_many
+aiohttp_fetcher = plugin_warden.downloader.aiohttp_fetcher
+astrbot_component_fetcher = plugin_warden.downloader.astrbot_component_fetcher
 
 
 def banner(t):
@@ -1758,11 +1806,11 @@ def _ResultE():
 
 
 def test_commands_require_admin_permission():
-    banner("commands: all five /warden commands registered ADMIN")
+    banner("commands: all six /warden commands registered ADMIN")
     admin = plugin_main.filter.PermissionType.ADMIN
     decorated = [c for c in PERMISSION_CALLS if c == admin]
-    assert len(decorated) == 5, PERMISSION_CALLS
-    print("  OK -> 5 commands registered with PermissionType.ADMIN")
+    assert len(decorated) == 6, PERMISSION_CALLS
+    print("  OK -> 6 commands registered with PermissionType.ADMIN")
 
 
 def test_plugin_e2e_image_triggers_image_result():
@@ -2834,8 +2882,366 @@ PHASE4 += [
 ]
 
 
+# =========================================================
+# Phase 5 测试 (v1.9.0: 源链接失效补救 / 失败分类 / 失败入库 / 索引复用)
+# =========================================================
+
+
+def test_url_fileid_extraction():
+    banner("main: _url_fileid pulls fileid out of a QQ rkey url")
+    from urllib.parse import urlparse, parse_qs
+    f = plugin_main._url_fileid
+    assert f("https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=ABC&rkey=xyz") == "ABC"
+    assert f("https://x/d?file_id=QQ1") == "QQ1"
+    assert f("https://x/d?a=1") is None
+    assert f("") is None
+    assert f(None) is None
+    print("  OK -> fileid extracted; non-qq url returns None")
+
+
+def test_reporter_classify_fetch_vs_save():
+    banner("reporter: fetch vs save failures are classified apart")
+    from warden import classify_error as ce
+    assert ce("download: http 400 for 'https://x/y'") == "fetch"
+    assert ce("download: timeout after 30.0s for 'https://x/y'") == "fetch"
+    assert ce("image download failed (2/2)") == "fetch"
+    assert ce("save: OSError: disk full") == "save"
+    assert ce("save: ValueError: path escapes storage root") == "save"
+    assert ce("json save: nope") == "save"
+    assert ce("something odd") == "other"
+
+    br = BatchResult(items=[
+        AssetResult(kind="image", ok=False, err="download: http 404 for 'u'"),
+        AssetResult(kind="forward_render", ok=False, err="image download failed (1/1)"),
+        AssetResult(kind="file", ok=False, err="save: OSError: x"),
+    ], duration_s=0.5)
+    txt = format_batch(br)
+    assert "下载失败 2 + 落盘失败 1" in txt, txt
+    assert br.failure_breakdown() == {"fetch": 2, "save": 1}, br.failure_breakdown()
+    br2 = BatchResult(items=[
+        AssetResult(kind="image", ok=False, err="download: http 400 for 'u'"),
+        AssetResult(kind="file", ok=False, err="save: OSError: x"),
+    ], duration_s=0.1)
+    assert br2.failure_phrase().startswith("2/2 个媒体保存失败"), br2.failure_phrase()
+    print("  OK -> head + 原因 line distinguish 源链接 vs 落盘")
+
+
+def test_reporter_failure_phrase_fetch_only():
+    banner("reporter: @ trigger phrase says 源链接已失效 for fetch-only failures")
+    br = BatchResult(items=[
+        AssetResult(kind="image", ok=True, path="/d/a.jpg", size=1),
+        AssetResult(kind="image", ok=False, err="download: http 400 for 'u'"),
+    ], duration_s=0.2)
+    assert "下载失败(源链接已失效)" in br.failure_phrase(), br.failure_phrase()
+    assert "1/2 已保存" in br.failure_phrase()
+    txt = format_batch(br)
+    assert "部分保存失败 (1/2) — 下载失败（源链接失效）" in txt, txt
+    assert "成功 (1)" in txt and "失败 (1)" in txt, txt
+    print("  OK ->", br.failure_phrase())
+
+
+def test_downloader_falls_back_to_local_copy():
+    banner("downloader: http failure falls back to the component's local copy")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    local = os.path.join(tmp, "cached.gif")
+    payload = b"GIF89a-local-copy"
+    with open(local, "wb") as fh:
+        fh.write(payload)
+
+    async def http_400(c, **kw):
+        raise DownloadError(f"http 400 for {c.url!r}")
+
+    comp = _make_component(url="https://multimedia.nt.qq.com.cn/download?fileid=A")
+    comp.meta["path"] = local
+    # astrbot_component_fetcher 内部查的是 downloader 模块全局的 aiohttp_fetcher
+    orig = plugin_warden.downloader.aiohttp_fetcher
+    plugin_warden.downloader.aiohttp_fetcher = http_400
+    try:
+        dl = asyncio.run(astrbot_component_fetcher(comp, max_bytes=1024 * 1024))
+    finally:
+        plugin_warden.downloader.aiohttp_fetcher = orig
+    assert dl.data == payload, dl
+    assert dl.size == len(payload)
+    print("  OK -> local copy used after http 400")
+
+
+def test_downloader_fallback_keeps_primary_error():
+    banner("downloader: 三级全败时保留原始错误 + fallback 说明")
+    import asyncio
+    comp = _make_component(url="https://x/a.png", file_id="f1")
+    comp.meta["fileid"] = "f1"
+
+    async def http_400(c, **kw):
+        raise DownloadError("http 400 for 'https://x/a.png'")
+
+    async def refresh(c):
+        return "https://x/fresh.png"
+
+    orig = plugin_warden.downloader.aiohttp_fetcher
+    plugin_warden.downloader.aiohttp_fetcher = http_400
+    try:
+        try:
+            asyncio.run(download(comp, fetcher=astrbot_component_fetcher,
+                                 retries=0, refresher=refresh))
+            raise AssertionError("expected DownloadError")
+        except DownloadError as e:
+            msg = str(e)
+            assert "400" in msg, msg
+            # 原始 400 保留,补救链失败原因挂在 fallback_error 上
+            fb = getattr(e, "fallback_error", "")
+            assert fb, "fallback_error should record why the rescue chain failed"
+            assert "no usable url" in fb, fb
+    finally:
+        plugin_warden.downloader.aiohttp_fetcher = orig
+    print("  OK -> primary 400 preserved, fallback note attached")
+
+
+def test_downloader_falls_back_to_refreshed_url():
+    banner("downloader: get_image 重取的新链接把这张图救回来")
+    import asyncio
+    comp = _make_component(url="https://old.example/a.png", file_id="f1")
+    comp.meta["fileid"] = "f1"
+    calls = {"orig": 0, "fresh": 0}
+
+    async def fetcher(c, **kw):
+        if c.url.startswith("https://old."):
+            calls["orig"] += 1
+            raise DownloadError(f"http 400 for {c.url!r}")
+        calls["fresh"] += 1
+        return Downloaded(data=b"fresh-bytes", mime="image/png", size=11)
+
+    async def refresh(c):
+        return "https://new.example/a.png"
+
+    # astrbot_component_fetcher 内部调 downloader 模块全局的 aiohttp_fetcher
+    orig = plugin_warden.downloader.aiohttp_fetcher
+    plugin_warden.downloader.aiohttp_fetcher = fetcher
+    try:
+        dl = asyncio.run(download(comp, fetcher=astrbot_component_fetcher,
+                                  retries=0, refresher=refresh))
+    finally:
+        plugin_warden.downloader.aiohttp_fetcher = orig
+    assert dl.data == b"fresh-bytes"
+    assert dl.origin == "https://new.example/a.png", dl.origin
+    assert calls == {"orig": 1, "fresh": 1}, calls
+    print("  OK -> refreshed url downloaded after the original 400")
+
+
+def test_main_get_media_fallback_uses_local_copy():
+    banner("plugin: _download_one 在 url 与 get_image 都失败后回退本地副本")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    local = os.path.join(tmp, "cached.jpg")
+    with open(local, "wb") as fh:
+        fh.write(b"JPEG-LOCAL")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+
+    async def http_400(c, **kw):
+        raise DownloadError("http 400 for 'https://multimedia.nt.qq.com.cn/d'")
+
+    # main.py 的 astrbot_component_fetcher 是模块级绑定,打 main 上的名字
+    orig = plugin_main.astrbot_component_fetcher
+    plugin_main.astrbot_component_fetcher = http_400
+    try:
+        comp = _make_component(
+            url="https://multimedia.nt.qq.com.cn/download?fileid=A")
+        comp.meta.update({"path": local, "fileid": "A"})
+        dl = asyncio.run(pl._download_one(comp, event=None))
+        assert dl.data == b"JPEG-LOCAL", dl
+    finally:
+        plugin_main.astrbot_component_fetcher = orig
+    print("  OK -> local copy rescued the save")
+
+
+def test_main_get_media_fallback_uses_get_image_url():
+    banner("plugin: _download_one 用 OneBot get_image 重取链接后成功")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    pl.cfg.download_retries = 0
+    seen = {}
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            seen["action"] = action
+            seen["file"] = kw.get("file")
+            return {"status": "ok", "data": {"url": "https://fresh.example/a.gif"}}
+
+    class _Ev:
+        bot = _Bot()
+
+    async def fetcher(c, **kw):
+        if "fresh" in c.url:
+            return Downloaded(data=b"FRESH-GIF", mime="image/gif", size=9)
+        raise DownloadError(f"http 400 for {c.url!r}")
+
+    # 三级回退里,第一级走 downloader 模块全局的 aiohttp_fetcher,
+    # 第二级(main.py 自己的模块级绑定)走 plugin_main.aiohttp_fetcher —— 两处都要打桩
+    orig = plugin_warden.downloader.aiohttp_fetcher
+    orig_main = plugin_main.aiohttp_fetcher
+    plugin_warden.downloader.aiohttp_fetcher = fetcher
+    plugin_main.aiohttp_fetcher = fetcher
+    try:
+        comp = _make_component(
+            url="https://multimedia.nt.qq.com.cn/download?fileid=FF1&rkey=old")
+        comp.meta["fileid"] = "FF1"
+        dl = asyncio.run(pl._download_one(comp, _Ev()))
+        assert dl.data == b"FRESH-GIF", dl
+        assert dl.origin == "https://fresh.example/a.gif"
+        assert seen == {"action": "get_image", "file": "FF1"}, seen
+    finally:
+        plugin_warden.downloader.aiohttp_fetcher = orig
+        plugin_main.aiohttp_fetcher = orig_main
+    print("  OK -> get_image returned a fresh url; original rkey was dead")
+
+
+def test_main_download_failure_records_to_index():
+    banner("plugin: 下载全败 -> 失败入库(subject=fileid) 且回执带原因")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    async def http_400(c, **kw):
+        raise DownloadError("http 400 for 'https://x/d?fileid=FID9'")
+
+    orig = plugin_main.astrbot_component_fetcher
+    plugin_main.astrbot_component_fetcher = http_400
+    try:
+        comp = _make_component(url="https://x/d?fileid=FID9")
+        comp.meta["fileid"] = "FID9"
+        ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                          sender_name="u", msg_id="m1", idx=0, ts=0)
+        dl = asyncio.run(pl._download_all([comp], None))
+        res = pl._store_dl(comp, ctx, dl[0])
+        assert not res.ok
+        assert res.err.startswith("download:"), res.err
+        assert res.failure_kind == "fetch", res.failure_kind
+        rows = pl._index.recent_failures(5)
+        assert len(rows) == 1, rows
+        assert rows[0]["subject"] == "fileid:FID9", rows[0]["subject"]
+        assert rows[0]["err"].startswith("download:"), rows[0]["err"]
+        assert rows[0]["attempts"] == 1
+        # 同一 fileid 二次失败 -> attempts 累加(回执 note 提到"历史第 2 次")
+        dl2 = asyncio.run(pl._download_all([comp], None))
+        res2 = pl._store_dl(comp, ctx, dl2[0])
+        assert not res2.ok
+        assert "历史第 2 次" in (res2.note or ""), res2.note
+        rows = pl._index.recent_failures(5)
+        assert rows[0]["attempts"] == 2, rows[0]
+        # 回执把它们显示出来
+        txt = format_batch(BatchResult(items=[res, res2], duration_s=0.1))
+        assert "失败 (2)" in txt
+        assert "下载失败（源链接失效）" in txt, txt
+    finally:
+        plugin_main.astrbot_component_fetcher = orig
+        pl._index.close()
+    print("  OK -> failure persisted with fileid subject + attempts counter")
+
+
+def test_main_index_reuse_saved_media():
+    banner("plugin: index_reuse_saved 命中同 msg#idx 时不再下载")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+    real = os.path.join(tmp, "already.png")
+    with open(real, "wb") as fh:
+        fh.write(b"PNG-ALREADY")
+    pl._index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                     msg_id="m7", idx=0, kind="image", path=real, size=11,
+                     sha16="deadbeef")
+    ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                      sender_name="u", msg_id="m7", idx=0, ts=0)
+    comp = _make_component(url="https://x/dead-link.png")
+    hit = pl._find_saved_asset("m7", 0)
+    assert hit is not None, "index hit expected"
+    res, _dl = pl._reuse_saved(comp, ctx, hit)
+    assert res.ok and res.reused and res.path == real
+    assert "索引复用" in (res.note or "")
+    # 索引命中但文件不在 -> 明确报错,不伪装成功
+    miss = dict(hit)
+    miss["path"] = os.path.join(tmp, "gone.png")
+    res2, _dl2 = pl._reuse_saved(comp, ctx, miss)
+    assert not res2.ok and res2.failure_kind == "save", res2
+    assert "missing" in res2.err, res2.err
+    pl._index.close()
+    print("  OK -> reuse skips download; missing file reported honestly")
+
+
+def test_plugin_warden_fail_command():
+    banner("plugin: /warden fail 列出失败记录")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+    pl._index.record_failure(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                             msg_id="m9", idx=1, kind="image",
+                             err="download: http 404 for 'x'", subject="fileid:Q")
+    ev = _fake_event()
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_failures(e, "5"))
+    text = "\n".join(getattr(r, "text", str(r)) for r in out)
+    assert "保存失败" in text, text
+    assert "fileid:Q" in text and "attempts=1" in text, text
+    # stats 也带上失败数
+    out2 = _drive_command(pl, ev, lambda e: pl.cmd_warden_stats(e))
+    assert "failures: 1" in "\n".join(getattr(r, "text", str(r)) for r in out2), out2
+    pl._index.close()
+    print("  OK -> /warden fail + stats show failures")
+
+
+def test_index_failure_stats_and_prune():
+    banner("index: failure_stats / prune 覆盖 failures 表")
+    import time as _t
+    from warden.index import AssetIndex
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    idx = AssetIndex(os.path.join(tmp, "i.db"))
+    idx.open()
+    for i in range(3):
+        idx.record_failure(platform="p", group_id="g", sender_id="u",
+                           msg_id=f"m{i}", idx=0, kind="image",
+                           err="download: http 400 for 'x'", subject="fileid:S")
+    idx.record_failure(platform="p", group_id="g", sender_id="u",
+                       msg_id="m9", idx=0, kind="forward_render",
+                       err="image download failed (1/1)", subject="url:qpic/x")
+    st = idx.failure_stats()
+    assert st["total"] == 4, st
+    assert st["by_subject"]["fileid:S"] == 3, st
+    assert st["top"][0]["subject"] == "fileid:S" and st["top"][0]["count"] == 3, st
+    # prune 覆盖 failures
+    old = int(_t.time()) - 10 * 86400
+    n = idx.prune_older_than(int(_t.time()))
+    assert n == 0, n
+    assert idx.failure_stats()["total"] == 4
+    idx._conn.execute("UPDATE failures SET ts = ?", (old - 86400,))
+    idx._conn.commit()
+    n2 = idx.prune_older_than(int(_t.time()))
+    assert n2 == 0, n2
+    assert idx.failure_stats()["total"] == 0, idx.failure_stats()
+    idx.close()
+    print("  OK -> failure_stats aggregates by subject; prune clears failures too")
+
+
+PHASE5 = [
+    test_url_fileid_extraction,
+    test_reporter_classify_fetch_vs_save,
+    test_reporter_failure_phrase_fetch_only,
+    test_downloader_falls_back_to_local_copy,
+    test_downloader_fallback_keeps_primary_error,
+    test_downloader_falls_back_to_refreshed_url,
+    test_main_get_media_fallback_uses_local_copy,
+    test_main_get_media_fallback_uses_get_image_url,
+    test_main_download_failure_records_to_index,
+    test_main_index_reuse_saved_media,
+    test_plugin_warden_fail_command,
+    test_index_failure_stats_and_prune,
+]
+
+
 if __name__ == "__main__":
-    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4:
+    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5:
         t()
-    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d)"
-          % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4)))
+    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d, total=%d)"
+          % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4), len(PHASE5),
+             len(PHASE1) + len(PHASE2) + len(PHASE3) + len(PHASE4) + len(PHASE5)))

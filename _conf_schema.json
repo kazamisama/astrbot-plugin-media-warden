@@ -59,6 +59,12 @@
         "default": true,
         "description": "是否启用 SQLite 索引",
         "hint": "关闭后 /warden list/stats/export/lookup/prune 全部失效。索引文件 <storage_root>/_warden.db。"
+      },
+      "index_reuse_saved": {
+        "type": "bool",
+        "default": false,
+        "description": "同一消息同一下标的媒体已落盘过时，直接复用索引里的文件（v1.9.0+）",
+        "hint": "默认关闭。开启后：命中 (msg_id, idx) 且文件仍在磁盘时跳过下载与落盘，回执里标 '索引复用'；文件已被删除则明确报 'reuse: stored file missing' 并计为落盘失败，不会伪装成功。"
       }
     }
   },
@@ -87,6 +93,12 @@
         "min": 1,
         "description": "单次媒体/转发图下载的超时秒数（必须 > 0）",
         "hint": "超过该秒数视作下载失败。"
+      },
+      "get_media_fallback": {
+        "type": "bool",
+        "default": true,
+        "description": "下载失败后尝试 OneBot get_image 重取链接与组件本地副本（v1.9.0+）",
+        "hint": "默认开启。URL 是 http(s) 但下载失败（典型：QQ rkey 授权链接过期 -> 400）时，先向 bot 发 get_image 换一条新链接重下，再回退到组件本地缓存副本（napcat 的 .astrbot/data/temp 或 raw.convert_to_file_path）。三级都失败才判定失败；关闭后行为回到 v1.8.x。"
       }
     }
   },

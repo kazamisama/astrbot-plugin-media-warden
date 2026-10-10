@@ -31,6 +31,7 @@ from .warden import (
     AssetResult,
     BatchResult,
     format_batch,
+    classify_error,
     VERSION,
     AvatarCache,
     fetch_many_avatars,
@@ -38,9 +39,68 @@ from .warden import (
 from .warden.components import Component
 from .warden.downloader import (
     aiohttp_fetcher, astrbot_component_fetcher,
-    download, download_many, DownloadError,
+    download, download_many, DownloadError, _local_fallback,
 )
 from .warden.storage import Storage, SaveContext
+from .warden.index import failure_subject
+
+
+def _url_fileid(url: str) -> Optional[str]:
+    """从多媒体下载链接里取 fileid（QQ 的 rkey 会变,fileid 是这张图的稳定标识）。"""
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(url).query)
+    except Exception:
+        return None
+    for key in ("fileid", "file_id"):
+        vals = q.get(key)
+        if vals and vals[0]:
+            return vals[0]
+    return None
+
+
+def _get_media_url_candidates(resp) -> list[str]:
+    """从 OneBot get_image 的返回里提取可用 url（兼容多种实现形态）。"""
+    if resp is None:
+        return []
+    data = resp
+    if isinstance(resp, dict) and isinstance(resp.get("data"), (dict, str)):
+        data = resp["data"]
+    out: list[str] = []
+    if isinstance(data, dict):
+        for key in ("url", "file", "file_url", "path"):
+            v = data.get(key)
+            if isinstance(v, str) and v:
+                out.append(v)
+    elif isinstance(data, str):
+        out.append(data)
+    else:
+        for key in ("url", "file", "file_url", "path"):
+            v = getattr(data, key, None)
+            if isinstance(v, str) and v:
+                out.append(v)
+    if isinstance(resp, dict):
+        for key in ("url", "file", "file_url"):
+            v = resp.get(key)
+            if isinstance(v, str) and v:
+                out.append(v)
+    seen: set = set()
+    uniq: list[str] = []
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
+
+
+def _failure_subject_for(comp: Component) -> str:
+    """稳定去重键:优先 fileid（rkey 换了也能对上同一张图）,否则 host+path。"""
+    fid = (comp.meta or {}).get("fileid") or comp.file_id or ""
+    if fid and "://" not in str(fid):
+        return f"fileid:{fid}"
+    return failure_subject(comp.url)
 
 
 def _upgrade_qq_image_url(url: str) -> str:
@@ -62,7 +122,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.8.2: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -189,15 +249,29 @@ class MediaWardenStar(Star):
         self._recover_original_urls(event, media)
 
         # 1) 并发下载所有 media
+        #    v1.9: 先看索引库有没有同一条消息的旧成果(index_reuse_saved)。
         save_contexts = [
             SaveContext(platform=platform, group_id=group_id, sender_id=sender_id,
                         sender_name=sender_name, msg_id=msg_id, idx=idx, ts=ts)
             for idx in range(len(media))
         ]
-        dl_results = await self._download_all(media)
-        for comp, ctx, dl in zip(media, save_contexts, dl_results):
-            r = self._store_dl(comp, ctx, dl)
-            batch.items.append(r)
+        reuse: list[tuple[Optional[AssetResult], Optional[str]]] = [
+            (None, None) for _ in media
+        ]
+        if self.cfg.index_reuse_saved and self._index is not None:
+            for i, comp in enumerate(media):
+                hit = self._find_saved_asset(msg_id, i)
+                if hit is not None:
+                    reuse[i] = self._reuse_saved(comp, save_contexts[i], hit)
+        missing = [i for i, (r, _) in enumerate(reuse) if r is None]
+        fresh = await self._download_all([media[i] for i in missing], event)
+        for slot, dl in zip(missing, fresh):
+            reuse[slot] = (None, dl)
+        for comp, ctx, (reused, dl) in zip(media, save_contexts, reuse):
+            if reused is not None:
+                batch.items.append(reused)
+                continue
+            batch.items.append(self._store_dl(comp, ctx, dl))
 
         # 2) 转发节点(顺序,因渲染需要前序 json)
         for idx, comp in enumerate(forwards, start=len(media)):
@@ -217,9 +291,7 @@ class MediaWardenStar(Star):
             try:
                 yield event.chain_result([
                     At(qq=sender_id),
-                    Plain(
-                        f" 有 {batch.fail_count}/{batch.total} 个媒体保存失败"
-                    ),
+                    Plain(" 有 " + batch.failure_phrase()),
                 ])
             except Exception as e:
                 self._log(f"at-on-failure notify failed: {e!r}")
@@ -255,6 +327,10 @@ class MediaWardenStar(Star):
             url = ref.get("url")
             if url:
                 comp.url = url
+                fid = _url_fileid(url)
+                if fid:
+                    # 记下 fileid: rkey 会过期,fileid 是 OneBot get_image 的重取键
+                    comp.meta["fileid"] = fid
                 if ref.get("name") and not comp.name:
                     comp.name = ref["name"]
                 if ref.get("size") and not comp.size:
@@ -262,11 +338,14 @@ class MediaWardenStar(Star):
                 if self.cfg.log_to_stdout:
                     self._log(f"recovered original url for {comp.kind}: {url[:60]}...")
 
-    async def _download_all(self, media: list[Component]) -> list:
+    async def _download_all(self, media: list[Component], event=None) -> list:
         """并发下载所有 media 组件.
 
         用 Semaphore 限流到 cfg.max_concurrent.
         单个失败 -> 该项是 DownloadError,其他继续;最后返回 list[Downloaded|DownloadError].
+
+        v1.9: 每个组件按「原 url 重试 -> OneBot get_image 重取新链接 -> 组件本地副本」
+        三级回退;三级都失败才记失败(入索引库 + 写日志)。
         """
         if not media:
             return []
@@ -275,12 +354,7 @@ class MediaWardenStar(Star):
         async def _one(c):
             async with sem:
                 try:
-                    return await download(
-                        c, fetcher=astrbot_component_fetcher,
-                        retries=self.cfg.download_retries,
-                        max_bytes=self.cfg.max_file_size_bytes,
-                        timeout_s=self.cfg.download_timeout_s,
-                    )
+                    return await self._download_one(c, event)
                 except DownloadError as e:
                     return e
                 except Exception as e:
@@ -288,16 +362,90 @@ class MediaWardenStar(Star):
 
         return await asyncio.gather(*(_one(c) for c in media))
 
-    def _store_dl(self, comp: Component, ctx: SaveContext, dl) -> AssetResult:
+    async def _download_one(self, comp: Component, event=None):
+        """单个组件的三级下载回退;全失败时抛首个(最对症的)下载错误."""
+        attempts: list = []
+        try:
+            dl = await download(
+                comp, fetcher=astrbot_component_fetcher,
+                retries=self.cfg.download_retries,
+                max_bytes=self.cfg.max_file_size_bytes,
+                timeout_s=self.cfg.download_timeout_s,
+            )
+        except DownloadError as primary:
+            attempts.append(f"orig: {primary}")
+            note = getattr(primary, "fallback_error", None)
+            if note:
+                attempts.append(f"local: {note}")
+            dl = None
+            # 第二级: OneBot get_image 重取新链接(rkey 过期唯一能救回来的路)
+            if self.cfg.get_media_fallback and event is not None:
+                fresh = await self._fresh_media_url(comp, event)
+                if fresh and fresh != (comp.url or ""):
+                    try:
+                        dl = await download(
+                            Component(kind=comp.kind, url=fresh,
+                                      file_id=comp.file_id, meta=dict(comp.meta)),
+                            fetcher=aiohttp_fetcher,
+                            retries=self.cfg.download_retries,
+                            max_bytes=self.cfg.max_file_size_bytes,
+                            timeout_s=self.cfg.download_timeout_s,
+                        )
+                        dl.origin = fresh
+                        self._log(f"get_image refreshed url for {comp.kind}: {fresh[:60]}...")
+                    except DownloadError as e:
+                        dl = None
+                        attempts.append(f"get_image: {e}")
+                else:
+                    attempts.append("get_image: no new url")
+            # 第三级: 组件本地副本(napcat 的 temp 缓存 / raw 转换) —— 与 event 无关,总是试
+            if dl is None:
+                try:
+                    dl = await _local_fallback(comp, self.cfg.max_file_size_bytes)
+                except DownloadError as e:
+                    attempts.append(f"local: {e}")
+                else:
+                    self._log(f"used local copy for {comp.kind} after download failure")
+            if dl is None:
+                primary.fallback_error = "; ".join(attempts[:3])[:300]
+                raise primary
+        return dl
+
+    async def _fresh_media_url(self, comp: Component, event) -> Optional[str]:
+        """用 OneBot get_image 重取一个新链接（QQ 的 rkey 过期后唯一能救回来的路）。
+
+        非 OneBot / 无 file_id / 不支持的实现 -> None（调用方据此跳过这一级）。
+        """
+        bot = getattr(event, "bot", None)
+        call = getattr(bot, "call_action", None)
+        if not callable(call):
+            return None
+        fid = ((comp.meta or {}).get("fileid") or comp.file_id
+               or (comp.meta or {}).get("path") or "")
+        if not fid:
+            fid = _url_fileid(comp.url or "") or ""
+        if not fid:
+            return None
+        try:
+            resp = await call("get_image", file=str(fid))
+        except Exception as e:
+            self._log(f"get_image failed for {comp.kind}: {e!r}")
+            return None
+        for cand in _get_media_url_candidates(resp):
+            if cand != (comp.url or ""):
+                return cand
+        return None
+
+    def _store_dl(self, comp: Component, ctx: SaveContext, dl,
+                  *, reuse: bool = False) -> AssetResult:
         if isinstance(dl, DownloadError):
-            return AssetResult(kind=comp.kind, ok=False, err=f"download: {dl}")
+            return self._failed(comp, ctx, "download", f"download: {dl}",
+                                dl, url=comp.url)
         try:
             sr = self._storage.save(dl.data, comp, ctx, mime=dl.mime)
         except (ValueError, OSError, RuntimeError) as e:
-            return AssetResult(
-                kind=comp.kind, ok=False,
-                err=f"save: {type(e).__name__}: {e}",
-            )
+            return self._failed(comp, ctx, "save",
+                                f"save: {type(e).__name__}: {e}", e)
         if self._index is not None:
             try:
                 self._index.record(
@@ -309,9 +457,80 @@ class MediaWardenStar(Star):
             except Exception as e:
                 self._log(f"index record failed: {e!r}")
         preview = sr.path if comp.kind == "image" else None
+        note = None
+        origin = getattr(dl, "origin", None)
+        if origin:
+            note = f"链接已重取: {origin[:60]}"
         return AssetResult(
             kind=comp.kind, ok=True, path=sr.path,
-            size=dl.size, preview_path=preview, reused=sr.reused,
+            size=dl.size, preview_path=preview,
+            reused=(True if reuse else sr.reused), note=note,
+        )
+
+    # ----------------- 内部:失败入库 / 索引复用 -----------------
+
+    def _failed(self, comp: Component, ctx: SaveContext, stage: str,
+                err: str, err_obj=None, *, url: Optional[str] = None,
+                subject: Optional[str] = None) -> AssetResult:
+        """统一构造失败结果:失败原因分类 + 入索引库 + 写日志。"""
+        note = getattr(err_obj, "fallback_error", None)
+        if self._index is not None:
+            try:
+                subj = subject or _failure_subject_for(comp)
+                _id, attempts, last_ts = self._index.record_failure(
+                    platform=ctx.platform, group_id=ctx.group_id,
+                    sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=ctx.idx,
+                    kind=comp.kind, err=err, subject=subj, url=url,
+                )
+                if attempts > 1 and last_ts:
+                    extra = (f"  [历史第 {attempts} 次,"
+                             f"上次 {time.strftime('%m-%d %H:%M', time.localtime(last_ts))}]")
+                    note = f"{note or ''}{extra}".strip()
+            except Exception as e:
+                self._log(f"failure record failed: {e!r}")
+        self._log(f"{stage} failed for {comp.kind}: {err[:200]}")
+        return AssetResult(
+            kind=comp.kind, ok=False, err=err,
+            failure_kind="fetch" if classify_error(err) == "fetch" else "save",
+            note=note,
+        )
+
+    def _find_saved_asset(self, msg_id: str, idx: int) -> Optional[dict]:
+        """找同一条消息同一 idx 已落盘的资产(用于复用,不再下载)。"""
+        if self._index is None or not msg_id or idx is None:
+            return None
+        if msg_id in ("nomsg", "nonemsg", "0"):
+            return None
+        try:
+            rows = self._index.find_by_msg(msg_id)
+        except Exception as e:
+            self._log(f"index lookup failed: {e!r}")
+            return None
+        for r in rows:
+            if r.get("idx") == idx:
+                return r
+        return None
+
+    def _reuse_saved(self, comp: Component, ctx: SaveContext,
+                     hit: dict) -> tuple[AssetResult, None]:
+        """已有同 msg#idx 的落盘成果 -> 直接复用,跳过下载与落盘。"""
+        path = hit.get("path")
+        if path and not os.path.isfile(path):
+            self._log(f"index hit but file missing: {path}")
+            return (
+                AssetResult(kind=comp.kind, ok=False,
+                            err=f"reuse: stored file missing ({path})",
+                            failure_kind="save",
+                            note="索引命中但文件已不在磁盘"),
+                None,
+            )
+        return (
+            AssetResult(
+                kind=comp.kind, ok=True, path=path,
+                size=hit.get("size"), preview_path=path,
+                reused=True, note="索引复用",
+            ),
+            None,
         )
 
     # ----------------- 内部:转发处理(同 v1.2) -----------------
@@ -570,26 +789,22 @@ class MediaWardenStar(Star):
                 async def _fetch(url: str) -> bytes:
                     async with sem:
                         hi = _upgrade_qq_image_url(url)
-                        if hi != url:
+                        candidates = [hi, url] if hi != url else [url]
+                        last: Optional[DownloadError] = None
+                        for cand in candidates:
                             try:
                                 dl = await download(
-                                    Component(kind="image", url=hi),
+                                    Component(kind="image", url=cand),
                                     fetcher=aiohttp_fetcher,
                                     retries=self.cfg.download_retries,
                                     timeout_s=self.cfg.download_timeout_s,
                                     max_bytes=self.cfg.max_file_size_bytes,
                                 )
                                 return dl.data
-                            except DownloadError:
-                                pass
-                        dl = await download(
-                            Component(kind="image", url=url),
-                            fetcher=aiohttp_fetcher,
-                            retries=self.cfg.download_retries,
-                            timeout_s=self.cfg.download_timeout_s,
-                            max_bytes=self.cfg.max_file_size_bytes,
-                        )
-                        return dl.data
+                            except DownloadError as e:
+                                last = e
+                        raise last if last is not None else DownloadError(
+                            f"no candidate url for {url!r}")
 
                 # 并发拉
                 results_dl = await asyncio.gather(
@@ -733,8 +948,36 @@ class MediaWardenStar(Star):
             f"  assets: {s.get('total', 0)}\n"
             f"  by_kind: {s.get('by_kind', {})}\n"
             f"  total_bytes: {s.get('total_bytes', 0)}\n"
+            f"  failures: {s.get('failures', 0)}\n"
+            f"  failures_by_kind: {s.get('failures_by_kind', {})}\n"
             f"  db: {s.get('db_path', '?')}"
         )
+
+    @filter.command("warden fail")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_warden_failures(self, event: AstrMessageEvent, arg: str = ""):
+        """用法: /warden fail [n]   最近 n 条保存失败记录(默认 10, 上限 50)"""
+        if self._index is None:
+            yield event.plain_result("[Warden] 索引未启用")
+            return
+        try:
+            n = int(arg.strip()) if arg.strip() else 10
+        except ValueError:
+            n = 10
+        n = max(1, min(n, 50))
+        rows = self._index.recent_failures(n)
+        if not rows:
+            yield event.plain_result("[Warden] (没有失败记录)")
+            return
+        lines = [f"## 最近 {len(rows)} 条保存失败"]
+        for r in rows:
+            ts = time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))
+            lines.append(
+                f"- [{ts}] {r['kind']} msg={r['msg_id']}#{r['idx']} "
+                f"attempts={r.get('attempts')} subject={r.get('subject')}\n"
+                f"    {r.get('err')}"
+            )
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("warden export")
     @filter.permission_type(filter.PermissionType.ADMIN)

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -40,8 +40,11 @@ class MediaWardenConfig:
     avatar_cache_size_mb: int = 50
     # v1.8.0: 允许抓取头像的平台白名单(其他平台直接跳过)
     avatar_platforms: List[str] = field(default_factory=lambda: ["aiocqhttp", "qq_official"])
-    # v1.7.1: 转发渲染上限(超过此节点数自动降级 JSON-only)
+    # v1.7.1: 转发渲染上限(超过此节点数自动降级 JSON)
     forward_render_max_nodes: int = 30
+    # v1.9.0: 源链接失效后的补救 + 失败入库
+    get_media_fallback: bool = True
+    index_reuse_saved: bool = False
 
     max_file_size_bytes: int = field(init=False)
 
