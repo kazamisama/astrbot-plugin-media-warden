@@ -39,7 +39,7 @@ from .warden import (
 from .warden.components import Component
 from .warden.downloader import (
     aiohttp_fetcher, astrbot_component_fetcher,
-    download, download_many, DownloadError, _local_fallback,
+    download, download_many, DownloadError, Downloaded, _local_fallback,
 )
 from .warden.storage import Storage, SaveContext
 from .warden.index import failure_subject
@@ -95,6 +95,59 @@ def _get_media_url_candidates(resp) -> list[str]:
     return uniq
 
 
+# OneBot get_image 的参数形态:AstrBot 核心的 quoted_message/image_resolver.py 也是
+# 逐个试这些形状(见 _build_image_resolve_actions)。不同 OneBot 实现对 file/file_id 的
+# 语义不一致,只试一种就会像 v1.9.0 那样静默降级。
+_GET_IMAGE_PARAM_FORMS = ("file", "file_id", "id", "image")
+_MAX_REFETCH_ATTEMPTS = 8
+_MAX_REFETCH_CANDIDATES = 3
+
+
+def _b64_payload(raw: str) -> Optional[bytes]:
+    """解 base64(兼容 data:image/...;base64, 前缀),解不出来返回 None。"""
+    import base64
+    s = raw.split(",", 1)[-1] if raw.startswith("data:") else raw
+    try:
+        return base64.b64decode(s + "=" * (-len(s) % 4), validate=False)
+    except Exception:
+        return None
+
+
+def _media_refetch_candidates(comp: Component) -> list[str]:
+    """get_image 的候选取值:原始 segment 的 file(最可靠)优先,fileid 兜底。
+
+    AstrBot 4.26+ 的 PreProcessStage 会把 Image 组件重写成 jpeg 静帧并覆盖
+    component.file_id(值变成 "C0C9610D...jpg" 这种本地文件名),拿它当 get_image 的
+    入参会得到 retcode=1200 file not found —— 所以原始 segment 的 file 要优先。
+    """
+    meta = comp.meta or {}
+    out: list[str] = []
+    seen: set = set()
+
+    def _add(v) -> None:
+        if not isinstance(v, str):
+            return
+        v = v.strip()
+        if not v or v in seen or "://" in v or len(v) > 256:
+            return
+        seen.add(v)
+        out.append(v)
+        # AstrBot 核心还会再试一次去掉扩展名的 basename
+        base, _, ext = v.rpartition(".")
+        if base and ext and len(ext) <= 5 and base not in seen:
+            seen.add(base)
+            out.append(base)
+
+    for v in (meta.get("raw_file"), meta.get("file"),
+              meta.get("fileid"), meta.get("file_id"),
+              _url_fileid(comp.url or ""),
+              (meta.get("path") if not os.path.exists(str(meta.get("path") or ""))
+               else None),
+              comp.file_id):
+        _add(v)
+    return out
+
+
 def _failure_subject_for(comp: Component) -> str:
     """稳定去重键:优先 fileid（rkey 换了也能对上同一张图）,否则 host+path。"""
     fid = (comp.meta or {}).get("fileid") or comp.file_id or ""
@@ -122,7 +175,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.1: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image 多形态重取 / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -331,6 +384,12 @@ class MediaWardenStar(Star):
                 if fid:
                     # 记下 fileid: rkey 会过期,fileid 是 OneBot get_image 的重取键
                     comp.meta["fileid"] = fid
+                # 记下 segment 原始的 file: napcat 的图片 id。PreProcessStage 会把
+                # component.file_id 覆盖成 jpeg 静帧文件名,那个值 get_image 查不到
+                # (retcode=1200 file not found) —— 补救时必须优先用这个原值。
+                raw_file = ref.get("file")
+                if isinstance(raw_file, str) and raw_file:
+                    comp.meta["raw_file"] = raw_file
                 if ref.get("name") and not comp.name:
                     comp.name = ref["name"]
                 if ref.get("size") and not comp.size:
@@ -378,26 +437,16 @@ class MediaWardenStar(Star):
             if note:
                 attempts.append(f"local: {note}")
             dl = None
-            # 第二级: OneBot get_image 重取新链接(rkey 过期唯一能救回来的路)
+            # 第二级: OneBot get_image 重取(rkey 过期唯一能救回来的路)
             if self.cfg.get_media_fallback and event is not None:
-                fresh = await self._fresh_media_url(comp, event)
-                if fresh and fresh != (comp.url or ""):
-                    try:
-                        dl = await download(
-                            Component(kind=comp.kind, url=fresh,
-                                      file_id=comp.file_id, meta=dict(comp.meta)),
-                            fetcher=aiohttp_fetcher,
-                            retries=self.cfg.download_retries,
-                            max_bytes=self.cfg.max_file_size_bytes,
-                            timeout_s=self.cfg.download_timeout_s,
-                        )
-                        dl.origin = fresh
-                        self._log(f"get_image refreshed url for {comp.kind}: {fresh[:60]}...")
-                    except DownloadError as e:
-                        dl = None
-                        attempts.append(f"get_image: {e}")
-                else:
-                    attempts.append("get_image: no new url")
+                self._refetch_last_error = None
+                dl = await self._refetch_media(comp, event)
+                if dl is None:
+                    why = getattr(self, "_refetch_last_error", None)
+                    attempts.append(
+                        f"get_image: {why}" if why is not None
+                        else "get_image: no usable ref"
+                    )
             # 第三级: 组件本地副本(napcat 的 temp 缓存 / raw 转换) —— 与 event 无关,总是试
             if dl is None:
                 try:
@@ -411,29 +460,85 @@ class MediaWardenStar(Star):
                 raise primary
         return dl
 
-    async def _fresh_media_url(self, comp: Component, event) -> Optional[str]:
-        """用 OneBot get_image 重取一个新链接（QQ 的 rkey 过期后唯一能救回来的路）。
+    async def _refetch_media(self, comp: Component, event):
+        """二级补救:用 OneBot get_image/get_file 重取这张图(rkey 过期唯一能救回来的路)。
 
-        非 OneBot / 无 file_id / 不支持的实现 -> None（调用方据此跳过这一级）。
+        对 (候选值 × 参数形态) 依次尝试 —— 不同 OneBot 实现对 file/file_id 的语义
+        不一致,只试一种就会像 v1.9.0 那样静默降级(线上实测 retcode=1200
+        file not found)。返回 Downloaded 或 None(调用方据此跳到第三级本地副本)。
         """
+        call = self._resolve_call_action(event)
+        if call is None:
+            return None
+        cands = _media_refetch_candidates(comp)
+        if not cands:
+            return None
+        old = (comp.url or "").strip()
+        attempts = 0
+        primary = None  # 最近一次异常,全败时返回 None 让调用方保留原始错误
+        for cand in cands[:_MAX_REFETCH_CANDIDATES]:
+            for key in _GET_IMAGE_PARAM_FORMS:
+                if attempts >= _MAX_REFETCH_ATTEMPTS:
+                    break
+                attempts += 1
+                try:
+                    resp = await call("get_image", **{key: cand})
+                except Exception as e:  # ActionFailed / 不支持该参数形态
+                    primary = e
+                    continue
+                data = resp.get("data") if isinstance(resp, dict) else None
+                if not isinstance(data, dict):
+                    continue
+                size = data.get("file_size")
+                try:
+                    size = int(size) if size not in (None, "") else 0
+                except (TypeError, ValueError):
+                    size = 0
+                fresh = data.get("url")
+                if isinstance(fresh, str) and fresh and fresh != old:
+                    try:
+                        dl = await download(
+                            Component(kind=comp.kind, url=fresh,
+                                      file_id=comp.file_id,
+                                      meta=dict(comp.meta or {})),
+                            fetcher=aiohttp_fetcher,
+                            retries=self.cfg.download_retries,
+                            max_bytes=self.cfg.max_file_size_bytes,
+                            timeout_s=self.cfg.download_timeout_s,
+                        )
+                    except DownloadError as e:
+                        primary = e
+                        continue
+                    dl.origin = fresh
+                    self._log(f"get_image refreshed url via {key}=... "
+                              f"for {comp.kind}: {fresh[:60]}...")
+                    return dl
+                # 有些实现只给出本地路径 / base64
+                b64 = data.get("base64")
+                if isinstance(b64, str) and b64 and len(b64) >= 16:
+                    raw = _b64_payload(b64)
+                    if raw:
+                        dl = Downloaded(data=raw, mime=None, size=len(raw))
+                        dl.origin = f"base64:{cand[:24]}"
+                        self._log(f"get_image returned base64 for {comp.kind}")
+                        return dl
+            if attempts >= _MAX_REFETCH_ATTEMPTS:
+                break
+        self._refetch_last_error = primary
+        self._log(f"get_image/get_file exhausted for {comp.kind} "
+                  f"({attempts} attempts, {len(cands)} candidate(s))")
+        return None
+
+    @staticmethod
+    def _resolve_call_action(event):
+        """兼容 AstrBot 核心的取法:event.bot.api.call_action(aiocqhttp) 优先。"""
         bot = getattr(event, "bot", None)
-        call = getattr(bot, "call_action", None)
-        if not callable(call):
+        if bot is None:
             return None
-        fid = ((comp.meta or {}).get("fileid") or comp.file_id
-               or (comp.meta or {}).get("path") or "")
-        if not fid:
-            fid = _url_fileid(comp.url or "") or ""
-        if not fid:
-            return None
-        try:
-            resp = await call("get_image", file=str(fid))
-        except Exception as e:
-            self._log(f"get_image failed for {comp.kind}: {e!r}")
-            return None
-        for cand in _get_media_url_candidates(resp):
-            if cand != (comp.url or ""):
-                return cand
+        for obj in (getattr(bot, "api", None), bot):
+            call = getattr(obj, "call_action", None)
+            if callable(call):
+                return call
         return None
 
     def _store_dl(self, comp: Component, ctx: SaveContext, dl,

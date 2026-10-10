@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.9.1
+
+### Fixed
+- **`get_image` 的入参用错了字段**（v1.9.0 的二级补救形同虚设）。v1.9.0 把 `component.file_id` 当 OneBot `get_image` 的入参传，而 AstrBot 4.26+ 的 `PreProcessStage` 早把 `Image` 组件重写成 jpeg 静帧、`component.file_id` 已变成 `C0C9610D3203EB3B404638B24226AE23.jpg` 这种本地文件名 —— napcat 按「路径/URL/Base64」解析它，返回 `retcode=1200 file not found`（线上 2026-10-10 日志逐字可见），补救直接掉到第三级（本地副本也常常没有）→ 用户看到「最新的图也说链接失效」。
+  - `_recover_original_urls()` 现在把 raw segment 里的 `file`（napcat 自己的图片 id）与 `fileid` 一起记进 `comp.meta`（`raw_file` / `fileid`）。
+  - 新增 `_media_refetch_candidates()`：候选取值按 **`meta["raw_file"]` → `meta["file"]` → `meta["fileid"]` → `meta["file_id"]` → url 里的 `fileid` → 非本地存在的 `meta["path"]` → `component.file_id`** 排序并去重（每个候选还会补一条去扩展名的 basename，与 AstrBot 核心的 `_build_image_id_candidates` 一致），最多取 3 个。
+  - 新增 `_refetch_media()` 取代 `_fresh_media_url()`：对 (候选 × 参数形态) 依次尝试，参数形态为 `file` / `file_id` / `id` / `image`（与 AstrBot 核心 `quoted_message/image_resolver.py::_build_image_resolve_actions` 同款），总尝试上限 8 次；响应里除 `data.url` 外还接受 `data.base64`（解成字节直接入库）。
+  - `bot.call_action` 的取法也向核心看齐：优先 `event.bot.api.call_action`（aiocqhttp），再退回 `event.bot.call_action`。
+
+### Tests
+- `_smoke.py` PHASE5 新增 2 项（→ 14）：补救候选排序（raw_file 优先、去扩展名 basename、fileid 兜底）、`get_image` 逐形态尝试 + base64 返回；`test_recover_raw_url_overrides_local_jpeg` 补断言 `meta["raw_file"]`/`meta["fileid"]`。
+- 冒烟总数 **95 → 97**（phase1=22 phase2=16 phase3=21 phase4=24 phase5=14）。
+
 ## v1.9.0
 
 ### Added

@@ -2849,6 +2849,10 @@ def test_recover_raw_url_overrides_local_jpeg():
     assert comp.url == "https://multimedia.nt.qq.com.cn/download?fileid=xyz", comp.url
     assert comp.name == "ABCD.gif"
     assert comp.size == 1226503
+    # v1.9.1: segment 原始 file 必须留下来 —— PreProcessStage 覆盖后的 component.file_id
+    # 是 jpeg 静帧名,get_image 拿它查不到(retcode=1200 file not found)
+    assert comp.meta.get("raw_file") == "ABCD.gif", comp.meta
+    assert comp.meta.get("fileid") == "xyz", comp.meta
     print("  OK -> component.url restored to original http gif link")
 
 
@@ -3096,6 +3100,66 @@ def test_main_get_media_fallback_uses_get_image_url():
     print("  OK -> get_image returned a fresh url; original rkey was dead")
 
 
+def test_main_media_refetch_candidates_prefer_raw_file():
+    banner("plugin: 补救候选优先用 segment 原始 file,并兼容多种 get_image 参数形态")
+    from astrbot_plugin_media_warden_smoke import main as _m
+    comp = _make_component(url="https://multimedia.nt.qq.com.cn/download?fileid=FID7&rkey=dead")
+    comp.file_id = "C0C9610D3203EB3B404638B24226AE23.jpg"  # PreProcessStage 覆盖后的值
+    comp.meta["fileid"] = "FID7"
+    comp.meta["raw_file"] = "C0C9610D3203EB3B404638B24226AE23.jpg"
+    cands = _m._media_refetch_candidates(comp)
+    assert cands[0] == "C0C9610D3203EB3B404638B24226AE23.jpg", cands
+    assert cands[1] == "C0C9610D3203EB3B404638B24226AE23", cands  # 去扩展名的 basename
+    assert "FID7" in cands, cands
+    assert len(cands) <= 3, cands
+    # 没有原始 file 时退到 fileid
+    comp2 = _make_component(url="https://x/d?fileid=FID8")
+    comp2.file_id = "jpeg.jpg"
+    comp2.meta.clear()
+    assert _m._media_refetch_candidates(comp2)[0] == "FID8"
+    assert _m._b64_payload("data:image/png;base64,UE5H") == b"PNG"
+    print("  OK -> raw segment file ranked first; fileid is the fallback")
+
+
+def test_main_refetch_tries_param_forms_and_base64():
+    banner("plugin: get_image 逐形态尝试(file/file_id/id/image)并支持 base64 返回")
+    import asyncio
+    import base64
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+
+    calls = []
+    payload = base64.b64encode(b"PNG-FROM-BASE64").decode()
+
+    class _Api:
+        async def call_action(self, action, **kw):
+            calls.append((action, kw))
+            if action != "get_image":
+                raise RuntimeError("unsupported action")
+            if kw.get("file_id") == "RAW-1":
+                return {"status": "ok", "retcode": 0,
+                        "data": {"base64": payload, "file_size": "15"}}
+            raise RuntimeError("ActionFailed retcode=1200 file not found")
+
+    class _Bot:
+        api = _Api()
+
+    class _Ev:
+        bot = _Bot()
+
+    comp = _make_component(url="https://multimedia.nt.qq.com.cn/download?fileid=FID9")
+    comp.file_id = None
+    comp.meta["raw_file"] = "RAW-1"
+    dl = asyncio.run(pl._refetch_media(comp, _Ev()))
+    assert dl is not None, "base64 branch should rescue the image"
+    assert dl.data == b"PNG-FROM-BASE64", dl.data
+    assert (dl.origin or "").startswith("base64:"), dl.origin
+    # 第一个形态 file= 先试(线上就是它返回 file not found),随后 file_id= 命中
+    assert calls[0] == ("get_image", {"file": "RAW-1"}), calls
+    assert ("get_image", {"file_id": "RAW-1"}) in calls, calls
+    print(f"  OK -> tried {len(calls)} (action, params) shape(s) before base64 hit")
+
+
 def test_main_download_failure_records_to_index():
     banner("plugin: 下载全败 -> 失败入库(subject=fileid) 且回执带原因")
     import asyncio
@@ -3232,6 +3296,8 @@ PHASE5 = [
     test_downloader_falls_back_to_refreshed_url,
     test_main_get_media_fallback_uses_local_copy,
     test_main_get_media_fallback_uses_get_image_url,
+    test_main_media_refetch_candidates_prefer_raw_file,
+    test_main_refetch_tries_param_forms_and_base64,
     test_main_download_failure_records_to_index,
     test_main_index_reuse_saved_media,
     test_plugin_warden_fail_command,
