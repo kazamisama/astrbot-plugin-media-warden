@@ -243,9 +243,11 @@ def _failure_subject_for(comp: Component) -> str:
 
 # v1.9.9: 网络全败后「等客户端把图下载下来再查本地缓存」的等待点(秒)。
 # 线上实测(2026-10-11): 消息刚到的那一瞬间客户端还没落盘 —— 插件第一次查必 miss,
-# 而 napcat 给的那条 url 又已经失效(http 400); 客户端随后(几秒~几十秒)才下载。
-# 只在三级补救全败时才走, 单次代价 = sum(_LATE_CACHE_DELAYS_S)。
-_LATE_CACHE_DELAYS_S = (4, 12)
+# 而 napcat 给的那条 url 又已经失效(http 400); 客户端随后(几秒~几分钟)才下载。
+# 实测那一次 d867ce16… 在转发失败后 6.5 分钟才落到本地缓存, 所以窗口从 20s
+# 扩到 25s; 但更大的窗口会拖慢回执, 更慢的情形留给「重新触发一次」。
+# 只在前面的路全败时才走, 单次代价 = sum(_LATE_CACHE_DELAYS_S)。
+_LATE_CACHE_DELAYS_S = (5, 20)
 
 
 def _upgrade_qq_image_url(url: str) -> str:
