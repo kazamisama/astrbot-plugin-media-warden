@@ -260,7 +260,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.5: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.6: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5(含转发节点图) / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -847,6 +847,40 @@ class MediaWardenStar(Star):
 
     # ----------------- 内部:转发处理(同 v1.2) -----------------
 
+    async def _forward_local_cached(self, ref):
+        """转发节点内图片的⓪级补救：按 segment 的 `file`(MD5) 读 QQ 本地缓存。
+
+        节点图以前只能靠节点内嵌 url（rkey 一过期就整图失败、不落盘）。节点里的
+        image 段其实同样带 `file=<md5>.<ext>`，所以这里复用同一条本地缓存查找。
+        没命中/没开补救/没有 file 字段时返回 None，调用方照旧走网络。
+        """
+        if not self.cfg.get_media_fallback or not isinstance(ref, dict):
+            return None
+        name = ref.get("file")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        try:
+            from .warden.localcache import find_cached_image as _find
+        except Exception as e:  # noqa: BLE001
+            self._log(f"localcache module unavailable: {e!r}")
+            return None
+        try:
+            path = await asyncio.to_thread(_find, name.strip())
+        except Exception as e:  # noqa: BLE001
+            self._log(f"forward local cache lookup failed for {name!r}: {e!r}")
+            return None
+        if not path:
+            return None
+        try:
+            data = await asyncio.to_thread(
+                _read_local_file, path, self.cfg.max_file_size_bytes
+            )
+        except DownloadError as e:
+            self._log(f"forward local cache hit but unreadable ({path}): {e}")
+            return None
+        self._log(f"used QQ local cache for forward node image: {path}")
+        return data.data
+
     async def _fetch_forward_nodes(self, comp: Component,
                                    event: AstrMessageEvent | None):
         """用 OneBot get_forward_msg 拉取合并转发的节点内容。
@@ -1088,18 +1122,28 @@ class MediaWardenStar(Star):
         if want_image and nodes:
             # 节点内图片也并发下载
             all_urls: list[str] = []
+            all_refs: list[dict] = []  # 与 all_urls 一一对应:该图的 segment data(file/url/...)
             url_to_node: list[int] = []  # 第 N 个 url 对应第几个 node
             for ni, nd in enumerate(nodes):
+                refs = getattr(nd, "image_refs", None) or [
+                    {"url": u} for u in nd.image_urls
+                ]
                 for u in nd.image_urls:
                     all_urls.append(u)
                     url_to_node.append(ni)
+                for ref in refs:
+                    all_refs.append(ref if isinstance(ref, dict) else {"url": ref})
             node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
             failed_urls = 0
             if all_urls:
                 sem = asyncio.Semaphore(self.cfg.max_concurrent)
 
-                async def _fetch(url: str) -> bytes:
+                async def _fetch(url: str, ref: Optional[dict] = None) -> bytes:
                     async with sem:
+                        # ⓪ QQ 本地缓存(节点图也有 file=MD5 时直接读盘,不碰网络)
+                        cached = await self._forward_local_cached(ref)
+                        if cached is not None:
+                            return cached
                         hi = _upgrade_qq_image_url(url)
                         candidates = [hi, url] if hi != url else [url]
                         last: Optional[DownloadError] = None
@@ -1120,7 +1164,8 @@ class MediaWardenStar(Star):
 
                 # 并发拉
                 results_dl = await asyncio.gather(
-                    *(_fetch(u) for u in all_urls),
+                    *(_fetch(u, all_refs[pos] if pos < len(all_refs) else None)
+                      for pos, u in enumerate(all_urls)),
                     return_exceptions=True,
                 )
                 for pos, r in enumerate(results_dl):

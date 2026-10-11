@@ -1145,7 +1145,18 @@ def test_forwarder_coerce_nodes():
     assert nodes[0].sender_name == "alice" and nodes[0].sender_id == "u1"
     assert nodes[0].text == "hi"
     assert nodes[0].image_urls == ["https://x/a.png"]
+    # v1.9.5: 节点图的 segment data 要整份留下来(file=MD5 是本地缓存的钥匙)
+    assert nodes[0].image_refs == [{"url": "https://x/a.png"}], nodes[0].image_refs
     assert nodes[1].text == "plain string"
+    # file 与 url 并存(真实 napcat 形态)时两者都要在
+    raw2 = [{"type": "node", "data": {"user_id": "u2", "content": [
+        {"type": "image", "data": {"file": "AABB.jpg", "url": "https://x/b.jpg",
+                                   "file_size": "123"}},
+    ]}}]
+    n2 = _coerce_nodes(raw2)[0]
+    assert n2.image_urls == ["https://x/b.jpg"], n2.image_urls
+    assert n2.image_refs[0]["file"] == "AABB.jpg", n2.image_refs
+    assert n2.image_refs[0]["file_size"] == "123", n2.image_refs
     print("  OK")
 
 
@@ -3497,6 +3508,85 @@ def test_main_download_prefers_qq_local_cache():
           f"get_media_fallback=false 时缓存被忽略")
 
 
+def test_forward_local_cached_uses_node_file_md5():
+    banner("plugin: 转发节点图也走 QQ 本地缓存(节点 segment 的 file=MD5)")
+    import asyncio
+    lg = plugin_warden.localcache
+    tmp = tempfile.mkdtemp(prefix="warden_lcf_")
+    acct = os.path.join(tmp, "2510536451")
+    c2c = os.path.join(acct, "Image", "C2C", "Image2")
+    os.makedirs(c2c)
+    md5 = "74760010d20c862b46a660054f601ead"
+    path = os.path.join(c2c, md5 + ".jpg")
+    with open(path, "wb") as f:
+        f.write(b"JPEG-NODE-CACHED")
+
+    pl = _build_plugin_for_command(tempfile.mkdtemp(prefix="warden_lcf2_"))
+    hits = {"n": 0}
+
+    async def _boom(c, **kw):
+        hits["n"] += 1
+        raise DownloadError("http 400 for 'https://multimedia.nt.qq.com.cn/download?rkey=x'")
+
+    orig_acct = lg._account_dirs
+    orig_dl = plugin_main.download
+    lg._account_dirs = lambda: [acct]
+    plugin_main.download = _boom
+    try:
+        ref = {"file": md5 + ".jpg", "url": "https://multimedia.nt.qq.com.cn/download?rkey=x",
+               "file_size": "18749"}
+        # 直接调 helper:命中本地缓存,返回 bytes,不碰网络
+        data = asyncio.run(pl._forward_local_cached(ref))
+        assert data == b"JPEG-NODE-CACHED", data
+        assert hits["n"] == 0, hits
+
+        # 整条 _save_forward 路径:节点图同样应在网络之前命中本地缓存
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            {"storage_root": tempfile.mkdtemp(prefix="warden_lcf8_"),
+             "forward_render_mode": "both",
+             "enable_index_db": False,
+             "enable_user_avatar": False})
+        asyncio.run(inst.initialize())
+        assert inst._forwarder is not None, "需要可用的 forwarder 才能测渲染路径"
+        url = "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=X&rkey=x"
+        comp = Component(kind="forward", meta={"nodes": [
+            {"type": "node", "data": {
+                "nickname": "alice", "user_id": "u1", "time": 1718600000,
+                "content": [
+                    {"type": "text", "data": {"text": "看这图"}},
+                    {"type": "image", "data": {"file": md5 + ".jpg", "url": url,
+                                               "file_size": "18749"}},
+                ],
+            }},
+        ]})
+        save_ctx = SaveContext(
+            platform="aiocqhttp", group_id="g1", sender_id="u1",
+            sender_name="alice", msg_id="mf1", idx=0, ts=1718600000)
+        results = asyncio.run(inst._save_forward(comp, save_ctx, None))
+        assert results, results
+        assert all(r.ok for r in results), [(r.kind, r.ok, r.err) for r in results]
+        assert hits["n"] == 0, f"节点图应从本地缓存来,却走了网络 {hits['n']} 次"
+        assert any(r.path and r.path.endswith(".png") for r in results), results
+
+        # 没有 file 字段 -> 返回 None(照旧走网络)
+        assert asyncio.run(pl._forward_local_cached({"url": "https://x/a.jpg"})) is None
+        # 非 dict -> None
+        assert asyncio.run(pl._forward_local_cached(None)) is None
+        # 关掉补救开关 -> None
+        off = _build_plugin_for_command(tempfile.mkdtemp(prefix="warden_lcf3_"),
+                                        extra={"get_media_fallback": False})
+        assert asyncio.run(off._forward_local_cached(ref)) is None
+        # 文件不在缓存里 -> None
+        assert asyncio.run(pl._forward_local_cached(
+            {"file": "ffffffffffffffffffffffffffffffff.jpg"})) is None
+    finally:
+        lg._account_dirs = orig_acct
+        plugin_main.download = orig_dl
+    print(f"  OK -> 节点图 {len(data)}B 从本地缓存来(整条 _save_forward 路径网络调用 0 次); "
+          f"无 file / 关开关 / 未命中都退回网络")
+
+
 PHASE5 = [
     test_url_fileid_extraction,
     test_reporter_classify_fetch_vs_save,
@@ -3515,6 +3605,7 @@ PHASE5 = [
     test_index_failure_stats_and_prune,
     test_localcache_finds_qq_image_by_md5,
     test_main_download_prefers_qq_local_cache,
+    test_forward_local_cached_uses_node_file_md5,
 ]
 
 

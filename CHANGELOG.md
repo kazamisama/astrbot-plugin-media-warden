@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.9.6
+
+### Fixed
+- **合并转发的节点图也接上本地缓存补救**（v1.9.5 上线后现场复测：普通图片已能保存，但转发链仍整图失败）。20:02:47 线上逐字：`forward fetched: 2 nodes for id=7695379530489107755` → `forward render aborted: 2/2 node image(s) failed to download` → `[Warden] ⚠️ 部分保存失败 (0/1) — 下载失败（源链接失效）`。
+  根因是 `_save_forward` 的节点图**从不经过 `_download_one`**：它从节点内嵌 url 直接 `aiohttp_fetcher` 下载（只试 `[is_origin=1, 原 url]` 两个候选），链路里没有第 ⓪ 级。而节点里的 image 段其实同样带 `file=<md5>.<ext>` —— 钥匙一直握在手里。
+- `warden/forwarder.py`：`ForwardNode` 新增 `image_refs: List[dict]`，与 `image_urls` 一一对应，存放该 image 段的原始 segment `data`（`file`/`url`/`file_size`）。`_coerce_nodes` 填它但不改 `image_urls` 的语义（仍是 `url or file`），老调用方不受影响。
+- `main.py`：新增 `_forward_local_cached(ref)`；`_save_forward` 的 `_fetch(url)` 改为 `_fetch(url, ref)`，**先查本地缓存再走网络**，`all_urls` 与 `all_refs` 同步构造。
+- 日志：命中时 `used QQ local cache for forward node image: <path>`。
+
+### Notes
+- 与 v1.9.5 同一条 `get_media_fallback` 开关；关掉即回到 v1.5.0 的「只试两个 url、任一失败即整体失败、不落盘」。
+- 节点段没有 `file` 字段（非 napcat 实现、或节点图是外链）时行为不变。
+
+### Tests
+- `_smoke.py` 新增 `test_forward_local_cached_uses_node_file_md5`：走**整条 `_save_forward`**（`forward_render_mode="both"`）验证节点图从本地缓存来、网络调用 **0** 次、PNG 正常产出；并覆盖「无 `file` / 非 dict / 关闭开关 / 未命中」四种回退。`test_forwarder_coerce_nodes` 补 `image_refs` 断言。总数 **100 → 101**（phase5 17 → 18）。
+
 ## v1.9.5
 
 ### Fixed

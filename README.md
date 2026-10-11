@@ -19,6 +19,7 @@
 - v1.9.2：新增 `get_msg` 重取路径 —— 读 napcat 实现后确认 `get_image` 对图片无效（它只认自己内存里 24h TTL 的消息文件 uuid，而 image 段只回传文件名），改用 `get_msg` 让 napcat 用**当前** rkey 重新解析整条消息拿新链接；每跳败因写进日志与回执
 - v1.9.3：修 `get_msg` 返回被解包的问题（aiocqhttp 的 `call_action` 成功时已 `return result["data"]`，原代码只在外壳里找 `message`）
 - v1.9.5：**首选 QQ 本地图片缓存** —— 按消息段 MD5（`<md5>.<ext>`）在 `Tencent Files/<QQ号>/Image/C2C/Image2/` 与 `nt_qq/nt_data/Emoji/emoji-recv/*/Ori/` 找图片本体，命中即用、**不走网络**；rkey 过期（http 400）的图因此能正常保存
+- v1.9.6：**合并转发的节点图接同一条本地缓存** —— `ForwardNode` 新增 `image_refs` 保留节点 image 段的 `file`(MD5)，`_save_forward` 拉节点图前先查本地缓存
 
 ## 目录
 
@@ -156,14 +157,14 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **100 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 17），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **101 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 18），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
 - 组件识别与 raw_message URL 恢复
 - 落盘 roundtrip、blake2b 去重、路径越权防护、篡改/内容变更指针拒绝
 - 下载：aiohttp mock、超限中断、指数退避、并发保序
-- 下载补救链：**QQ 本地缓存按 MD5（命中即不碰网络）**、本地副本回退、`get_image` 重取新链接（含候选排序与多参数形态 / base64 返回）、`get_msg` 重解析拿新链接（含多图挑段）、全败保留原始错误
+- 下载补救链：**QQ 本地缓存按 MD5（命中即不碰网络；含合并转发节点图）**、本地副本回退、`get_image` 重取新链接（含候选排序与多参数形态 / base64 返回）、`get_msg` 重解析拿新链接（含多图挑段）、全败保留原始错误
 - 失败分类与回执文案（下载失败 vs 落盘失败）、失败入库与 attempts 累加、`/warden fail`
 - 索引复用（命中 / 文件已缺失时如实报错）
 - 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成 / json 模式不抓头像
@@ -177,7 +178,7 @@ python -m pytest -q _smoke.py
 - 私聊 / 系统消息默认跳过
 - 透明 GIF / WebP 动画按首帧处理，未做帧动画合成
 - 命令权限、头像网络抓取、`image_result` 协议差异需要真实 AstrBot runtime 验证
-- 转发节点图（`_save_forward`）走的是节点内嵌 url，没有 `file_id`，因此**不参与 v1.9.0+ 的 `get_image` / 本地缓存 / 本地副本补救**；任一节点图失败仍按 v1.5.0 设计整体失败、不落盘
+- 转发节点图（`_save_forward`）走的是节点内嵌 url + 节点 image 段的 `file`(MD5)：**v1.9.6 起会先查 QQ 本地缓存**，但节点段没有 `file` 字段（非 napcat 实现 / 外链图）时仍只有 `[is_origin=1, 原 url]` 两个候选，任一失败即按 v1.5.0 设计整体失败、不落盘
 - **QQ 本地缓存补救依赖 QQ 客户端自己的缓存目录**（`Tencent Files/<QQ号>/…`，Windows 默认在“文档”下）：缓存被清理、机器人跑在与 QQ 不同的机器上、或消息段的 `data.file` 不是 32 位 MD5 时，这条路用不上，会照旧返回失败
 - 高并发群发场景尚未压测
 

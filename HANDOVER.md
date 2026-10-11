@@ -1,14 +1,38 @@
-# 交接文档 · astrbot-plugin-media-warden v1.9.5
+# 交接文档 · astrbot-plugin-media-warden v1.9.6
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.9.5（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
+- 版本：v1.9.6（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
 - 分支：`main`
-- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=17, total=100)`
+- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6 各单独一次提交（显式路径，未用 `git add -A`）
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=18, total=101)`
 
-## 1.-2 v1.9.5 修的是什么（**最新**）
+## 1.-3 v1.9.6 修的是什么（**最新**）
+
+**转发链的节点图没有走第 ⓪ 级。** v1.9.5 上线后现场复测：普通图片已经能保存（`used QQ local cache for image: …` → `✅ 已保存`），但同一批里的合并转发仍整图失败：
+
+```
+[media-warden] forward fetched: 2 nodes for id=7695379530489107755
+[media-warden] forward render aborted: 2/2 node image(s) failed to download
+→ [Warden] ⚠️ 部分保存失败 (0/1) — 下载失败（源链接失效）
+```
+
+根因：`_save_forward` 的节点图**从不经过 `_download_one`** —— 它把节点内嵌 url 直接交给 `aiohttp_fetcher`，
+候选只有 `[_upgrade_qq_image_url(url), url]` 两个。而节点里的 image 段其实**同样带 `file=<md5>.<ext>`**，
+钥匙一直握在手里，只是没去用。
+
+修法：
+
+- `warden/forwarder.py`：`ForwardNode` 新增 `image_refs: List[dict]`，与 `image_urls` 一一对应，
+  存放该 image 段的原始 segment `data`（`file` / `url` / `file_size`）。`_coerce_nodes` 填它，
+  但**不改 `image_urls` 的语义**（仍是 `url or file`），老调用方不受影响。
+- `main.py`：新增 `_forward_local_cached(ref)`；`_save_forward` 的 `_fetch(url)` 变 `_fetch(url, ref)`，
+  先查本地缓存再走网络；`all_urls` 与 `all_refs` 同步构造。命中日志 `used QQ local cache for forward node image: <path>`。
+
+同一条 `get_media_fallback` 开关；关掉即回到 v1.5.0 的「只试两个 url、任一失败即整体失败、不落盘」。
+
+## 1.-2 v1.9.5 修的是什么（历史）
 
 **图片本体一直就在本地，而补救链从没找过它。** 这是 v1.9.0–v1.9.4 全部线上失败的最终答案：
 那些 `http 400`（rkey 过期）的图，**没有一张是真的丢了**。
@@ -179,24 +203,26 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | --- | --- |
 | `warden/localcache.py` | **v1.9.5 新增**：`find_cached_image()` 按 MD5 找 QQ 本地图片缓存（`Image/C2C/Image2` 与 `emoji-recv/*/Ori`），未命中返回 `None` |
 | `warden/downloader.py` | `refresher` 参数、`download(fallback=…)`、`_local_fallback()`、真导入 `Component`、保留原始错误 |
-| `main.py` | **第 ⓪ 级 `_cached_copy`（v1.9.5）**、三级 `_download_one`、`_fresh_media_url` →（v1.9.1）`_refetch_media` + `_media_refetch_candidates` + `_b64_payload`、（v1.9.2）`_refetch_via_message` + `_media_urls_from_resp` + `_download_fresh` + `_refetch_trace`、`_failed`、失败入库、`/warden fail`、索引复用、`idx is None` 修复、`_url_fileid`、`meta["raw_file"]` |
+| `main.py` | **第 ⓪ 级 `_cached_copy`（v1.9.5）+ `_forward_local_cached`（v1.9.6）**、三级 `_download_one`、`_fresh_media_url` →（v1.9.1）`_refetch_media` + `_media_refetch_candidates` + `_b64_payload`、（v1.9.2）`_refetch_via_message` + `_media_urls_from_resp` + `_download_fresh` + `_refetch_trace`、`_failed`、失败入库、`/warden fail`、索引复用、`idx is None` 修复、`_url_fileid`、`meta["raw_file"]` |
+| `warden/forwarder.py` | **v1.9.6：`ForwardNode.image_refs`（与 `image_urls` 一一对应的 segment data）+ `_coerce_nodes` 填它** |
 | `warden/reporter.py` | `classify_error` / `failure_summary` / `failure_breakdown` / `failure_phrase`、原因分叉文案 |
 | `warden/index.py` | `failures` 表 + `record_failure` / `recent_failures` / `failure_stats` / `prune_failures_older_than` / `failure_subject` |
 | `warden/config.py` | 版本号、`get_media_fallback`、`index_reuse_saved` |
 | `warden/__init__.py` | 导出 `classify_error` / `failure_summary` |
 | `_conf_schema.json` | 两个新配置项 |
-| `_smoke.py` | PHASE5 17 项（v1.9.0 的 12 + v1.9.1 的候选排序 / 参数形态与 base64 + v1.9.2 的 get_msg + **v1.9.5 的 localcache 两项**）、aiohttp 导入期桩、rebind 到插件自己的 `warden` 包、命令数 5→6、总数行 |
-| `CHANGELOG.md` | v1.9.0 … v1.9.5 记录 |
+| `_smoke.py` | PHASE5 18 项（v1.9.0 的 12 + v1.9.1 的候选排序 / 参数形态与 base64 + v1.9.2 的 get_msg + **v1.9.5/v1.9.6 的 localcache 三项**）、aiohttp 导入期桩、rebind 到插件自己的 `warden` 包、命令数 5→6、总数行 |
+| `CHANGELOG.md` | v1.9.0 … v1.9.6 记录 |
 | `HANDOVER.md` | 本文档 |
 
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=17, total=100)`
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=18, total=101)`
 - `_conf_schema.json` JSON 解析通过
 - **v1.9.5 的本机实测**：8 张线上失败图逐个在 `C:\Users\chiriu\Documents\Tencent Files\` 下按 MD5 命中，单次查找 <1ms；`deadbeef…` / 短名 / 空串 / `None` 均正确返回 `None`（不误报）
-- 单测覆盖：`_url_fileid` 提取、fetch/save 分类、失败文案、三级回退三条路径、失败入库 + attempts 累加、索引复用命中/文件缺失、`/warden fail` + `stats`、`failure_stats`/`prune`、补救候选排序、`get_image` 多参数形态 + base64 返回、`get_msg` 重解析 + 多图挑段、**本地缓存命中零网络调用 / 未命中照旧回退**
+- **v1.9.5 的线上实测（20:02:19）**：`used QQ local cache for image: …\Image\C2C\Image2\74760010d20c862b46a660054f601ead.jpg` → `✅ 已保存 …20261011_200219_image_9dbbb5a0.jpg 18749B [链接已重取: localcache:…]` —— 同一张图 19:59 还是 `http 400`
+- 单测覆盖：`_url_fileid` 提取、fetch/save 分类、失败文案、三级回退三条路径、失败入库 + attempts 累加、索引复用命中/文件缺失、`/warden fail` + `stats`、`failure_stats`/`prune`、补救候选排序、`get_image` 多参数形态 + base64 返回、`get_msg` 重解析 + 多图挑段、**本地缓存命中零网络调用 / 未命中照旧回退 / `get_media_fallback=false` 时被忽略**、**转发节点图走整条 `_save_forward` 时同样零网络调用且 PNG 正常**
 
 未验证：
 
@@ -208,7 +234,7 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 
 - 转发链布局、字体、emoji 渲染逻辑
 - blake2b 去重算法与 `assets` 表 schema
-- `_save_forward` 的节点图下载：**仍只试 `[hi, url]` 两个候选 url，没有接 get_image / 本地副本回退**（节点图 url 里没有 `file_id`，换链接无从下手）。节点图仍按 v1.5.0 设计「任一失败即整体失败、不落盘」。
+- `_save_forward` 的降级策略：仍按 v1.5.0 设计「任一节点图最终失败即整体失败、不落盘」（**v1.9.6 起节点图会先查本地缓存**，但没有 `file` 字段时仍只有 `[is_origin=1, 原 url]` 两个候选）
 
 ## 6. 回滚与备份
 
@@ -221,8 +247,8 @@ safe_edit rollback <file> [<backup_name>]
 
 ## 7. 下一步建议
 
-1. 在真实 AstrBot + napcat 环境观察一次失效链接：**v1.9.5 起最先应该看到的是 `used QQ local cache for image: …`** —— 命中本地缓存时连网络都不走，资产正常落盘、回执不再计失败。若本地确实没有（比如图片已被 QQ 清理、或换了台机器），才继续往下看到 `get_msg refreshed url for image: …` 或三级补救的败因。
-2. 若仍失败，先确认失败那几张图的 `meta["raw_file"]`（消息段原始的 `data.file`）是不是一个 32 位 MD5 —— 不是的话本地缓存这条路用不上（`find_cached_image` 对短于 16 字符的候选直接放弃）。
+1. 在真实 AstrBot + napcat 环境观察一次失效链接：**v1.9.5 起最先应该看到的是 `used QQ local cache for image: …`** —— 命中本地缓存时连网络都不走，资产正常落盘、回执不再计失败。合并转发里的图则看 **`used QQ local cache for forward node image: …`**。若本地确实没有（比如图片已被 QQ 清理、或换了台机器），才继续往下看到 `get_msg refreshed url for image: …` 或三级补救的败因。
+2. 若仍失败，先确认失败那几张图的 `meta["raw_file"]`（消息段原始的 `data.file`）是不是一个 32 位 MD5 —— 不是的话本地缓存这条路用不上（`find_cached_image` 对短于 16 字符的候选直接放弃）；转发节点图则看节点段有没有 `file` 字段。
 3. 若仍失败，日志里 `refetch: …` 会逐跳写清败因（`get_image file=… -> ActionFailed…` / `get_msg {…} -> …`），回执 note 里带最后一跳。
    常见的两种：`get_msg` 报「消息不存在或已被撤回」= 消息太老 / napcat 的 `MessageUnique` 映射已清；能拿到新链接却 `http 400` = 新时的 rkey 也救不回来（要查 napcat 的 `getRkeyData()` 是否拿到 packet rkey）。
 4. 打开 `index_reuse_saved=true` 观察几天，确认「索引复用」不会掩盖「文件被人工清理」的情况（当前会明确计为落盘失败）。

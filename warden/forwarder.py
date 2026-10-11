@@ -15,7 +15,7 @@
 from __future__ import annotations
 import io
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
 
@@ -213,6 +213,9 @@ class ForwardNode:
     image_urls: List[str]   # 节点内图片 URL 列表
     nesting_depth: int = 0
     avatar_path: Optional[str] = None   # v1.7.0: 本地头像文件路径,None = 不画头像
+    # v1.9.5: 与 image_urls 一一对应的原始 segment data(file/url/file_size),
+    # 用来在 url 失效时按 `file`(MD5) 找 QQ 本地缓存。默认空 = 只有 url 可用。
+    image_refs: List[dict] = field(default_factory=list)
 
 
 def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
@@ -267,6 +270,7 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
         )
         text_parts: List[str] = []
         image_urls: List[str] = []
+        image_refs: List[dict] = []
         if isinstance(content, list):
             for seg in content:
                 if not isinstance(seg, dict):
@@ -279,6 +283,8 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
                     url = d.get("url") or d.get("file")
                     if url:
                         image_urls.append(url)
+                        # 保留整个 data:url 失效时 `file`(MD5) 是本地缓存的钥匙
+                        image_refs.append(dict(d) if isinstance(d, dict) else {})
                 elif t == "json":
                     text_parts.append("[json]")
         elif isinstance(content, str):
@@ -289,6 +295,7 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
             text="\n".join([p for p in text_parts if p]),
             time=ts,
             image_urls=image_urls,
+            image_refs=image_refs,
             nesting_depth=nesting_depth,
         ))
     return out
