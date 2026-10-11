@@ -3070,6 +3070,8 @@ def test_main_get_media_fallback_uses_get_image_url():
         async def call_action(self, action, **kw):
             seen["action"] = action
             seen["file"] = kw.get("file")
+            if action != "get_image":
+                raise RuntimeError("no other action in this stub")
             return {"status": "ok", "data": {"url": "https://fresh.example/a.gif"}}
 
     class _Ev:
@@ -3158,6 +3160,80 @@ def test_main_refetch_tries_param_forms_and_base64():
     assert calls[0] == ("get_image", {"file": "RAW-1"}), calls
     assert ("get_image", {"file_id": "RAW-1"}) in calls, calls
     print(f"  OK -> tried {len(calls)} (action, params) shape(s) before base64 hit")
+
+
+def test_main_refetch_via_get_msg_regenerates_url():
+    banner("plugin: get_image 全败后用 get_msg 让 napcat 重解析消息拿新链接")
+    import asyncio
+    from types import SimpleNamespace
+    tmp = tempfile.mkdtemp(prefix="warden_v19_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    pl.cfg.download_retries = 0
+
+    # 消息里那条 url 已失效;get_msg 返回的段是 napcat 用当前 rkey 重新生成的
+    dead = "https://multimedia.nt.qq.com.cn/download?fileid=FIDX&rkey=STALE"
+    fresh = "https://multimedia.nt.qq.com.cn/download?fileid=FIDX&rkey=FRESH"
+    seen_actions = []
+
+    class _Api:
+        async def call_action(self, action, **kw):
+            seen_actions.append((action, {k: str(v)[:40] for k, v in kw.items()}))
+            if action == "get_image":
+                raise RuntimeError("ActionFailed retcode=1200 file not found")
+            if action == "get_msg":
+                return {"status": "ok", "data": {
+                    "message_id": 1795993480,
+                    "message": [
+                        {"type": "text", "data": {"text": "hi"}},
+                        {"type": "image", "data": {"file": "C0C9610D.jpg",
+                                                   "url": fresh,
+                                                   "file_size": "1234"}},
+                    ]}}
+            raise RuntimeError("unsupported action")
+
+    class _Bot:
+        api = _Api()
+
+    msg_obj = SimpleNamespace(
+        raw_message={"message_id": 1795993480, "group_id": 961583271},
+        message_id="1795993480", group_id="961583271",
+    )
+    ev = SimpleNamespace(bot=_Bot(), message_obj=msg_obj, group_id="961583271")
+
+    async def fetcher(c, **kw):
+        if "FRESH" in (c.url or ""):
+            return Downloaded(data=b"FRESH-FROM-GETMSG", mime="image/jpeg", size=17)
+        raise DownloadError(f"http 400 for {c.url!r}")
+
+    orig_dl = plugin_warden.downloader.aiohttp_fetcher
+    orig_main = plugin_main.aiohttp_fetcher
+    plugin_warden.downloader.aiohttp_fetcher = fetcher
+    plugin_main.aiohttp_fetcher = fetcher
+    try:
+        comp = _make_component(url=dead)
+        comp.meta["raw_file"] = "C0C9610D.jpg"
+        dl = asyncio.run(pl._refetch_media(comp, ev))
+        assert dl is not None, "get_msg should rescue the image"
+        assert dl.data == b"FRESH-FROM-GETMSG", dl.data
+        assert dl.origin == fresh, dl.origin
+        assert any(a == "get_msg" for a, _ in seen_actions), seen_actions
+        # get_msg 的入参必须带 message_id(带 group_id 更稳)
+        gm = [kw for a, kw in seen_actions if a == "get_msg"][0]
+        assert gm.get("message_id") == "1795993480", gm
+        # trace 会说清是靠 get_msg 救回来的(回执 note 用的就是它)
+        trace = getattr(pl, "_refetch_trace", [])
+        assert any("get_msg" in t for t in trace), trace
+    finally:
+        plugin_warden.downloader.aiohttp_fetcher = orig_dl
+        plugin_main.aiohttp_fetcher = orig_main
+    # 多图消息里靠 file 名挑对那一段;挑不到就退回第一个候选
+    resp = {"message": [
+        {"type": "image", "data": {"file": "A.jpg", "url": "https://cdn/a.jpg"}},
+        {"type": "image", "data": {"file": "B.jpg", "url": "https://cdn/b.jpg"}},
+    ]}
+    got = plugin_main._media_urls_from_resp(resp, old="", hint="B.jpg")
+    assert got == ["https://cdn/b.jpg", "https://cdn/a.jpg"], got
+    print("  OK -> get_msg regenerated the rkey url and it downloaded")
 
 
 def test_main_download_failure_records_to_index():
@@ -3298,6 +3374,7 @@ PHASE5 = [
     test_main_get_media_fallback_uses_get_image_url,
     test_main_media_refetch_candidates_prefer_raw_file,
     test_main_refetch_tries_param_forms_and_base64,
+    test_main_refetch_via_get_msg_regenerates_url,
     test_main_download_failure_records_to_index,
     test_main_index_reuse_saved_media,
     test_plugin_warden_fail_command,

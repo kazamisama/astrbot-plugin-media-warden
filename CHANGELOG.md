@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.9.2
+
+### Fixed
+- **`get_image` 对 napcat 其实救不了图**（v1.9.1 的补救在现场仍然全败）。读 napcat 自己的实现（`NapCat.Shell/napcat.mjs`）确认：`GetFileBase._handle` 只认三条路 —— ① `FileNapCatOneBotUUID.decode(file)` 解出 `{peer,msgId,elementId}` 再 `downloadMedia`；② `decodeModelId`；③ `FileApi.searchForFile([file])` 按**文件名**在文件缓存里找。`FileNapCatOneBotUUID` 是 napcat 进程内的内存 map（24h TTL，重启即失效），而来消息的 image 段里只有 `data.file = 图片文件名`（napcat 的 `picElement` 转换器明确把 `file` 设成 `element.fileName`，那个 uuid 只编码、不回传）。所以拿文件名去 `get_image` 永远落到第 ③ 条 → `retcode=1200 file not found`。
+- 新增第二条重取路径 **`get_msg`**：用 `message_id` 让 napcat 重新解析整条消息。它内部的 picElement → OB11 转换器每次都调 `getImageUrl()`（`getRkeyData()` + `getImageUrlFromParsedUrl()`），也就是**用当前 rkey 重新拼链接** —— 这才是绕开「消息里那条已过期/失效 url」的正路。`_refetch_media` 现在是 `get_image`（多候选 × 多形态）→ `get_msg`（多入参形态：只 `message_id` / 带 `group_id` / 带 `self_id`）→ 本地副本。
+- `_refetch_media` 的每一跳都记进 `_refetch_trace`，全败时把最后几条写进日志（`refetch: …`）并构成回执里的 `refetch: <最后一跳>`，不再像 v1.9.1 那样只有一句 "exhausted" 看不出败在哪。
+- 多图消息按 `data.file` 与候选文件名匹配挑对那一段（`_media_urls_from_resp(resp, old=…, hint=…)`），匹配不到则退回消息里第一个可用图。
+
+### Tests
+- `_smoke.py` PHASE5 新增 1 项（→ 15）：`get_image` 全败后用 `get_msg` 重解析拿新链接并下载成功（含入参断言与多图挑段）。
+- 冒烟总数 **97 → 98**（phase1=22 phase2=16 phase3=21 phase4=24 phase5=15）。
+
 ## v1.9.1
 
 ### Fixed

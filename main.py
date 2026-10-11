@@ -103,6 +103,12 @@ _MAX_REFETCH_ATTEMPTS = 8
 _MAX_REFETCH_CANDIDATES = 3
 
 
+def _short(v, n: int = 64) -> str:
+    """日志用:把可能很长的候选值/url 截短。"""
+    s = "" if v is None else str(v)
+    return s if len(s) <= n else s[:n] + "…"
+
+
 def _b64_payload(raw: str) -> Optional[bytes]:
     """解 base64(兼容 data:image/...;base64, 前缀),解不出来返回 None。"""
     import base64
@@ -148,6 +154,46 @@ def _media_refetch_candidates(comp: Component) -> list[str]:
     return out
 
 
+def _media_urls_from_resp(resp, *, old: str = "", hint: Optional[str] = None) -> list[str]:
+    """从 OneBot `get_msg` 的返回里挑出新链接。
+
+    napcat 的 `get_msg` 会用**当前** rkey 重新生成图片 url（它的 picElement → OB11
+    转换器每次都调 `getImageUrl`），这是唯一绕开「消息里那条已过期 url」的路子。
+    hint 是原始 segment 的 `file`（文件名），用来在多图消息里挑对那一段。
+    """
+    if not isinstance(resp, dict):
+        return []
+    inner = resp.get("data")
+    if isinstance(inner, dict) and "message" in inner:
+        resp = inner
+    segs = resp.get("message")
+    if isinstance(segs, dict):
+        segs = segs.get("message")
+    if not isinstance(segs, list):
+        return []
+    hit: list[str] = []
+    other: list[str] = []
+    for seg in segs:
+        if not isinstance(seg, dict):
+            continue
+        if str(seg.get("type") or "").lower() != "image":
+            continue
+        data = seg.get("data")
+        if not isinstance(data, dict):
+            continue
+        url = data.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        if url == old:
+            continue
+        fname = data.get("file")
+        if hint and isinstance(fname, str) and fname == hint:
+            hit.append(url)
+        else:
+            other.append(url)
+    return hit + other
+
+
 def _failure_subject_for(comp: Component) -> str:
     """稳定去重键:优先 fileid（rkey 换了也能对上同一张图）,否则 host+path。"""
     fid = (comp.meta or {}).get("fileid") or comp.file_id or ""
@@ -175,7 +221,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.1: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image 多形态重取 / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.2: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image 多形态重取 + get_msg 重解析 / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -437,16 +483,17 @@ class MediaWardenStar(Star):
             if note:
                 attempts.append(f"local: {note}")
             dl = None
-            # 第二级: OneBot get_image 重取(rkey 过期唯一能救回来的路)
+            # 第二级: 向 bot 重取(get_image / get_msg) —— rkey 过期唯一能救回来的路
             if self.cfg.get_media_fallback and event is not None:
                 self._refetch_last_error = None
+                self._refetch_trace = []
                 dl = await self._refetch_media(comp, event)
                 if dl is None:
+                    tr = getattr(self, "_refetch_trace", None) or []
                     why = getattr(self, "_refetch_last_error", None)
-                    attempts.append(
-                        f"get_image: {why}" if why is not None
-                        else "get_image: no usable ref"
-                    )
+                    detail = (tr[-1] if tr else (str(why) if why is not None
+                                                 else "no usable ref"))
+                    attempts.append(f"refetch: {detail}")
             # 第三级: 组件本地副本(napcat 的 temp 缓存 / raw 转换) —— 与 event 无关,总是试
             if dl is None:
                 try:
@@ -461,21 +508,29 @@ class MediaWardenStar(Star):
         return dl
 
     async def _refetch_media(self, comp: Component, event):
-        """二级补救:用 OneBot get_image/get_file 重取这张图(rkey 过期唯一能救回来的路)。
+        """二级补救:向 bot 重取这张图的可用链接。
 
-        对 (候选值 × 参数形态) 依次尝试 —— 不同 OneBot 实现对 file/file_id 的语义
-        不一致,只试一种就会像 v1.9.0 那样静默降级(线上实测 retcode=1200
-        file not found)。返回 Downloaded 或 None(调用方据此跳到第三级本地副本)。
+        两条路,依次尝试:
+
+        ① `get_image` —— 对 (候选值 × 参数形态 `file`/`file_id`/`id`/`image`) 组合试。
+           注意 napcat 的 `get_image` 其实**只认它自己发出去的消息文件 uuid**
+           （`FileNapCatOneBotUUID`，内存 map，进程重启或超过 ttl 就没了）；用文件名
+           当候选时会走到 `FileApi.searchForFile`，图片不在那个缓存里 → `file not found`。
+        ② `get_msg` —— 拿消息 id 让 napcat 重新解析整条消息。它的 picElement → OB11
+           转换器每次都调 `getImageUrl()`，即用**当前** rkey 重新拼链接，所以这是唯一
+           能绕开「消息里那条已过期 url」的路(2026-10-11 线上 400 的根因)。
+
+        全败时返回 None,调用方跳到第三级本地副本。
         """
         call = self._resolve_call_action(event)
         if call is None:
             return None
         cands = _media_refetch_candidates(comp)
-        if not cands:
-            return None
         old = (comp.url or "").strip()
+        trace: list[str] = []
+        primary = None
         attempts = 0
-        primary = None  # 最近一次异常,全败时返回 None 让调用方保留原始错误
+
         for cand in cands[:_MAX_REFETCH_CANDIDATES]:
             for key in _GET_IMAGE_PARAM_FORMS:
                 if attempts >= _MAX_REFETCH_ATTEMPTS:
@@ -485,48 +540,102 @@ class MediaWardenStar(Star):
                     resp = await call("get_image", **{key: cand})
                 except Exception as e:  # ActionFailed / 不支持该参数形态
                     primary = e
+                    trace.append(f"get_image {key}={_short(cand)} -> {type(e).__name__}: {e}")
                     continue
                 data = resp.get("data") if isinstance(resp, dict) else None
                 if not isinstance(data, dict):
+                    trace.append(f"get_image {key}={_short(cand)} -> no data")
                     continue
-                size = data.get("file_size")
-                try:
-                    size = int(size) if size not in (None, "") else 0
-                except (TypeError, ValueError):
-                    size = 0
                 fresh = data.get("url")
+                trace.append(
+                    f"get_image {key}={_short(cand)} -> url={_short(str(fresh), 50)}"
+                )
                 if isinstance(fresh, str) and fresh and fresh != old:
-                    try:
-                        dl = await download(
-                            Component(kind=comp.kind, url=fresh,
-                                      file_id=comp.file_id,
-                                      meta=dict(comp.meta or {})),
-                            fetcher=aiohttp_fetcher,
-                            retries=self.cfg.download_retries,
-                            max_bytes=self.cfg.max_file_size_bytes,
-                            timeout_s=self.cfg.download_timeout_s,
-                        )
-                    except DownloadError as e:
-                        primary = e
-                        continue
-                    dl.origin = fresh
-                    self._log(f"get_image refreshed url via {key}=... "
-                              f"for {comp.kind}: {fresh[:60]}...")
-                    return dl
-                # 有些实现只给出本地路径 / base64
+                    dl = await self._download_fresh(comp, fresh)
+                    if dl is not None:
+                        self._refetch_trace = trace
+                        self._log(f"get_image refreshed url via {key} for {comp.kind}")
+                        return dl
+                    continue
                 b64 = data.get("base64")
                 if isinstance(b64, str) and b64 and len(b64) >= 16:
                     raw = _b64_payload(b64)
                     if raw:
                         dl = Downloaded(data=raw, mime=None, size=len(raw))
-                        dl.origin = f"base64:{cand[:24]}"
+                        dl.origin = f"base64:{_short(cand, 24)}"
+                        self._refetch_trace = trace
                         self._log(f"get_image returned base64 for {comp.kind}")
                         return dl
             if attempts >= _MAX_REFETCH_ATTEMPTS:
                 break
+
+        # ② get_msg:让 napcat 用当前 rkey 重新解析这条消息
+        dl = await self._refetch_via_message(comp, event, trace)
+        if dl is not None:
+            self._refetch_trace = trace
+            return dl
+
+        self._refetch_trace = trace
         self._refetch_last_error = primary
-        self._log(f"get_image/get_file exhausted for {comp.kind} "
-                  f"({attempts} attempts, {len(cands)} candidate(s))")
+        self._log(f"refetch exhausted for {comp.kind} "
+                  f"({len(cands)} candidate(s), get_image={attempts})")
+        for line in trace[-4:]:
+            self._log(f"  refetch: {line}")
+        return None
+
+    async def _download_fresh(self, comp: Component, fresh: str):
+        """把重取到的新链接下载成 Downloaded;失败返回 None 并把异常记进 _refetch_last_error。"""
+        try:
+            dl = await download(
+                Component(kind=comp.kind, url=fresh,
+                          file_id=comp.file_id, meta=dict(comp.meta or {})),
+                fetcher=aiohttp_fetcher,
+                retries=self.cfg.download_retries,
+                max_bytes=self.cfg.max_file_size_bytes,
+                timeout_s=self.cfg.download_timeout_s,
+            )
+        except DownloadError as e:
+            self._refetch_last_error = e
+            return None
+        dl.origin = fresh
+        return dl
+
+    async def _refetch_via_message(self, comp: Component, event, trace: list):
+        """用 `get_msg` 重取:napcat 会用当前 rkey 重新生成这条消息里的图片链接。"""
+        call = self._resolve_call_action(event)
+        obj = getattr(event, "message_obj", None)
+        raw = getattr(obj, "raw_message", None)
+        mid = getattr(obj, "message_id", None) or getattr(event, "message_id", None)
+        if call is None or raw is None or not mid:
+            trace.append("get_msg -> no message_id/raw_message")
+            return None
+        # 入参形态也要逐个试:不同实现对多余字段的容忍度不一样
+        shapes: list[dict] = [{"message_id": str(mid)}]
+        gid = getattr(obj, "group_id", None) or getattr(event, "group_id", None)
+        sid = getattr(obj, "self_id", None)
+        if gid is not None:
+            try:
+                shapes.append({"message_id": str(mid), "group_id": int(gid)})
+            except (TypeError, ValueError):
+                shapes.append({"message_id": str(mid), "group_id": str(gid)})
+        if sid:
+            shapes.append({"message_id": str(mid), "self_id": str(sid)})
+        hint = (comp.meta or {}).get("raw_file") or comp.file_id
+        hint = hint if isinstance(hint, str) else None
+        old = (comp.url or "").strip()
+        for params in shapes:
+            try:
+                resp = await call("get_msg", **params)
+            except Exception as e:
+                trace.append(f"get_msg {sorted(params)} -> {type(e).__name__}: {e}")
+                continue
+            urls = _media_urls_from_resp(resp, old=old, hint=hint)
+            trace.append(f"get_msg {sorted(params)} -> {len(urls)} fresh url(s)")
+            for url in urls:
+                dl = await self._download_fresh(comp, url)
+                if dl is not None:
+                    self._log(f"get_msg refreshed url for {comp.kind}: {url[:60]}...")
+                    return dl
         return None
 
     @staticmethod

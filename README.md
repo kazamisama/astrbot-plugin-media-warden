@@ -16,6 +16,7 @@
 - v1.8.0：`/warden` 命令默认仅管理员；export 限制在存储根目录内；头像按平台白名单抓取；透明 PNG 正确透出气泡底色
 - v1.9.0：源链接失效补救（OneBot `get_image` 换新链接 → 组件本地副本），失败分类（下载失败 / 落盘失败）并入库，`/warden fail` 可查；可选按索引复用已落盘媒体
 - v1.9.1：修 `get_image` 入参 —— 用消息 segment 原始的 `file`（napcat 图片 id）而不是被 `PreProcessStage` 覆盖成 jpeg 文件名的 `component.file_id`，并对 `file`/`file_id`/`id`/`image` 多种参数形态依次尝试（与 AstrBot 核心 `quoted_message/image_resolver.py` 同款），另支持 `data.base64` 返回
+- v1.9.2：新增 `get_msg` 重取路径 —— 读 napcat 实现后确认 `get_image` 对图片无效（它只认自己内存里 24h TTL 的消息文件 uuid，而 image 段只回传文件名），改用 `get_msg` 让 napcat 用**当前** rkey 重新解析整条消息拿新链接；每跳败因写进日志与回执
 
 ## 目录
 
@@ -74,7 +75,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `download_retries` | `2` | transient 错误重试次数（>= 0） |
 | `max_concurrent` | `4` | 并发下载上限（>= 1） |
 | `download_timeout_s` | `30` | 单次下载超时（> 0） |
-| `get_media_fallback` | `true` | 下载失败后尝试 OneBot `get_image` 重取链接与组件本地副本（v1.9.0+，v1.9.1 修正入参） |
+| `get_media_fallback` | `true` | 下载失败后尝试 OneBot `get_image` / `get_msg` 重取链接与组件本地副本（v1.9.0+，v1.9.1 修入参，v1.9.2 加 `get_msg`） |
 | `forward_render_mode` | `image` | `image` \| `json` \| `both` |
 | `forward_image_engine` | `pil` | `pil` \| `playwright` \| `wkhtml`（当前仅 `pil` 落地） |
 | `forward_image_width` | `720` | 转发渲染图宽度（>= 1） |
@@ -103,7 +104,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 1. **策略过滤**（policy）—— 群 / 用户白名单或黑名单
 2. **组件识别**（components）—— OneBot v11 segment 归一化为 `Component`，并从 `raw_message` 恢复被 PreProcessStage 覆盖的原始 http URL
-3. **并发下载**（downloader）—— aiohttp 流式抓取，带超时和大小限制；transient 错误按 `download_retries` 指数退避重试，4xx 立即失败。失败后若 `get_media_fallback=true`：先向 bot 发 `get_image` 换一条新链接重下（QQ rkey 过期场景；候选值优先用 segment 原始的 `file`，参数形态 `file`/`file_id`/`id`/`image` 逐个试），再回退组件本地缓存副本；三级都失败才计失败，原始错误保留
+3. **并发下载**（downloader）—— aiohttp 流式抓取，带超时和大小限制；transient 错误按 `download_retries` 指数退避重试，4xx 立即失败。失败后若 `get_media_fallback=true`：先向 bot 发 `get_image` 换一条新链接重下（候选值优先用 segment 原始的 `file`，参数形态 `file`/`file_id`/`id`/`image` 逐个试），再发 `get_msg` 让 napcat 用当前 rkey 重新解析整条消息拿新链接，最后回退组件本地缓存副本；都失败才计失败，原始错误保留，每一跳的败因写进日志与回执
 4. **命名 + 落盘**（storage）—— 按模板渲染相对路径，blake2b 去重，落盘前做路径越权检查；`index_reuse_saved=true` 且同消息同下标已落盘时跳过下载与落盘
 5. **转发链处理**（forwarder）—— 拉取/展开嵌套节点，按 `avatar_platforms` 白名单抓头像，按 `forward_render_mode` 渲染 PNG 或保存 JSON；透明图片做 alpha 合成
 6. **索引写入**（index）—— SQLite 记录每条资产；失败项写入 `failures` 表（同 subject 累计 `attempts`）
@@ -152,14 +153,14 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **97 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 14），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **98 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 15），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
 - 组件识别与 raw_message URL 恢复
 - 落盘 roundtrip、blake2b 去重、路径越权防护、篡改/内容变更指针拒绝
 - 下载：aiohttp mock、超限中断、指数退避、并发保序
-- 下载补救链：本地副本回退、`get_image` 重取新链接（含候选排序与多参数形态 / base64 返回）、三级全败保留原始错误
+- 下载补救链：本地副本回退、`get_image` 重取新链接（含候选排序与多参数形态 / base64 返回）、`get_msg` 重解析拿新链接（含多图挑段）、全败保留原始错误
 - 失败分类与回执文案（下载失败 vs 落盘失败）、失败入库与 attempts 累加、`/warden fail`
 - 索引复用（命中 / 文件已缺失时如实报错）
 - 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成 / json 模式不抓头像
