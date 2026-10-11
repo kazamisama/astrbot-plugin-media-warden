@@ -260,7 +260,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.6: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5(含转发节点图) / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.8: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -858,7 +858,6 @@ class MediaWardenStar(Star):
             return None
         name = ref.get("file")
         if not isinstance(name, str) or not name.strip():
-            self._log(f"fwd cache: ref has no usable file | {self._ref_preview(ref)}")
             return None
         try:
             from .warden.localcache import find_cached_image as _find
@@ -871,7 +870,8 @@ class MediaWardenStar(Star):
             self._log(f"forward local cache lookup failed for {name!r}: {e!r}")
             return None
         if not path:
-            self._log(f"fwd cache: miss for file={name!r} | {self._ref_preview(ref)}")
+            # 这是**正常**结果：NapCat 不下载转发节点里的图，所以本地没有副本。
+            # 见 HANDOVER §1.-4「转发节点图为什么救不回来」。
             return None
         try:
             data = await asyncio.to_thread(
@@ -882,23 +882,6 @@ class MediaWardenStar(Star):
             return None
         self._log(f"used QQ local cache for forward node image: {path}")
         return data.data
-
-    @staticmethod
-    def _ref_preview(ref: Any) -> str:
-        """临时诊断:把节点 image 段的 data 压成一行短摘要(看 file 字段长什么样)。"""
-        try:
-            import json as _json
-            if not isinstance(ref, dict):
-                return f"ref<{type(ref).__name__}>"
-            out = {}
-            for k, v in ref.items():
-                if isinstance(v, str):
-                    out[k] = v if len(v) <= 60 else f"{v[:40]}…(len={len(v)})"
-                else:
-                    out[k] = f"<{type(v).__name__}>"
-            return _json.dumps(out, ensure_ascii=False)[:280]
-        except Exception as e:  # noqa: BLE001
-            return f"preview failed: {e!r}"
 
     async def _fetch_forward_nodes(self, comp: Component,
                                    event: AstrMessageEvent | None):

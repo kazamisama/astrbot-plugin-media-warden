@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.9.8
+
+### 结论：转发节点图里的「老图」救不回来（不是 bug，是 NapCat 的架构边界）
+
+v1.9.6 给转发节点图接上本地缓存后，现场仍然 `2/2 node image(s) failed to download`。
+v1.9.7 的取证日志给出了节点段的真实形态（**字段假设是对的**）：
+
+```
+fwd cache: miss for file='DCFF08A6D4229FE78EFF487D48A0D0A8.jpg' |
+  {"summary": "[动画表情]", "file": "DCFF08A6…", "sub_type": "<int>", "url": "…(len=235)", "file_size": "5964"}
+```
+
+`file` 确实是 32 位 MD5。但那两个 MD5 **在整台机器上都不存在**：
+
+- `Get-ChildItem "C:\Users\chiriu\Documents\Tencent Files" -Recurse` 全量搜 `dcff08a6…` / `fe56bb22…` → `NOT FOUND`
+- NapCat 自己的缓存目录（`NapCat.Shell\cache`，只有 1 个文件）、NapCat temp、`AppData` 下的 NapCat、AstrBot 的 `data\temp`（466 个文件）→ 全部 `NOT FOUND`
+
+原因（读 `napcat.mjs` 确认）：**NapCat 从不下载转发节点里的图片**。节点内容是 `get_forward_msg`
+现查出来的元数据（`url` + `file`），NapCat 只是转发链接。而 QQ 客户端为了显示当然会下，所以
+**普通图片**那条路（v1.9.5）能命中 `Image/C2C/Image2`；转发节点这条路上 NapCat 手里从来没有过字节。
+
+`get_image` 也救不了 —— `GetFileBase._handle`（`napcat.mjs`，`class GetFileBase extends OneBotAction`）
+第一步就是 `FileNapCatOneBotUUID.decode(payload.file)`，那是 **NapCat 进程内的内存 map**
+（`TimeBasedCache`，24h TTL），只有 NapCat **自己发出去/处理过**的文件才有条目；`decode` 返回 undefined
+就直接 `throw new Error("file not found")`（= 线上 `retcode=1200`）。节点图的 MD5 从未进过那个 map。
+
+**所以链路是**：rkey 过期（约 9 分钟）→ 只有「按钮那一刻就存在的本地副本」能救 → 转发节点图的字节
+NapCat 从没拉过 → 无解。已把这条写进 `HANDOVER.md §1.-4` 与 README「已知边界」，不再反复试。
+
+### Changed
+- 移除 v1.9.7 的诊断输出（`_ref_preview()` 与两处 `fwd cache:` 日志）—— 缓存未命中现在是**预期结果**，
+  每张图打一行是噪声。命中仍打 `used QQ local cache for forward node image: <path>`。
+- `_forward_local_cached` 未命中分支留注释指向 `HANDOVER.md §1.-4`，避免以后又被当成 bug 重查一遍。
+
+### Tests
+- 冒烟不变：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=18, total=101)`
+
+## v1.9.7
+
+### Notes
+- 一次性诊断版本：`_ref_preview(ref)` 把节点 image 段的 `data` 压成一行（字符串截断 60 字符并标长度、
+  非字符串只标类型），在「没有可用 file」与「按 file 查缓存未命中」两处打日志。结论已并入 v1.9.8。
+
 ## v1.9.6
 
 ### Fixed
