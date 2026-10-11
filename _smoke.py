@@ -2414,12 +2414,15 @@ def _drive_command(plugin, event, fn):
     return out
 
 
-def _build_plugin_for_command(tmpdir, *, enable_index=True, log_to_stdout=False):
+def _build_plugin_for_command(tmpdir, *, enable_index=True, log_to_stdout=False,
+                              extra=None):
     cfg = {
         "storage_root": tmpdir,
         "enable_index_db": enable_index,
         "log_to_stdout": log_to_stdout,
     }
+    if extra:
+        cfg.update(extra)
     pl = plugin_main.MediaWardenStar(
         plugin_main.MediaWardenStar.__init__.__globals__["Context"](), cfg)
     return pl
@@ -3371,6 +3374,129 @@ def test_index_failure_stats_and_prune():
     print("  OK -> failure_stats aggregates by subject; prune clears failures too")
 
 
+def test_localcache_finds_qq_image_by_md5():
+    banner("localcache: 按消息段 MD5 找 QQ 本地图片缓存(大小写/扩展名不敏感)")
+    tmp = tempfile.mkdtemp(prefix="warden_lc_")
+    acct = os.path.join(tmp, "2510536451")
+    c2c = os.path.join(acct, "Image", "C2C", "Image2")
+    emo = os.path.join(acct, "nt_qq", "nt_data", "Emoji", "emoji-recv", "2026-10", "Ori")
+    os.makedirs(c2c)
+    os.makedirs(emo)
+    md5 = "86bcfd43fed302fa3bf498f39e8c593e"
+    c2c_path = os.path.join(c2c, md5 + ".gif")
+    with open(c2c_path, "wb") as f:
+        f.write(b"GIF89a-cached")
+    emo_md5 = "a0a79925f70d32648280a014c0776cc1"
+    emo_path = os.path.join(emo, emo_md5 + ".jpg")
+    with open(emo_path, "wb") as f:
+        f.write(b"JPEG-cached")
+    # 更晚的月份目录里放同一 md5 的 Thumb,验证按月份倒序且 Ori 优先
+    newer = os.path.join(acct, "nt_qq", "nt_data", "Emoji", "emoji-recv", "2026-11", "Thumb")
+    os.makedirs(newer)
+    newer_path = os.path.join(newer, md5 + ".jpg")
+    with open(newer_path, "wb") as f:
+        f.write(b"THUMB-not-preferred")
+
+    from warden.localcache import find_cached_image
+    orig = find_cached_image.__globals__["_account_dirs"]
+    find_cached_image.__globals__["_account_dirs"] = lambda: [acct]
+    try:
+        # 扩展名大小写 / 有无都不影响命中 C2C
+        assert find_cached_image(md5.upper() + ".GIF") == c2c_path, find_cached_image(md5 + ".gif")
+        assert find_cached_image(md5) == c2c_path
+        # 不在 C2C 的走 emoji/Ori,不吃更晚月份的 Thumb
+        assert find_cached_image(emo_md5 + ".jpg") == emo_path
+        assert find_cached_image(emo_md5) == emo_path
+        # 不瞎猜
+        assert find_cached_image("deadbeef" * 4 + ".jpg") is None
+        assert find_cached_image("short.jpg") is None
+        assert find_cached_image("") is None
+        assert find_cached_image(None) is None
+    finally:
+        find_cached_image.__globals__["_account_dirs"] = orig
+    print("  OK -> C2C hit by md5 (case/扩展名无关); emoji Ori 兜底; 未命中不误报")
+
+
+def test_main_download_prefers_qq_local_cache():
+    banner("plugin: 下载链第 ⓪ 级 —— QQ 本地缓存命中就不碰网络")
+    import asyncio
+    lg = plugin_warden.localcache
+    tmp = tempfile.mkdtemp(prefix="warden_lc2_")
+    acct = os.path.join(tmp, "2510536451")
+    c2c = os.path.join(acct, "Image", "C2C", "Image2")
+    os.makedirs(c2c)
+    md5 = "a8b291afcf912ba3445a94c438bd210b"
+    cached_path = os.path.join(c2c, md5 + ".gif")
+    with open(cached_path, "wb") as f:
+        f.write(b"GIF-from-QQ-cache")
+
+    pl = _build_plugin_for_command(tempfile.mkdtemp(prefix="warden_lc2s_"))
+    hits = {"n": 0}
+
+    async def _boom(c, **kw):
+        hits["n"] += 1
+        raise DownloadError("http 400 for 'https://multimedia.nt.qq.com.cn/download?rkey=dead'")
+
+    orig_acct = lg._account_dirs
+    orig_dl = plugin_main.download
+    lg._account_dirs = lambda: [acct]
+    plugin_main.download = _boom
+    try:
+        comp = _make_component(
+            url="https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=FIDX&rkey=dead")
+        comp.file_id = md5.upper() + ".JPG"          # PreProcessStage 覆盖后的值
+        comp.meta["raw_file"] = md5 + ".gif"         # segment 原始 file
+        dl = asyncio.run(pl._download_one(comp, None))
+        assert dl.data == b"GIF-from-QQ-cache", dl.data
+        assert dl.origin == f"localcache:{cached_path}", dl.origin
+        assert hits["n"] == 0, f"不该走网络: {hits['n']}"
+        # 本地没有这个 md5 时,照旧走网络(并如实报错)
+        comp2 = _make_component(
+            url="https://multimedia.nt.qq.com.cn/download?fileid=FIDY&rkey=dead")
+        comp2.file_id = "ffffffffffffffffffffffffffffffff.jpg"
+        comp2.meta["raw_file"] = "ffffffffffffffffffffffffffffffff.jpg"
+        try:
+            asyncio.run(pl._download_one(comp2, None))
+        except DownloadError as e:
+            assert "http 400" in str(e), e
+        else:
+            raise AssertionError("miss 时应走网络并失败")
+        assert hits["n"] >= 1, hits
+
+        # get_media_fallback=false -> 关掉整条补救链(v1.8.x 行为),缓存不再被使用
+        off = _build_plugin_for_command(tempfile.mkdtemp(prefix="warden_lc2o_"),
+                                        extra={"get_media_fallback": False})
+        assert off.cfg.get_media_fallback is False
+        try:
+            asyncio.run(off._download_one(comp, None))
+        except DownloadError as e:
+            assert "http 400" in str(e), e
+        else:
+            raise AssertionError("关闭补救后不应再命中本地缓存")
+        assert hits["n"] >= 2, hits
+
+        # 候选顺序:raw_file -> file_id -> meta.path -> url 尾段
+        c3 = _make_component(
+            url="https://multimedia.nt.qq.com.cn/download?fileid=FIDZ")
+        c3.file_id = "BEEF.jpg"
+        c3.meta["raw_file"] = "CAFE.gif"
+        c3.meta["path"] = os.path.join(tmp, "somewhere", "F00D.png")
+        cands = plugin_main._local_cache_candidates(c3)
+        assert cands[0] == "CAFE.gif", cands
+        assert "BEEF.jpg" in cands and "F00D.png" in cands, cands
+        assert len(cands) <= 4, cands
+        c4 = _make_component(url="")
+        c4.file_id = None
+        c4.meta.clear()
+        assert plugin_main._local_cache_candidates(c4) == []
+    finally:
+        lg._account_dirs = orig_acct
+        plugin_main.download = orig_dl
+    print(f"  OK -> cache hit served {len(dl.data)}B without network; "
+          f"miss fell through to http ({hits['n']} attempt(s)); "
+          f"get_media_fallback=false 时缓存被忽略")
+
+
 PHASE5 = [
     test_url_fileid_extraction,
     test_reporter_classify_fetch_vs_save,
@@ -3387,6 +3513,8 @@ PHASE5 = [
     test_main_index_reuse_saved_media,
     test_plugin_warden_fail_command,
     test_index_failure_stats_and_prune,
+    test_localcache_finds_qq_image_by_md5,
+    test_main_download_prefers_qq_local_cache,
 ]
 
 

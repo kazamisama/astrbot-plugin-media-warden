@@ -40,9 +40,40 @@ from .warden.components import Component
 from .warden.downloader import (
     aiohttp_fetcher, astrbot_component_fetcher,
     download, download_many, DownloadError, Downloaded, _local_fallback,
+    _read_local_file,
 )
 from .warden.storage import Storage, SaveContext
 from .warden.index import failure_subject
+
+
+def _local_cache_candidates(comp: Component) -> list:
+    """本地缓存查找要试的候选名（QQ 缓存文件名 = 消息段里的 `<md5>.<ext>`）。
+
+    顺序：消息段原始 `file`（`meta["raw_file"]`）→ `comp.file_id` → `meta["path"]`
+    的文件名 → url 的最后一段。去重、保序、丢掉空值与非字符串。
+    """
+    import os as _os
+    out: list = []
+    meta = comp.meta or {}
+    for v in (meta.get("raw_file"), comp.file_id, meta.get("path")):
+        if isinstance(v, str) and v.strip():
+            out.append(_os.path.basename(v.strip()))
+    url = (comp.url or "").strip()
+    if url and "://" in url:
+        try:
+            from urllib.parse import urlparse
+            last = urlparse(url).path.rsplit("/", 1)[-1]
+            if last:
+                out.append(last)
+        except Exception:
+            pass
+    seen = set()
+    uniq: list = []
+    for v in out:
+        if v not in seen:
+            seen.add(v)
+            uniq.append(v)
+    return uniq[:4]
 
 
 def _url_fileid(url: str) -> Optional[str]:
@@ -229,7 +260,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.3: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image 多形态重取 + get_msg 重解析 / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.5: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -475,9 +506,64 @@ class MediaWardenStar(Star):
 
         return await asyncio.gather(*(_one(c) for c in media))
 
+    async def _cached_copy(self, comp: Component):
+        """查 QQ 本地图片缓存(按消息段里的 MD5)。命中就直接用,不走网络。
+
+        QQ 收到图片时已经按 MD5 存了副本，而消息段的 `data.file` 就是那个 MD5。
+        链接因 rkey 过期返回 400 时，本地这份是唯一还能拿到的来源 —— 所以放在
+        **最前面**：有就不必再等一次注定失败的 http。
+        """
+        if not self.cfg.get_media_fallback:
+            return None
+        cands = _local_cache_candidates(comp)
+        if not cands:
+            return None
+        try:
+            from .warden.localcache import find_cached_image as _find  # 局部导入便于测试打桩
+        except Exception as e:  # noqa: BLE001
+            self._log(f"localcache module unavailable: {e!r}")
+            return None
+        misses = []
+        for cand in cands:
+            try:
+                path = await asyncio.to_thread(_find, cand)
+            except Exception as e:  # noqa: BLE001  本地查找失败不该影响下载
+                self._log(f"local cache lookup failed for {cand!r}: {e!r}")
+                misses.append(f"{cand}: lookup error")
+                continue
+            if not path:
+                misses.append(cand)
+                continue
+            try:
+                data = await asyncio.to_thread(
+                    _read_local_file, path, self.cfg.max_file_size_bytes
+                )
+            except DownloadError as e:
+                self._log(f"local cache hit but unreadable ({path}): {e}")
+                misses.append(f"{cand}: unreadable")
+                continue
+            data.origin = f"localcache:{path}"
+            self._log(f"used QQ local cache for {comp.kind}: {path}")
+            return data
+        self._local_cache_misses = misses
+        return None
+
     async def _download_one(self, comp: Component, event=None):
-        """单个组件的三级下载回退;全失败时抛首个(最对症的)下载错误."""
+        """单个组件的下载回退链;全失败时抛首个(最对症的)下载错误。
+
+        顺序:
+        ⓪ QQ 本地缓存(按消息段 MD5) —— 命中即用,不碰网络
+        ① 正常 http / 组件 fetcher(内部含 raw 本地副本回退)
+        ② 向 bot 重取(get_image / get_msg) —— 只对「消息段里有新 url」的情况有效
+        ③ 组件本地副本(temp 缓存 / raw 转换)
+        """
+        cached = await self._cached_copy(comp)
+        if cached is not None:
+            return cached
         attempts: list = []
+        _misses = list(getattr(self, "_local_cache_misses", None) or [])
+        if _misses:
+            attempts.append("qcache: no local copy for " + ", ".join(_misses[:2]))
         try:
             dl = await download(
                 comp, fetcher=astrbot_component_fetcher,

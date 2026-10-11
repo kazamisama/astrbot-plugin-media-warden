@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.9.5
+
+### Fixed
+- **图片本体其实一直就在本地，补救链却从没找过它**（v1.9.0–v1.9.4 的线上失败全部可以在本地救回来）。QQ 客户端收到图片时已按 **MD5** 存好副本；消息段里的 `data.file`（我们存在 `Component.meta["raw_file"]`）就是那个 `<md5>.<ext>`：
+  - `Tencent Files/<QQ号>/Image/C2C/Image2/<md5>.<ext>` —— 普通图片，扩展名与原始格式一致（动图是 `gif`）；
+  - `Tencent Files/<QQ号>/nt_qq/nt_data/Emoji/emoji-recv/<YYYY-MM>/Ori/<md5>.<ext>` —— 表情。
+
+  实测 2026-10-11 19:17–19:43 全部 8 张失败图（`a0a79925…`、`86bcfd43…`、`971cfeae…`、`2b5d37ba…`、`9c3b2787…`、`3d225506…`、`a8b291af…`）都能在本地找到，且文件时间戳与消息到达时间一一对上（`86bcfd43…` 19:19:23 落盘，消息 19:19 到）。其中 `9c3b2787…` 本地 `gif` 有 **1109322B**，比从网上拿到的还大 3 倍。此前的第 ③ 级「组件本地副本」只查 `component.path` 与 `raw.convert_to_file_path()` —— 这两条在本机都拿不到东西（`component.path` 是空的，AstrBot 的 `data/temp` 最新文件停在 2026-09-24）。
+
+### Added
+- `warden/localcache.py`：`find_cached_image(name)` —— 入参是消息段里的 `data.file`（`<md5>.<ext>`），依次在 `Image/C2C/Image2`（先试原扩展名，再大小写不敏感地扫）与 `emoji-recv`（近 6 个月倒序，先 `Ori` 后 `Thumb`，最多扫 24 个目录）里按 MD5 找。短于 16 字符的不猜，未命中返回 `None`。
+- `main.py:_cached_copy()` + `_download_one` 新增**第 ⓪ 级**：先查本地缓存，命中就直接用、**不碰一次网络**（命中日志 `used QQ local cache for <kind>: <path>`，`Downloaded.origin = "localcache:<path>"`）。查找与读盘都走 `asyncio.to_thread`，不阻塞事件循环；本地查找抛异常只记日志、不影响后续下载。
+
+### Notes
+- 为什么必须放在最前面：rkey 有效期只有约 9 分钟，重试/等待只会让链接死得更彻底；而本地副本在消息到达的同一秒就已经写好了。第 ② 级「向 bot 重取」保留但已确认救不了 rkey 过期（napcat 的 `get_msg` 原样返回消息里那条 url，实测 `url_same_as_msg=true`）。
+- 与 ① 正常 http 的关系：第 ⓪ 级是**加速与兜底**，不是替代 —— 本地没命中时下载链与 v1.9.4 完全一致。
+
+### Tests
+- `_smoke.py` 新增两项：`test_localcache_finds_qq_image_by_md5`（大小写/扩展名不敏感、`C2C` 优先于 `emoji`、更晚月份的 `Thumb` 不吃、短名与未命中不误报）、`test_main_download_prefers_qq_local_cache`（缓存命中时网络调用次数为 **0**；未命中时照旧走 http 并如实报错）。总数 **98 → 100**（phase5 15 → 17）。
+
+## v1.9.4
+
+### Notes
+- 一次性诊断版本（未单独提交）：`warden/diag_probe.py` 临时探针，用来现场确认 `get_msg` 返回的消息段、`get_status`/`can_send_image`/`get_version_info` 以及 4 种 User-Agent 下同一 url 的 http 响应。结论已并入 v1.9.5（见上），探针文件已删除。
+
 ## v1.9.3
 
 ### Fixed

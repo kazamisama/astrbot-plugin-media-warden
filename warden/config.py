@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.9.3"
+VERSION = "1.9.5"
 EXPORT_FORMAT_VERSION = "1.0"
 
 

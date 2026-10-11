@@ -1,4 +1,4 @@
 name: astrbot-plugin-media-warden
 author: shirley
-version: 1.9.3
-description: 群聊素材守门人 v1.9.3 —— 监听特定群/用户的非文字消息，按模板命名落盘（blake2b 去重），转发链 PIL 渲染/JSON 保存，SQLite 索引 + /warden list/stats/export/lookup/prune/fail 命令 + 预览图回传 + 并发下载 + 指数退避重试 + 源链接失效补救（OneBot get_image 多形态重取 + get_msg 重解析 + 本地副本）+ 失败分类与入库，命令仅管理员可用。
+version: 1.9.5
+description: 群聊素材守门人 v1.9.5 —— 监听特定群/用户的非文字消息，按模板命名落盘（blake2b 去重），转发链 PIL 渲染/JSON 保存，SQLite 索引 + /warden list/stats/export/lookup/prune/fail 命令 + 预览图回传 + 并发下载 + 指数退避重试 + 源链接失效补救（QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本）+ 失败分类与入库，命令仅管理员可用。
