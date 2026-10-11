@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-10-11 环境：NapCat 4.18.4 -> 4.18.37（**插件代码未改**）
+
+**这一版不改插件。**它记录的是「转发节点图 100% 失败」的最终根因与修法：坏的是环境，不是代码。
+
+- 现象：转发节点图 `2/2 node image(s) failed to download`，服务端原文
+  `HTTP 400 {"retcode":-5503007,"retmsg":"download url has expired"}`。
+- 取证：URL **生成后 0.6 秒**实测即过期；同一条 70 字符 rkey（`CAQSMEw42ic_…`）
+  从 20:54:32 复用到 22:00:23（66 分钟没换）；NapCat 包里那两个 `CAQSKAB6JWEN…` 兜底常量是
+  59 字符的老格式、从未被使用；两个内置 rkey 服务同时是坏的（`ss.xingzhige.com` 502、
+  `secret-service.bietiaop.com` TLS 握手失败）。
+- 根因：NapCat `4.18.4`（2026-05-22 的包）+ QQ `9.9.26-44498`（2026-05-28 装），五个月没升级；
+  `getRkeyData()` 的过期判据把 `packetRkey[0]` 连写两遍（上游主分支至今如此），判不出过期 →
+  永不刷新 → 新链接全带着同一条死 rkey。普通图片还有 QQ 本地副本可救，转发节点图没有，于是全灭。
+- 修法：升级 NapCat 到 `4.18.37`。注意 `napcat.mjs` 里 rkey 逻辑**一字未改**，改的是
+  `native/` 下 packet hook 那一层。
+- 结果（22:29 起同一台机器）：`forward_render` 0.66s 保存成功；`http 400` / `render aborted` /
+  `late cache still miss` 三项计数全部为 **0**；`failures` 表 1 小时新增 0。
+- 附带踩坑（与插件无关，但会盖掉修好的状态）：`NapCat.Shell.zip` 没打包 `loadNapCat.js`，
+  而 4.18.37 的 hook 去 QQ 的 `resources\app\` 找它 → 启动即
+  `Error: Cannot find module '...\resources\app\loadNapCat.js'`；官方 `launcher.bat` 生成 loader 时
+  不转义路径空格。本机因此保留 `C:\application\NapCat\start-napcat.bat`（自提权 + 自动补 loader）
+  与 `C:\application\NapCatLoader\loadNapCat.js`，细节见 `HANDOVER.md` §1.-6。
+
 ## v1.9.9
 
 ### 修正 v1.9.8 的结论：转发节点图不是「无解」，而是**晚一步**

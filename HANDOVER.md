@@ -4,11 +4,81 @@
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
 - 版本：v1.9.9（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
+- **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
+  详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 各单独一次提交（显式路径，未用 `git add -A`）
 - 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=19, total=102)`
 
-## 1.-5 转发节点图其实是「晚一步」（**v1.9.9 修正了 §1.-4 的结论**）
+## 1.-6 真根因（2026-10-11 晚取证并修复）：**NapCat 4.18.4 在发一条早就死掉的 rkey**
+
+> 这一节是**对 §1.-5 / §1.-4 的最终修正**。那两节描述的「NapCat 转发节点图无解」和「只能靠迟到缓存」
+> 都是**在一个已经坏掉的环境上得出的结论**；换掉坏环境后，转发节点图**根本不需要补救**。
+
+**结论**：那批 `http 400` 不是延迟问题，是 NapCat 给出的 URL **一生成就是死的**。
+
+| 观测 | 数值 |
+| --- | --- |
+| 服务端原始拒绝 | `HTTP 400 {"retcode":-5503007,"retmsg":"download url has expired","retryflag":0}` |
+| 生成到实测的间隔 | **0.6 秒**（22:00:23 写日志，22:00:25 探测即过期） |
+| 同一条 rkey 的复用跨度 | `CAQSMEw42ic_ZWgg0y60…`（70 字符）从 **20:54:32 一直用到 22:00:23**，66 分钟没换过 |
+| 那两个 rkey 服务 | `http://ss.xingzhige.com/music_card/rkey` → **502**；`https://secret-service.bietiaop.com/rkeys` → **TLS 握手失败** |
+| 兜底常量 | NapCat 包里那两个 `CAQSKAB6JWEN…` 是 **59 字符**的老格式，从未被用上 → 说明走的是 packet rkey 那条路 |
+| rkey 结构 | 70 字符 base64 = 52 字节 protobuf，只有 `field1 type`(2/4) + `field2` 48 字节密钥，**里面没有时间戳/TTL**，所以 NapCat 判不出过期 |
+
+根因链：**NapCat 4.18.4（2026-05-22 的包）配 QQ 9.9.26-44498（2026-05-28 装的）**，5 个月没动过。
+NapCat 的 `getRkeyData()` 里 `rkey_expired_group` 那段**把 `packetRkey[0]` 连写了两遍**（上游主分支到今天
+仍然如此），判不出过期 → 永不刷新 → 一批批新图片链接全带着同一条死 rkey。普通图片因为 QQ 客户端
+本地已落盘还能被 §1.-5 的本地缓存/迟到缓存救回来，**转发节点图没有本地副本，于是 100% 全灭**
+（10-11 当天 `5 fetched / 5 aborted`）。
+
+**修法（纯环境，与插件代码无关）**：升级 NapCat **4.18.4 → 4.18.37**（2026-10-10 发布）。
+`napcat.mjs` 里 rkey 那段逻辑**一字未改**（`packetRkey[0]` 判据、`rkey.slice(6)`、`CAQSKAB6JWEN…` 常量、
+`appid === "1406" ? private : group` 全在），改的是 **packet hook 那一层**（`native/` 下 36 个组件）——
+也就是说旧版 hook 对不上 QQ 的包结构，取回来的 rkey 服务端不认。
+
+**升级后的实测（2026-10-11 22:29 起，同一台机器）**：
+
+| 时刻 | 结果 |
+| --- | --- |
+| 22:29:13 | 转发 `2 nodes` → `✅ 已保存`，**0.66s**，`forward_render` 568489B 落盘 |
+| 22:33:08 | 嵌套转发 `2 -> 7 nodes` → `✅ 已保存`，480825B |
+| 22:29 之后 | `http 400` = **0**、`render aborted` = **0**、`late cache still miss` = **0**；`failures` 表 1 小时新增 0 |
+
+对照升级前同一台机器：**25.53 秒**走完 5s+20s 的迟到缓存空等，然后 `2/2 aborted`。
+
+### 复盘该这么查（下次先做这一步）
+
+1. **看 URL 是不是一生成就死**：抓一条刚写进日志的 URL，**几秒内**实测。
+   报 `download url has expired` 而不是超时 → 是 NapCat 侧给的凭据问题，不是插件慢。
+2. **看 rkey 有没有换**：把日志里所有 `rkey=` 去重（`_rkeytime` 式的统计），
+   如果跨度几十分钟还是同一条 → NapCat 的 rkey 缓存/判据坏了。
+3. **看 NapCat 版本与发布日期**：`napcat.mjs` 的 mtime 就是包日期；QQ 看
+   `C:\Program Files\Tencent\QQNT\QQ.exe` 的 FileVersion。两者差半年以上就该先升级，再谈插件。
+4. **看兜底是否也死了**：直接 curl 那两个 rkey 服务（`ss.xingzhige.com` / `secret-service.bietiaop.com`），
+   都挂意味着连 fallback 都是 59 字符的老常量。
+
+### 环境补丁（重装/升级 NapCat 后必须重做，否则起不来）
+
+NapCat **4.18.37 自己的包有缺陷**，与本插件无关，但会盖掉「已修好」这个状态：
+
+- 它的 hook 会去 **QQ 自己的目录**找 `.\loadNapCat.js`（相对 `resources\app`），
+  而 `NapCat.Shell.zip` **根本没打包这个文件** → 启动即
+  `Error: Cannot find module 'C:\Program Files\Tencent\QQNT\versions\<ver>\resources\app\loadNapCat.js'`
+- 官方 `launcher.bat` 用 `echo` 生成 loader 时**不转义空格**，`NAPCAT_LOAD_PATH` 里有空格就会被 hook 切开
+
+因此本机留了：
+
+| 路径 | 作用 |
+| --- | --- |
+| `C:\application\NapCat\start-napcat.bat` | **以后重启用这个**（自提权 + 自动把 loader 补进 QQ 的 `resources\app` + 设好 5 个 `NAPCAT_*` 环境变量） |
+| `C:\application\NapCatLoader\loadNapCat.js` | 无空格路径的 loader（读 `NAPCAT_MAIN_PATH`，缺省落到 `C:/application/NapCat/NapCat.Shell/napcat.mjs`） |
+| `...\QQNT\versions\9.9.26-44498\resources\app\loadNapCat.js` | hook 真正去找的那一份（QQ 换版本目录后要重新放） |
+| `C:\application\NapCat\_upgrade_4.18.37\` | 回滚材料：`backup_NapCat.Shell_4.18.4`（91 MB）+ `config_bak_20261011`（9 个配置文件） |
+
+`config\` 目录（账号 / token / 端口 / `onebot11_*.json`）在整个升级里**没有被改动**。
+
+## 1.-5 转发节点图其实是「晚一步」（**v1.9.9 修正了 §1.-4 的结论；其结论又已被 §1.-6 取代**）
 
 **§1.-4 那句「NapCat 从不下载转发节点里的图片字节」只对了一半**：字节确实不在 NapCat 手里，
 但**接收端 QQ 客户端会在随后几秒~几十秒把它下载下来**，按 MD5 落到本地缓存。插件失败的时刻
@@ -318,11 +388,17 @@ safe_edit rollback <file> [<backup_name>]
 
 ## 7. 下一步建议
 
-1. 在真实 AstrBot + napcat 环境观察一次失效链接：**v1.9.5 起最先应该看到的是 `used QQ local cache for image: …`** —— 命中本地缓存时连网络都不走，资产正常落盘、回执不再计失败。合并转发里的图则看 **`used QQ local cache for forward node image: …`** 或 **`late local cache hit after Ns`**（v1.9.9 的迟到重查，见 §1.-5）。若本地确实没有（比如图片已被 QQ 清理、或换了台机器），才继续往下看到 `get_msg refreshed url for image: …` 或三级补救的败因。
+0. **遇到「保存失败」的第一件事：先量环境，别先改代码**（§1.-6 的复盘四步）。
+   2026-10-11 这一整轮排查的最终答案不在插件里，而在一个 5 个月没升级的 NapCat 上；
+   升级后所有转发一次通过。**先看 URL 是不是一生成就死、rkey 是不是几十分钟没换、
+   NapCat/QQ 的日期差多少。**
+1. 在真实 AstrBot + napcat 环境观察一次失效链接：**v1.9.5 起最先应该看到的是 `used QQ local cache for image: …`** —— 命中本地缓存时连网络都不走，资产正常落盘、回执不再计失败。合并转发里的图则看 **`used QQ local cache for forward node image: …`** 或 **`late local cache hit after Ns`**（v1.9.9 的迟到重查，见 §1.-5；NapCat 正常时**两个都不该出现**，出现了就说明源链接又在失效）。
 2. 若仍失败，先确认失败那几张图的 `meta["raw_file"]`（消息段原始的 `data.file`）是不是一个 32 位 MD5 —— 不是的话本地缓存这条路用不上（`find_cached_image` 对短于 16 字符的候选直接放弃）；转发节点图则看节点段有没有 `file` 字段。
-3. 转发节点图仍失败时，**先分辨是哪一种**（§1.-5）：客户端后来下过那张图（迟到重查没赶上 → 可以调大 `_LATE_CACHE_DELAYS_S`）／客户端从没下过（无解）。
-   不要再把「NapCat 架构边界、无解」当成转发节点图失败的统一结论 —— v1.9.8 那个说法已被 v1.9.9 修正。
-   若要彻底解决，只能让 NapCat 侧预先落盘（改 NapCat 或换实现），不是本插件能做的。
+3. 转发节点图仍失败时，**先按 §1.-6 量环境**（NapCat 版本 / rkey 是否复用 / URL 是否一生成就过期）——
+   2026-10-11 的结论是「坏环境」而不是「架构无解」。只有在环境确认正常、确实偶发时，再按 §1.-5 分辨：
+   客户端后来下过那张图（迟到重查没赶上 → 可以调大 `_LATE_CACHE_DELAYS_S`）／客户端从没下过（无解）。
+   **不要再把「NapCat 架构边界、无解」当成转发节点图失败的统一结论** —— v1.9.8 那个说法已被
+   v1.9.9 修正，v1.9.9 的「只能靠迟到缓存」又被 §1.-6 修正。
 3. 若仍失败，日志里 `refetch: …` 会逐跳写清败因（`get_image file=… -> ActionFailed…` / `get_msg {…} -> …`），回执 note 里带最后一跳。
    常见的两种：`get_msg` 报「消息不存在或已被撤回」= 消息太老 / napcat 的 `MessageUnique` 映射已清；能拿到新链接却 `http 400` = 新时的 rkey 也救不回来（要查 napcat 的 `getRkeyData()` 是否拿到 packet rkey）。
 4. 打开 `index_reuse_saved=true` 观察几天，确认「索引复用」不会掩盖「文件被人工清理」的情况（当前会明确计为落盘失败）。
