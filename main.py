@@ -858,6 +858,7 @@ class MediaWardenStar(Star):
             return None
         name = ref.get("file")
         if not isinstance(name, str) or not name.strip():
+            self._log(f"fwd cache: ref has no usable file | {self._ref_preview(ref)}")
             return None
         try:
             from .warden.localcache import find_cached_image as _find
@@ -870,6 +871,7 @@ class MediaWardenStar(Star):
             self._log(f"forward local cache lookup failed for {name!r}: {e!r}")
             return None
         if not path:
+            self._log(f"fwd cache: miss for file={name!r} | {self._ref_preview(ref)}")
             return None
         try:
             data = await asyncio.to_thread(
@@ -880,6 +882,23 @@ class MediaWardenStar(Star):
             return None
         self._log(f"used QQ local cache for forward node image: {path}")
         return data.data
+
+    @staticmethod
+    def _ref_preview(ref: Any) -> str:
+        """临时诊断:把节点 image 段的 data 压成一行短摘要(看 file 字段长什么样)。"""
+        try:
+            import json as _json
+            if not isinstance(ref, dict):
+                return f"ref<{type(ref).__name__}>"
+            out = {}
+            for k, v in ref.items():
+                if isinstance(v, str):
+                    out[k] = v if len(v) <= 60 else f"{v[:40]}…(len={len(v)})"
+                else:
+                    out[k] = f"<{type(v).__name__}>"
+            return _json.dumps(out, ensure_ascii=False)[:280]
+        except Exception as e:  # noqa: BLE001
+            return f"preview failed: {e!r}"
 
     async def _fetch_forward_nodes(self, comp: Component,
                                    event: AstrMessageEvent | None):
