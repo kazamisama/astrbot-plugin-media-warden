@@ -1,14 +1,53 @@
-# 交接文档 · astrbot-plugin-media-warden v1.9.8
+# 交接文档 · astrbot-plugin-media-warden v1.9.9
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.9.8（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
+- 版本：v1.9.9（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
 - 分支：`main`
-- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=18, total=101)`
+- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 各单独一次提交（显式路径，未用 `git add -A`）
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=19, total=102)`
 
-## 1.-4 转发节点图为什么救不回来（**v1.9.8 的结论，别再查一遍**）
+## 1.-5 转发节点图其实是「晚一步」（**v1.9.9 修正了 §1.-4 的结论**）
+
+**§1.-4 那句「NapCat 从不下载转发节点里的图片字节」只对了一半**：字节确实不在 NapCat 手里，
+但**接收端 QQ 客户端会在随后几秒~几十秒把它下载下来**，按 MD5 落到本地缓存。插件失败的时刻
+正好卡在那个空档之前。同一台机器上的实测（2026-10-11）：
+
+| 时刻 | 事实 |
+| --- | --- |
+| 20:26:57 | 转发节点图 `D867CE1671D3457B1A0534D240D4885E.jpg` 失败（`http 400`，节点 url 已失效） |
+| 20:33:39 | 同一个 MD5 出现在 `…\3683351360\nt_qq\nt_data\Emoji\emoji-recv\2026-10\Ori\` |
+
+所以 **v1.9.9 加了「迟到缓存重查」**：三级补救全败后隔 `4s`、`12s` 再查一次 QQ 本地缓存
+（`_LATE_CACHE_DELAYS_S`，普通图片与转发节点图都接），命中就用。日志里看到
+`late local cache hit after Ns` 就是这条路生效了。
+
+**仍然无解的只有一种**：客户端自始至终没下过那张图（本地永远没有字节，rkey url 又已失效）。
+`DCFF08A6…jpg` / `FE56BB22…jpg` 就是这种 —— 全盘搜不到。转发链按 v1.5.0 设计
+「任一节点图失败即整体失败、不落盘」，这是有意的：宁可明确报失败，也不要产出一张缺图、
+回执却写着「已保存」的转发图。
+
+### 400 是外部的，不是本插件
+
+同一天 AstrBot **自己的**预处理管线也在同一域名上独立报了 400：
+
+```
+[v4.28.0-beta.1] [utils.io:188]: Failed to download file from https URL
+  host='multimedia.nt.qq.com.cn' file='download' len=237. HTTP status code: 400
+```
+（20:13:52 / 20:32:50 / 20:33:01 / 20:33:09 / 20:33:42）
+
+即 napcat 消息里那条 rkey url 本身已经失效（rkey 存活约 9 分钟）。普通图片能靠本地缓存救回来，
+转发节点图只能靠上面的「迟到重查」。转发失败率对照（按天 `forward fetched` vs `aborted`）：
+9-20~10-06 是 0%~4.8%，10-11 当天 `5 / 5 = 100%`。
+
+### 诊断输出（临时，确认修复后可以删）
+
+- 转发节点图每个候选 url 失败时打全 url：
+  `fwd dl candidate 1/2 failed: http 400 for '…' | url=https://multimedia.nt.qq.com.cn/download?appid=…`
+
+## 1.-4 转发节点图为什么难救（**v1.9.8 的取证，结论已被 §1.-5 修正**）
 
 v1.9.6 给转发节点图接上本地缓存后，现场仍 `2/2 node image(s) failed to download`。
 v1.9.7 的取证日志证明**字段假设是对的**（`file` 确实是 32 位 MD5）：
@@ -18,15 +57,11 @@ fwd cache: miss for file='DCFF08A6D4229FE78EFF487D48A0D0A8.jpg' |
   {"summary": "[动画表情]", "file": "DCFF08A6…", "sub_type": "<int>", "url": "…(len=235)", "file_size": "5964"}
 ```
 
-但那两个 MD5 **在整台机器上都不存在**：`Documents\Tencent Files` 递归全搜 `NOT FOUND`；
+那两个 MD5 当时**在整台机器上都搜不到**：`Documents\Tencent Files` 递归全搜 `NOT FOUND`；
 NapCat 的 `NapCat.Shell\cache`（仅 1 个文件）、NapCat temp、`AppData` 下的 NapCat、
 AstrBot 的 `data\temp`（466 个文件）也全部 `NOT FOUND`。
 
-**根因**：NapCat 从不下载转发节点里的图片。节点内容是 `get_forward_msg` 现查出来的元数据
-（`url` + `file`），NapCat 只转发链接、不落字节。QQ 客户端为显示会下，所以**普通图片**那条路
-（v1.9.5）能命中 `Image/C2C/Image2`；转发节点这条路 NapCat 手里从没有过字节。
-
-**`get_image` 为什么也救不了**（`napcat.mjs`，`class GetFileBase extends OneBotAction`）：
+**`get_image` 为什么救不了**（`napcat.mjs`，`class GetFileBase extends OneBotAction`）：
 
 ```js
 async _handle(payload) {
@@ -42,13 +77,7 @@ async _handle(payload) {
   `throw new Error("file not found")`（= 线上 `retcode=1200`）。节点图的 MD5 从未进过那个 map。
 - 最后那条 `searchForFile` 走的是 `NodeIKernelFileAssistantService`（**文件助手**），
   按文件名在**聊天文件**里找，不是图片缓存 —— 拿图片名去搜等于必然落空。
-
-**所以链路是**：rkey 过期（约 9 分钟）→ 只有「发消息那一刻就存在的本地副本」能救 →
-转发节点图的字节 NapCat 从没拉过 → **无解**。这不是可以修的 bug，是 NapCat 的架构边界。
-
-**唯一的应对**：让 NapCat 也把图拉下来（改 NapCat 侧行为，不在本插件职责内）。
-转发链本身仍会按 v1.5.0 设计「任一节点图失败即整体失败、不落盘」，这是有意的 —— 宁可明确报失败，
-也不要产出一张缺图、且回执上说「已保存」的转发图。
+- 转发节点图也不做 `get_image`/`get_msg` 重取：节点 url 里没有 `file_id`。
 
 ## 1.-3 v1.9.6 修的是什么（历史）
 
@@ -289,10 +318,11 @@ safe_edit rollback <file> [<backup_name>]
 
 ## 7. 下一步建议
 
-1. 在真实 AstrBot + napcat 环境观察一次失效链接：**v1.9.5 起最先应该看到的是 `used QQ local cache for image: …`** —— 命中本地缓存时连网络都不走，资产正常落盘、回执不再计失败。合并转发里的图则看 **`used QQ local cache for forward node image: …`**（命中不了是正常的，见 §1.-4）。若本地确实没有（比如图片已被 QQ 清理、或换了台机器），才继续往下看到 `get_msg refreshed url for image: …` 或三级补救的败因。
+1. 在真实 AstrBot + napcat 环境观察一次失效链接：**v1.9.5 起最先应该看到的是 `used QQ local cache for image: …`** —— 命中本地缓存时连网络都不走，资产正常落盘、回执不再计失败。合并转发里的图则看 **`used QQ local cache for forward node image: …`** 或 **`late local cache hit after Ns`**（v1.9.9 的迟到重查，见 §1.-5）。若本地确实没有（比如图片已被 QQ 清理、或换了台机器），才继续往下看到 `get_msg refreshed url for image: …` 或三级补救的败因。
 2. 若仍失败，先确认失败那几张图的 `meta["raw_file"]`（消息段原始的 `data.file`）是不是一个 32 位 MD5 —— 不是的话本地缓存这条路用不上（`find_cached_image` 对短于 16 字符的候选直接放弃）；转发节点图则看节点段有没有 `file` 字段。
-3. **不要再为「转发节点图失败」投入排查**：§1.-4 已经定位到 NapCat 架构边界（它从不下转发节点的图字节）。
-   若要真正解决，得让 NapCat 侧预先落盘（改 NapCat 或换实现），不是本插件能做的。
+3. 转发节点图仍失败时，**先分辨是哪一种**（§1.-5）：客户端后来下过那张图（迟到重查没赶上 → 可以调大 `_LATE_CACHE_DELAYS_S`）／客户端从没下过（无解）。
+   不要再把「NapCat 架构边界、无解」当成转发节点图失败的统一结论 —— v1.9.8 那个说法已被 v1.9.9 修正。
+   若要彻底解决，只能让 NapCat 侧预先落盘（改 NapCat 或换实现），不是本插件能做的。
 3. 若仍失败，日志里 `refetch: …` 会逐跳写清败因（`get_image file=… -> ActionFailed…` / `get_msg {…} -> …`），回执 note 里带最后一跳。
    常见的两种：`get_msg` 报「消息不存在或已被撤回」= 消息太老 / napcat 的 `MessageUnique` 映射已清；能拿到新链接却 `http 400` = 新时的 rkey 也救不回来（要查 napcat 的 `getRkeyData()` 是否拿到 packet rkey）。
 4. 打开 `index_reuse_saved=true` 观察几天，确认「索引复用」不会掩盖「文件被人工清理」的情况（当前会明确计为落盘失败）。

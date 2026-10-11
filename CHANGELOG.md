@@ -1,5 +1,52 @@
 # Changelog
 
+## v1.9.9
+
+### 修正 v1.9.8 的结论：转发节点图不是「无解」，而是**晚一步**
+
+v1.9.8 说「NapCat 从不下载转发节点里的图片字节」——**这句话只对了一半**。字节确实不在
+NapCat 手里，但**接收端 QQ 客户端会在随后（几秒~几十秒）把它下载下来**，按 MD5 落到本地缓存。
+插件失败的时刻正好卡在那个空档之前。
+
+线上实测（2026-10-11 20:10–20:33，同一台机器）：
+
+| 时刻 | 事实 |
+| --- | --- |
+| 20:26:57 | 转发节点图 `D867CE1671D3457B1A0534D240D4885E.jpg` 下载失败（`http 400`，节点 url 已失效） |
+| 20:33:39 | 同一个 MD5 出现在 `…\3683351360\nt_qq\nt_data\Emoji\emoji-recv\2026-10\Ori\` |
+
+即「插件查缓存时文件还不存在 → 网络那条 url 已经 400 → 客户端随后才落盘」。
+（另有 `DCFF08A6…jpg` / `FE56BB22…jpg` 两个 MD5 至今全盘搜不到 —— 客户端到底没下那张，
+这类仍然无解。）
+
+同时确认**400 与插件无关**：AstrBot 自己的预处理管线在同一时段对同一域名独立报了
+`Failed to download file from https URL host='multimedia.nt.qq.com.cn' … HTTP status code: 400`
+（20:13:52、20:32:50、20:33:01、20:33:09、20:33:42）—— 是 napcat 交给我们的那条
+rkey url 本身已经失效，不是本插件请求姿势不对。
+
+转发失败率对照（按天，`forward fetched` vs `forward render aborted`）：
+9-20~10-06 为 0%~4.8%，10-11 当天 `5 fetched / 5 aborted = 100%`。
+
+### Added
+- **迟到缓存重查**（`_LATE_CACHE_DELAYS_S = (4, 12)`）：三级补救全败后，隔 4s / 12s 再查一次
+  QQ 本地缓存，命中即用（`late local cache hit after Ns`）。普通图片与转发节点图都接。
+  只在前面的路全败时才走，代价 = `sum(_LATE_CACHE_DELAYS_S)`。
+  测试里用 `_sleep_scale`/`_LATE_CACHE_DELAYS_S` 关掉真实等待。
+
+### Diagnostics（临时，取证完即删）
+- 转发节点图每个候选 url 失败时打全 url 与败因：
+  `fwd dl candidate 1/2 failed: http 400 for '…' | url=https://multimedia.nt.qq.com.cn/download?appid=…`
+  —— 以前只看到「几个失败」，看不到到底是哪条 url、哪个候选、什么状态码。
+
+### Known gaps
+- 客户端**从未下载**过的那张图，仍然救不回来（本地没有字节、rkey url 又已失效）。
+- 转发节点图不做 `get_image`/`get_msg` 重取：节点 url 里没有 `file_id`，且 napcat 的
+  `get_image` 只认它自己那份进程内 uuid map（见 v1.9.8 段的源码证据）。
+
+### Tests
+- 新增 `test_main_late_local_cache_retry`（首次 miss + 网络 400 → 迟到重查命中即成功；
+  始终没有则仍抛原错）。冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=19, total=102)`
+
 ## v1.9.8
 
 ### 结论：转发节点图里的「老图」救不回来（不是 bug，是 NapCat 的架构边界）

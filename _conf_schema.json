@@ -97,8 +97,8 @@
       "get_media_fallback": {
         "type": "bool",
         "default": true,
-        "description": "下载失败后尝试 OneBot get_image / get_msg 重取链接与本地副本（v1.9.0+）",
-        "hint": "默认开启。URL 是 http(s) 但下载失败（典型：QQ rkey 授权链接过期 -> 400）时的补救顺序：先按消息段 MD5 找 QQ 客户端自己的图片缓存（Tencent Files/<QQ号>/Image/C2C/Image2 或 nt_qq/nt_data/Emoji，v1.9.5，命中即不走网络），再向 bot 发 get_image / get_msg 换新链接重下，最后回退组件本地副本（napcat 的 .astrbot/data/temp 或 raw.convert_to_file_path）。全失败才判定失败；关闭后行为回到 v1.8.x。"
+        "description": "下载失败后尝试 OneBot get_image / get_msg 重取链接与本地副本（v1.9.0+，v1.9.9 加迟到缓存重查）",
+        "hint": "默认开启。URL 是 http(s) 但下载失败（典型：QQ rkey 授权链接过期 -> 400）时的补救顺序：① 按消息段 MD5 找 QQ 客户端自己的图片缓存（Tencent Files/<QQ号>/Image/C2C/Image2 或 nt_qq/nt_data/Emoji，v1.9.5，命中即不走网络）；② 向 bot 发 get_image / get_msg 换新链接重下；③ 回退组件本地副本（napcat 的 .astrbot/data/temp 或 raw.convert_to_file_path）；④ 隔 4s/12s 再查一次 QQ 本地缓存（v1.9.9：接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）。全失败才判定失败；关闭后行为回到 v1.8.x。"
       }
     }
   },

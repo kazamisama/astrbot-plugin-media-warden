@@ -21,6 +21,7 @@
 - v1.9.5：**首选 QQ 本地图片缓存** —— 按消息段 MD5（`<md5>.<ext>`）在 `Tencent Files/<QQ号>/Image/C2C/Image2/` 与 `nt_qq/nt_data/Emoji/emoji-recv/*/Ori/` 找图片本体，命中即用、**不走网络**；rkey 过期（http 400）的图因此能正常保存
 - v1.9.6：**合并转发的节点图接同一条本地缓存** —— `ForwardNode` 新增 `image_refs` 保留节点 image 段的 `file`(MD5)，`_save_forward` 拉节点图前先查本地缓存
 - v1.9.8：确认**转发节点图里的老图救不回来**（NapCat 从不下载转发节点的图片字节，`get_image` 的内存 uuid 表里也没有它们）—— 详见「已知边界」
+- v1.9.9：**迟到缓存重查** —— 三级补救全败后隔 `4s`/`12s` 再查一次 QQ 本地缓存（接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）
 
 ## 目录
 
@@ -80,7 +81,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `download_retries` | `2` | transient 错误重试次数（>= 0） |
 | `max_concurrent` | `4` | 并发下载上限（>= 1） |
 | `download_timeout_s` | `30` | 单次下载超时（> 0） |
-| `get_media_fallback` | `true` | 下载失败后尝试 OneBot `get_image` / `get_msg` 重取链接与组件本地副本（v1.9.0+，v1.9.1 修入参，v1.9.2 加 `get_msg`） |
+| `get_media_fallback` | `true` | 下载失败后的补救链：QQ 本地缓存（按 MD5）→ OneBot `get_image` / `get_msg` 重取链接 → 组件本地副本 → 迟到缓存重查（v1.9.0+，v1.9.1 修入参，v1.9.2 加 `get_msg`，v1.9.9 加迟到重查） |
 | `forward_render_mode` | `image` | `image` \| `json` \| `both` |
 | `forward_image_engine` | `pil` | `pil` \| `playwright` \| `wkhtml`（当前仅 `pil` 落地） |
 | `forward_image_width` | `720` | 转发渲染图宽度（>= 1） |
@@ -158,14 +159,14 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **101 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 18），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **102 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 19），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
 - 组件识别与 raw_message URL 恢复
 - 落盘 roundtrip、blake2b 去重、路径越权防护、篡改/内容变更指针拒绝
 - 下载：aiohttp mock、超限中断、指数退避、并发保序
-- 下载补救链：**QQ 本地缓存按 MD5（命中即不碰网络；含合并转发节点图）**、本地副本回退、`get_image` 重取新链接（含候选排序与多参数形态 / base64 返回）、`get_msg` 重解析拿新链接（含多图挑段）、全败保留原始错误
+- 下载补救链：**QQ 本地缓存按 MD5（命中即不碰网络；含合并转发节点图）**、本地副本回退、`get_image` 重取新链接（含候选排序与多参数形态 / base64 返回）、`get_msg` 重解析拿新链接（含多图挑段）、**全败后迟到缓存重查**、全败保留原始错误
 - 失败分类与回执文案（下载失败 vs 落盘失败）、失败入库与 attempts 累加、`/warden fail`
 - 索引复用（命中 / 文件已缺失时如实报错）
 - 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成 / json 模式不抓头像
@@ -180,7 +181,7 @@ python -m pytest -q _smoke.py
 - 透明 GIF / WebP 动画按首帧处理，未做帧动画合成
 - 命令权限、头像网络抓取、`image_result` 协议差异需要真实 AstrBot runtime 验证
 - 转发节点图（`_save_forward`）走的是节点内嵌 url + 节点 image 段的 `file`(MD5)：**v1.9.6 起会先查 QQ 本地缓存**，但节点段没有 `file` 字段（非 napcat 实现 / 外链图）时仍只有 `[is_origin=1, 原 url]` 两个候选，任一失败即按 v1.5.0 设计整体失败、不落盘
-- **转发节点图里的老图救不回来**（v1.9.8 定论）：NapCat 从不下载转发节点里的图片字节（`get_forward_msg` 只给元数据），所以本地没有副本；rkey 一过期（约 9 分钟）就只能整图失败。`get_image` 也救不了 —— 它先查 `FileNapCatOneBotUUID` 这个**进程内内存 map**，节点图的 MD5 从未进过那里，直接 `file not found`。**普通图片**（非转发）不受此限：QQ 客户端会下，v1.9.5 能命中 `Image/C2C/Image2`
+- **转发节点图里的老图**（v1.9.8/v1.9.9 定论）：NapCat 自己不下载转发节点里的图片字节（`get_forward_msg` 只给元数据），`get_image` 也救不了（它先查 `FileNapCatOneBotUUID` 这个**进程内内存 map**，节点图的 MD5 从未进过那里，直接 `file not found`）。**但接收端 QQ 客户端会在随后几秒~几十秒把图落到本地缓存** —— v1.9.9 的「迟到缓存重查」就是等这个（`late local cache hit after Ns`）。仍失败的只剩「客户端自始至终没下过那张图」这一种。**普通图片**不受此限：QQ 客户端会下，v1.9.5 能命中 `Image/C2C/Image2`
 - **QQ 本地缓存补救依赖 QQ 客户端自己的缓存目录**（`Tencent Files/<QQ号>/…`，Windows 默认在“文档”下）：缓存被清理、机器人跑在与 QQ 不同的机器上、或消息段的 `data.file` 不是 32 位 MD5 时，这条路用不上，会照旧返回失败
 - 高并发群发场景尚未压测
 

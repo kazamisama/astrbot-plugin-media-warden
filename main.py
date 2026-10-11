@@ -241,6 +241,13 @@ def _failure_subject_for(comp: Component) -> str:
     return failure_subject(comp.url)
 
 
+# v1.9.9: 网络全败后「等客户端把图下载下来再查本地缓存」的等待点(秒)。
+# 线上实测(2026-10-11): 消息刚到的那一瞬间客户端还没落盘 —— 插件第一次查必 miss,
+# 而 napcat 给的那条 url 又已经失效(http 400); 客户端随后(几秒~几十秒)才下载。
+# 只在三级补救全败时才走, 单次代价 = sum(_LATE_CACHE_DELAYS_S)。
+_LATE_CACHE_DELAYS_S = (4, 12)
+
+
 def _upgrade_qq_image_url(url: str) -> str:
     """把 QQ 图床的缩略图 url 升级为原图 url。
 
@@ -260,7 +267,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.8: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.9: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -273,6 +280,8 @@ class MediaWardenStar(Star):
         self._forwarder = None
         self._index = None
         self._avatar_cache = None
+        # 迟到缓存重查的等待倍率(测试里置 0 以免真等)
+        self._sleep_scale = 1.0
         self._log(
             f"loaded: v{VERSION} | mode={self.cfg.match_mode} "
             f"| groups={len(self.cfg.target_groups)} "
@@ -596,6 +605,17 @@ class MediaWardenStar(Star):
                     attempts.append(f"local: {e}")
                 else:
                     self._log(f"used local copy for {comp.kind} after download failure")
+            if dl is None:
+                # 第四级: 等一会儿再看 QQ 本地缓存。
+                # (只在真的全败时才走, 单次代价 = sum(_LATE_CACHE_DELAYS_S))
+                for delay in _LATE_CACHE_DELAYS_S:
+                    await asyncio.sleep(self._sleep_scale * delay)
+                    dl = await self._cached_copy(comp)
+                    if dl is not None:
+                        self._log(
+                            f"late local cache hit after {delay}s for {comp.kind}"
+                        )
+                        break
             if dl is None:
                 primary.fallback_error = "; ".join(attempts[:3])[:300]
                 raise primary
@@ -1149,7 +1169,7 @@ class MediaWardenStar(Star):
                         hi = _upgrade_qq_image_url(url)
                         candidates = [hi, url] if hi != url else [url]
                         last: Optional[DownloadError] = None
-                        for cand in candidates:
+                        for ci, cand in enumerate(candidates):
                             try:
                                 dl = await download(
                                     Component(kind="image", url=cand),
@@ -1161,6 +1181,22 @@ class MediaWardenStar(Star):
                                 return dl.data
                             except DownloadError as e:
                                 last = e
+                                # v1.9.9 诊断: 候选序号 + 完整 url + 败因(用完即删)
+                                self._log(
+                                    f"fwd dl candidate {ci + 1}/{len(candidates)} "
+                                    f"failed: {e} | url={cand}"
+                                )
+                        # 等客户端落盘后再查一次本地缓存(见 _LATE_CACHE_DELAYS_S)
+                        for delay in _LATE_CACHE_DELAYS_S:
+                            await asyncio.sleep(self._sleep_scale * delay)
+                            cached = await self._forward_local_cached(ref)
+                            if cached is not None:
+                                self._log(
+                                    f"fwd late local cache hit after {delay}s: "
+                                    f"{ref.get('file') if isinstance(ref, dict) else ref}"
+                                )
+                                return cached
+                            self._log(f"fwd late cache still miss after {delay}s")
                         raise last if last is not None else DownloadError(
                             f"no candidate url for {url!r}")
 

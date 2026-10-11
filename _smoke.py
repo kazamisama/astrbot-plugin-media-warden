@@ -2436,6 +2436,7 @@ def _build_plugin_for_command(tmpdir, *, enable_index=True, log_to_stdout=False,
         cfg.update(extra)
     pl = plugin_main.MediaWardenStar(
         plugin_main.MediaWardenStar.__init__.__globals__["Context"](), cfg)
+    pl._sleep_scale = 0.0  # 不真等「迟到缓存重查」的 sleep
     return pl
 
 
@@ -3587,6 +3588,66 @@ def test_forward_local_cached_uses_node_file_md5():
           f"无 file / 关开关 / 未命中都退回网络")
 
 
+def test_main_late_local_cache_retry():
+    banner("main: 网络全败后「等客户端落盘再查缓存」")
+    import asyncio
+    orig_dl = plugin_main.download
+    orig_delays = plugin_main._LATE_CACHE_DELAYS_S
+    hits = {"n": 0, "lookups": 0}
+    small = os.path.join(tempfile.mkdtemp(prefix="warden_latef_"), "late.bin")
+    with open(small, "wb") as fh:
+        fh.write(b"late-bytes")
+
+    async def boom(*a, **k):
+        hits["n"] += 1
+        raise plugin_main.DownloadError(
+            "http 400 for 'https://multimedia.nt.qq.com.cn/x'")
+
+    def fake_find(name):
+        # ⓪ 级第一次查(cands 两个都是 miss) → 走网络 → 全败 → 迟到重查时命中
+        hits["lookups"] += 1
+        if hits["lookups"] >= 3:
+            return small
+        return None
+
+    # 注意: main.py 的 `_cached_copy` 里是**函数内局部导入**
+    # `from .warden.localcache import find_cached_image`, 所以打桩要打
+    # 插件那一份 `warden.localcache` 模块对象本身的属性。
+    lc_mod = importlib.import_module(_pname + ".warden.localcache")
+    orig_find = lc_mod.find_cached_image
+
+    try:
+        plugin_main.download = boom
+        plugin_main._LATE_CACHE_DELAYS_S = (0.0,)
+        lc_mod.find_cached_image = fake_find
+        pl = _build_plugin_for_command(tempfile.mkdtemp(prefix="warden_late_"))
+        asyncio.run(pl.initialize())
+        med = plugin_main.Component(
+            kind="image", url="https://multimedia.nt.qq.com.cn/x",
+            file_id="ABCDEF0123456789ABCDEF0123456789.jpg",
+            meta={"raw_file": "ABCDEF0123456789ABCDEF0123456789.jpg"})
+        dl = asyncio.run(pl._download_one(med, event=None))
+        assert dl is not None and dl.data == b"late-bytes", (dl, hits)
+        assert hits["n"] >= 1, hits
+        assert hits["lookups"] >= 2, hits
+
+        # 客户端始终没落盘 -> 仍抛原来的下载错误
+        hits["n"] = 0
+        hits["lookups"] = 0
+        lc_mod.find_cached_image = lambda name: None
+        try:
+            asyncio.run(pl._download_one(med, event=None))
+        except DownloadError as e:
+            assert "http 400" in str(e), e
+        else:
+            raise AssertionError("应该抛 DownloadError")
+    finally:
+        lc_mod.find_cached_image = orig_find
+        plugin_main.download = orig_dl
+        plugin_main._LATE_CACHE_DELAYS_S = orig_delays
+    print("  OK -> 首次 miss/网络 400 → 等待后第二次查到本地文件即成功; 始终没有仍报原错误")
+
+
 PHASE5 = [
     test_url_fileid_extraction,
     test_reporter_classify_fetch_vs_save,
@@ -3606,10 +3667,14 @@ PHASE5 = [
     test_localcache_finds_qq_image_by_md5,
     test_main_download_prefers_qq_local_cache,
     test_forward_local_cached_uses_node_file_md5,
+    test_main_late_local_cache_retry,
 ]
 
 
 if __name__ == "__main__":
+    # 离线冒烟不真等「迟到缓存重查」的 sleep,否则下载失败类用例每个多等 16s。
+    # (需要验证等待逻辑本身的用例自己在内部把这一项恢复成真值)
+    plugin_main._LATE_CACHE_DELAYS_S = ()
     for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5:
         t()
     print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d, total=%d)"
