@@ -3181,14 +3181,15 @@ def test_main_refetch_via_get_msg_regenerates_url():
             if action == "get_image":
                 raise RuntimeError("ActionFailed retcode=1200 file not found")
             if action == "get_msg":
-                return {"status": "ok", "data": {
+                # aiocqhttp 的 call_action 会把 OneBot 外层解包,这里照样返回「解包后」的形态
+                return {
                     "message_id": 1795993480,
                     "message": [
                         {"type": "text", "data": {"text": "hi"}},
                         {"type": "image", "data": {"file": "C0C9610D.jpg",
                                                    "url": fresh,
                                                    "file_size": "1234"}},
-                    ]}}
+                    ]}
             raise RuntimeError("unsupported action")
 
     class _Bot:
@@ -3233,6 +3234,13 @@ def test_main_refetch_via_get_msg_regenerates_url():
     ]}
     got = plugin_main._media_urls_from_resp(resp, old="", hint="B.jpg")
     assert got == ["https://cdn/b.jpg", "https://cdn/a.jpg"], got
+    # aiocqhttp 解包后拿到的就是 {"message": [...]}(生产形态);带外层 {"data": {...}} 也要认
+    assert plugin_main._segment_list(resp) == resp["message"]
+    assert plugin_main._segment_list({"status": "ok", "data": resp}) == resp["message"]
+    assert plugin_main._segment_list("not a dict") == []
+    assert plugin_main._media_urls_from_resp({"status": "ok", "data": resp},
+                                            old="", hint="A.jpg") == \
+        ["https://cdn/a.jpg", "https://cdn/b.jpg"]
     print("  OK -> get_msg regenerated the rkey url and it downloaded")
 
 

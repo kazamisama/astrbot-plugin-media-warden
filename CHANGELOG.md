@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.9.3
+
+### Fixed
+- **`get_msg` 的返回被解包了，代码没跟上**（v1.9.2 上线后现场仍是 `0 fresh url(s)`）。aiocqhttp 的 `call_action` 走 `_handle_api_result()`，成功时 **return `result["data"]`**（`aiocqhttp/api_impl.py:28-39`）—— 也就是说我们拿到的是 `{"message": [...], "message_id": …}` **本身**，而不是 `{"status":"ok","data":{...}}` 外壳。v1.9.2 的 `_media_urls_from_resp` 只在外壳里找 `message`，于是每次都 `0 fresh url(s)`（19:28 线上日志逐字）。
+- 新增 `_segment_list(resp)`：两种包裹都认（裸 `{"message": …}` 与带 `{"data": {"message": …}}`），并容忍 `message` 是 dict 包一层的情况；`_media_urls_from_resp` 改用它。
+- `get_msg` 的 trace 现在写 `N seg(s), M fresh url(s), keys=[…]`，拿到空响应也能一眼看出是「没段」还是「没链接」。
+
+### Tests
+- `_smoke.py`：`test_main_refetch_via_get_msg_regenerates_url` 的 stub 改成返回**解包后**的形态（与 aiocqhttp 一致），并补 `_segment_list` 对裸 / 带外层 / 非 dict 三种输入的断言。
+- 冒烟总数仍 **98**（phase5=15）。
+
 ## v1.9.2
 
 ### Fixed

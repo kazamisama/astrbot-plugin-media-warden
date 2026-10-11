@@ -154,6 +154,24 @@ def _media_refetch_candidates(comp: Component) -> list[str]:
     return out
 
 
+def _segment_list(resp) -> list:
+    """从 get_msg 的返回里取出 message 段列表。
+
+    **aiocqhttp 的 call_action 已经把外层结果解包了**（`_handle_api_result` 返回
+    `result["data"]`），所以正常拿到的是 `{"message": [...], "message_id": …}` 本身；
+    但别的实现/中间层可能带外层，所以两种包裹都认。
+    """
+    if not isinstance(resp, dict):
+        return []
+    for cand in (resp.get("message"), (resp.get("data") or {}).get("message")
+                 if isinstance(resp.get("data"), dict) else None):
+        if isinstance(cand, list):
+            return cand
+        if isinstance(cand, dict) and isinstance(cand.get("message"), list):
+            return cand["message"]
+    return []
+
+
 def _media_urls_from_resp(resp, *, old: str = "", hint: Optional[str] = None) -> list[str]:
     """从 OneBot `get_msg` 的返回里挑出新链接。
 
@@ -161,19 +179,9 @@ def _media_urls_from_resp(resp, *, old: str = "", hint: Optional[str] = None) ->
     转换器每次都调 `getImageUrl`），这是唯一绕开「消息里那条已过期 url」的路子。
     hint 是原始 segment 的 `file`（文件名），用来在多图消息里挑对那一段。
     """
-    if not isinstance(resp, dict):
-        return []
-    inner = resp.get("data")
-    if isinstance(inner, dict) and "message" in inner:
-        resp = inner
-    segs = resp.get("message")
-    if isinstance(segs, dict):
-        segs = segs.get("message")
-    if not isinstance(segs, list):
-        return []
     hit: list[str] = []
     other: list[str] = []
-    for seg in segs:
+    for seg in _segment_list(resp):
         if not isinstance(seg, dict):
             continue
         if str(seg.get("type") or "").lower() != "image":
@@ -221,7 +229,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.2: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image 多形态重取 + get_msg 重解析 / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.9.3: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(OneBot get_image 多形态重取 + get_msg 重解析 / 本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -629,8 +637,12 @@ class MediaWardenStar(Star):
             except Exception as e:
                 trace.append(f"get_msg {sorted(params)} -> {type(e).__name__}: {e}")
                 continue
+            segs = _segment_list(resp)
             urls = _media_urls_from_resp(resp, old=old, hint=hint)
-            trace.append(f"get_msg {sorted(params)} -> {len(urls)} fresh url(s)")
+            keys = sorted(resp.keys())[:8] if isinstance(resp, dict) else type(resp).__name__
+            trace.append(
+                f"get_msg {sorted(params)} -> {len(segs)} seg(s), {len(urls)} fresh url(s), keys={keys}"
+            )
             for url in urls:
                 dl = await self._download_fresh(comp, url)
                 if dl is not None:

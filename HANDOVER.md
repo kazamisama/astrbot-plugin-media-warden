@@ -1,14 +1,29 @@
-# 交接文档 · astrbot-plugin-media-warden v1.9.2
+# 交接文档 · astrbot-plugin-media-warden v1.9.3
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.9.2（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
+- 版本：v1.9.3（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
 - 分支：`main`
-- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2 各单独一次提交（显式路径，未用 `git add -A`）
+- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3 各单独一次提交（显式路径，未用 `git add -A`）
 - 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=15, total=98)`
 
-## 1.0 v1.9.2 修的是什么（**最新，先读这段**）
+## 1.-1 v1.9.3 修的是什么（**最新**）
+
+v1.9.2 的 `get_msg` 上线后现场仍是 `get_msg ['message_id'] -> 0 fresh url(s)`（2026-10-11 19:28 日志逐字）。
+原因：**aiocqhttp 的 `call_action` 会把 OneBot 返回的外层解包** ——
+`aiocqhttp/api_impl.py:28-39` 的 `_handle_api_result()` 成功时 `return result.get('data')`，
+所以插件拿到的是 `{"message": [...], "message_id": …}` **本身**，
+而 v1.9.2 的 `_media_urls_from_resp` 只在 `{"status":"ok","data":{...}}` 外壳里找 `message`。
+
+修法：新增 `_segment_list(resp)` 同时认裸形态与带外层形态（并容忍 `message` 再包一层 dict），
+`_media_urls_from_resp` 改为用它；trace 增加 `N seg(s), keys=[…]`。
+
+**教训**：写 OneBot 调用时先确认**手上拿到的到底是整包还是解包后的 data**。
+aiocqhttp 是解包的；`_get_media_url_candidates`（v1.9.0 写的）本来就是按解包后的形态写的，
+`get_msg` 这条新路把它忘了。
+
+## 1.0 v1.9.2 修的是什么
 
 **读了 napcat 自己的实现**（`C:\application\NapCat\NapCat.Shell\napcat.mjs`）
 后确认：v1.9.1 依赖的 `get_image` 对图片**根本救不回来**。
