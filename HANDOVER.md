@@ -1,17 +1,36 @@
-# 交接文档 · astrbot-plugin-media-warden v1.11.0
+# 交接文档 · astrbot-plugin-media-warden v1.12.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.11.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.11.0 是第二轮审计修复，**变化见下面 §1.-0**；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.12.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.12.0 是聊天记录存档/重发，**变化见下面 §1.-1**；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4, total=115)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12, total=127)`
 
 
-## 1.-0 v1.11.0（第二轮审计修复，当前版本）
+## 1.-1 v1.12.0（聊天记录存档 + 原地重发，当前版本）
+
+目标：把群里的合并转发**存下来、以后还能原样发出去**。先做了一轮协议实验（NapCat 4.18.37 / QQ 9.9.26），结论直接决定了实现方式。
+
+### 实测结论（别再重复验证）
+- **气泡/挂件是用户级装扮，不随消息传输**：消息对象里 `generalFlags` / `avatarPendant` / `msgMeta` 全为空；资料卡 `fetchUserDetailInfo` 的 `vasInfo` 只有 `pendantId`（例子 163557），**没有任何 bubble/气泡 id**；`napcat.mjs` 全文「气泡」0 次、Bubble 1 次（protobuf 定义里的匿名消息字段，无接口）。
+- **重建节点不保装扮**：存档 → `Nodes` → `send_group_forward_msg`，合并转发里每个节点只剩昵称 + 内容。
+- **原地转发保装扮**：`forward_group_single_msg`（NapCat → `MsgApi.forwardMsg(peer, ..., [msgId])`）由客户端把原消息再发一次，气泡、挂件、头像、时间戳全部原样。
+- **两套 message_id 不能混用**：`forward_group_single_msg` 只认 OneBot 短 `message_id`（`1481691615`），段里长 `msgId`（`7701368446137848000`）回「无法找到消息」；而 `get_forward_msg` 认的正是长 id。
+
+### 新增
+- `warden/record.py`：`<storage_root>/_records/<record_id>/`，`record.json`（schema_version / record_id / platform / group_id / root_msg_id / captured_ts / node_count / nodes[{index,uin,name,time,segments}] / assets[{node,seg,path,sha16,bytes}] / missing / origin_sha256）+ `assets/<blake2b16>.<ext>`。图片字节落盘，**不再依赖 rkey**。
+- `/warden 存档 [msg_id]`：引用合并转发即可；定位三级（命令行 id → 当前消息 forward 段 → 引用 reply id），引用普通消息时 `get_msg` 找内部 forward 段。
+- `/warden 重发 [原地|重建] [record_id|list]`：默认先原地、失败回退重建并说明原因。
+
+### 设计取舍
+- 存档不是为了替代原地转发，而是**原消息没了之后的兜底**（撤回 / 过期 / 清理）。两者分工：原地无损但依赖服务端还有那条消息；重建永远可用但丢装扮。
+- `root_msg_id` 一律存**短 id**（原地转发只认这个）；`get_msg` 仅用于核验目标是不是合并转发，不用它返回的段内 id 去转发。
+
+## 1.-0 v1.11.0（第二轮审计修复）
 
 这一轮没有重构，只修「看起来能用、实际在特定平台/特定路径上永不生效」的地方，外加三处一致性。
 

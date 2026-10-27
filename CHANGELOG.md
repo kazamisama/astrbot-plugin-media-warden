@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.12.0
+
+聊天记录「存档 + 重发」：先摸清 QQ 合并转发到底能不能带装扮，结论决定了两条路都要做。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12, total=127)`。
+
+### Added
+- **`warden/record.py`（新模块，260 行）**：自包含存档格式 `<storage_root>/_records/<record_id>/`，`record.json` 原样保留每个节点每个段的 `{type, data}`，`assets/` 存节点内图片**字节**（blake2b-16 命名、同字节只落一份）。API：`make_record_id()` / `capture()` / `load_record()` / `list_records()` / `build_nodes()`。单张图下载失败只记进 `missing`，不影响整条记录。
+- **`/warden 存档 [msg_id]`**：引用（回复）一条合并转发即可存档。目标定位三级：命令行 `msg_id` → 当前消息自带的 forward 段 → 引用目标的 reply id；引用到的若是普通消息，再用 `get_msg` 找它里面的 forward 段。
+- **`/warden 重发 [原地|重建] [record_id|list]`**：默认先「原地」——走 NapCat 的 `forward_group_single_msg`，让 QQ 自己把原消息再转发一遍；不可用（没有原消息 id / 目标不是转发 / 转发失败）则回退按存档重建合并转发，并在回执里说明原因。`原地` / `重建` 可用于强制指定单条路径。
+- 命令总数 6 → 8。
+
+### 实测结论（2026-10-27，决定了两条路的取舍）
+- **重建节点不保装扮**：存档 → `Nodes` → `send_group_forward_msg`，合并转发里每个节点只剩昵称 + 内容，气泡 / 挂件 / 头像全丢。
+- **原地转发保装扮**：`forward_group_single_msg` 由客户端把原消息再发一次，气泡、挂件、头像、时间戳全部原样。
+- 由此定下存档的定位：**原消息还在就用原地（无损），原消息没了才用存档兜底（会丢装扮）**。
+- **两套 id 不能混用**：`forward_group_single_msg` 只认 OneBot 短 `message_id`，段里的长 `msgId` 会回「无法找到消息」；`get_forward_msg` 认的正是长 id。
+
+### Fixed
+- 存档把**命令消息**的 `message_id` 当成原消息 id（`root_msg_id`），导致原地转发转发出去的是「/warden 存档」那句话本身。现在存那条合并转发自己的短 id；老存档会被 `get_msg` 核验拦下并说明原因（不再默默转发错对象）。
+- 原地转发不再直接信任 `root_msg_id`：先 `get_msg` 确认它确实是合并转发，否则拒绝并提示重新存档。
+
+### Tests
+- 新增 Phase 7 共 12 项：存档往返（`record.json` + `assets/` + `build_nodes` 还原）、同字节去重、单图失败进 `missing`、列表倒序与坏目录容错、`image_ref` 规则、引用合并转发按 reply id 取节点、引用普通消息时 `get_msg` 找 forward 段、无引用时的可读提示、原地转发用短 id、老存档拒绝原地转发、默认先原地失败回退重建、转发失败错误原样回报。
+- 顺带修掉一个与秒边界有关的 flaky 用例：`test_index_failure_stats_and_prune` 以前用 `int(time.time())` 当 cutoff，跨秒运行时会把刚插入的行判成「旧」；改成「一分钟前」。
+
+
 ## v1.11.0
 
 第二轮审计：修掉三处「只在特定平台/特定路径才触发」的实伤与「失败不入库」的不一致，补 4 个新用例。

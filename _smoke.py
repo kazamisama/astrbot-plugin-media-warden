@@ -89,16 +89,39 @@ def _install_stub():
             for k, v in kw.items():
                 setattr(self, k, v)
 
+    class Face:
+        def __init__(self, id=None, **kw):
+            self.id = id
+            for k, v in kw.items():
+                setattr(self, k, v)
+
     class Image:
         def __init__(self, file="", **kw):
             self.file = file
             for k, v in kw.items():
                 setattr(self, k, v)
 
+        @classmethod
+        def fromBytes(cls, data):
+            return cls(file=data)
+
+    class Node:
+        def __init__(self, content=None, **kw):
+            self.content = list(content or [])
+            self.name = kw.get("name", "")
+            self.uin = kw.get("uin", "0")
+
+    class Nodes:
+        def __init__(self, nodes=None, **kw):
+            self.nodes = list(nodes or [])
+
     mc.At = At
     mc.Plain = Plain
     mc.Reply = Reply
+    mc.Face = Face
     mc.Image = Image
+    mc.Node = Node
+    mc.Nodes = Nodes
     sys.modules["astrbot"] = a
     sys.modules["astrbot.api"] = ai
     sys.modules["astrbot.api.star"] = sm
@@ -186,6 +209,7 @@ Downloaded = plugin_warden.downloader.Downloaded
 download = plugin_warden.downloader.download
 aiohttp_fetcher = plugin_warden.downloader.aiohttp_fetcher
 astrbot_component_fetcher = plugin_warden.downloader.astrbot_component_fetcher
+record_store = plugin_warden.record
 
 
 def banner(t):
@@ -1834,11 +1858,11 @@ def _ResultE():
 
 
 def test_commands_require_admin_permission():
-    banner("commands: all six /warden commands registered ADMIN")
+    banner("commands: all eight /warden commands registered ADMIN")
     admin = plugin_main.filter.PermissionType.ADMIN
     decorated = [c for c in PERMISSION_CALLS if c == admin]
-    assert len(decorated) == 6, PERMISSION_CALLS
-    print("  OK -> 6 commands registered with PermissionType.ADMIN")
+    assert len(decorated) == 8, PERMISSION_CALLS
+    print("  OK -> 8 commands registered with PermissionType.ADMIN")
 
 
 def test_plugin_e2e_image_triggers_image_result():
@@ -3441,7 +3465,8 @@ def test_index_failure_stats_and_prune():
     assert st["top"][0]["subject"] == "fileid:S" and st["top"][0]["count"] == 3, st
     # prune 覆盖 failures
     old = int(_t.time()) - 10 * 86400
-    n = idx.prune_older_than(int(_t.time()))
+    # 用「一分钟前」当 cutoff: 刚插入的行一定在它之后,与秒边界无关
+    n = idx.prune_older_than(int(_t.time()) - 60)
     assert n["assets"] == 0 and n["failures"] == 0, n
     assert idx.failure_stats()["total"] == 4
     idx._conn.execute("UPDATE failures SET ts = ?", (old - 86400,))
@@ -4114,13 +4139,399 @@ PHASE6 = [
 ]
 
 
+# =========================================================
+# Phase 7 测试: 聊天记录存档 (v1.12 原型)
+# =========================================================
+
+
+def test_record_capture_roundtrip():
+    import asyncio
+    banner("record: capture 落盘 assets+record.json, build_nodes 还原")
+    tmp = tempfile.mkdtemp(prefix="wd_record_")
+    nodes = [
+        {
+            "sender": {"user_id": 206216334, "nickname": "橘雪莉", "card": ""},
+            "time": 1720000000,
+            "message": [
+                {"type": "text", "data": {"text": "看图"}},
+                {"type": "image", "data": {"url": "http://example/a.jpg?term=1"}},
+                {"type": "face", "data": {"id": "14"}},
+                {"type": "at", "data": {"qq": "all"}},
+                {"type": "image", "data": {"file": "deadbeef.jpg"}},
+            ],
+        },
+        {
+            "sender": {"user_id": 2510536451, "nickname": "風見かずき", "card": "卡兹"},
+            "time": 1720000001,
+            "message": [{"type": "text", "data": {"text": "第二层"}}],
+        },
+    ]
+    calls = []
+
+    async def fetch(data):
+        calls.append(data.get("url"))
+        return b"\x89PNG\r\n\x1a\n" + b"0" * 8
+
+    rec = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id=961583271, msg_id="m1",
+        storage_root=tmp, fetch_image=fetch, ts=1720000000,
+    ))
+    assert rec["record_id"].endswith("-961583271-m1"), rec["record_id"]
+    assert rec["node_count"] == 2, rec["node_count"]
+    assert rec["nodes"][0]["uin"] == "206216334"
+    assert rec["nodes"][1]["name"] == "卡兹"  # card 优先于 nickname
+    # 只有一张图带可用 url;另一张只有 file=md5 -> missing(no_url)
+    assert calls == ["http://example/a.jpg?term=1"], calls
+    assert len(rec["assets"]) == 1, rec["assets"]
+    assert rec["missing"] == [{"node": 0, "seg": 4, "reason": "no_url"}], rec["missing"]
+    asset = rec["assets"][0]
+    assert asset["path"].startswith("assets/") and asset["path"].endswith(".png")
+    base = record_store.record_dir(tmp, rec["record_id"])
+    assert os.path.exists(os.path.join(base, "record.json"))
+    blob_path = os.path.join(base, asset["path"].replace("/", os.sep))
+    assert os.path.getsize(blob_path) == len(b"\x89PNG\r\n\x1a\n" + b"0" * 8)
+
+    loaded = record_store.load_record(tmp, rec["record_id"])
+    assert loaded["origin_sha256"] == rec["origin_sha256"]
+
+    comps = record_store.build_nodes(loaded, base)
+    assert len(comps) == 2
+    assert comps[0].uin == "206216334" and comps[0].name == "橘雪莉"
+    kinds = [type(c).__name__ for c in comps[0].content]
+    assert kinds == ["Plain", "Image", "Face", "At"], kinds
+    assert comps[0].content[0].text == "看图"
+    assert comps[0].content[1].file.startswith(b"\x89PNG")
+    assert comps[0].content[2].id == 14
+    assert comps[0].content[3].qq == "all"
+    assert comps[1].content[0].text == "第二层"
+    print("  OK")
+
+
+def test_record_capture_dedupes_identical_bytes():
+    import asyncio
+    banner("record: 相同字节的两张图只落一个文件")
+    tmp = tempfile.mkdtemp(prefix="wd_record_")
+
+    async def fetch(data):
+        return b"GIF89a" + b"2" * 4
+
+    rec = asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "image", "data": {"url": "http://e/1.gif"}},
+                      {"type": "image", "data": {"url": "http://e/2.gif"}}]}],
+        platform="aiocqhttp", group_id=1, msg_id="d",
+        storage_root=tmp, fetch_image=fetch, ts=1720000300,
+    ))
+    assert len(rec["assets"]) == 2, rec["assets"]
+    assert rec["assets"][0]["path"] == rec["assets"][1]["path"]
+    assets_dir = os.path.join(record_store.record_dir(tmp, rec["record_id"]),
+                              "assets")
+    assert len(os.listdir(assets_dir)) == 1
+    print("  OK")
+
+
+def test_record_capture_logs_download_failure():
+    import asyncio
+    banner("record: 单张图下载抛错只记 missing(不炸整条)")
+    tmp = tempfile.mkdtemp(prefix="wd_record_")
+
+    async def fetch(data):
+        raise RuntimeError("boom")
+
+    rec = asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "text", "data": {"text": "在吗"}},
+                      {"type": "image", "data": {"url": "http://e/x.jpg"}}]}],
+        platform="aiocqhttp", group_id=1, msg_id="f",
+        storage_root=tmp, fetch_image=fetch, ts=1720000400,
+    ))
+    assert rec["assets"] == []
+    assert rec["node_count"] == 1 and rec["nodes"][0]["segments"][0]["data"]["text"] == "在吗"
+    assert rec["missing"] == [
+        {"node": 0, "seg": 1, "reason": "download_failed", "url": "http://e/x.jpg"}
+    ], rec["missing"]
+    print("  OK")
+
+
+def test_record_list_records_order_and_bad_dirs():
+    import asyncio
+    banner("record: list_records 按时间倒序, load_record 对坏目录返回 None")
+    tmp = tempfile.mkdtemp(prefix="wd_record_")
+
+    async def fetch(data):
+        return b"\xff\xd8" + b"1" * 4
+
+    for ts, mid in ((1720000100, "a"), (1720000200, "b")):
+        asyncio.run(record_store.capture(
+            [{"sender": {"user_id": 1, "nickname": "n"}, "time": ts,
+              "message": [{"type": "image",
+                          "data": {"url": "http://e/%s.jpg" % mid}}]}],
+            platform="aiocqhttp", group_id=1, msg_id=mid,
+            storage_root=tmp, fetch_image=fetch, ts=ts,
+        ))
+    rows = record_store.list_records(tmp, 10)
+    assert [r["root_msg_id"] for r in rows] == ["b", "a"], rows
+    assert rows[0]["asset_count"] == 1
+    assert record_store.list_records(tmp, 1)[0]["root_msg_id"] == "b"
+    assert record_store.load_record(tmp, "nope") is None
+    os.makedirs(record_store.record_dir(tmp, "broken"), exist_ok=True)
+    assert record_store.load_record(tmp, "broken") is None
+    print("  OK")
+
+
+def test_record_image_ref_rules():
+    banner("record: image_ref 只认 http(s) 的 url / file")
+    assert record_store.image_ref({"url": "https://x/1.jpg"}) == "https://x/1.jpg"
+    assert record_store.image_ref({"file": "http://x/2.jpg"}) == "http://x/2.jpg"
+    assert record_store.image_ref({"file": "abc.jpg"}) is None
+    assert record_store.image_ref({"url": "base64://AAA"}) is None
+    assert record_store.image_ref({}) is None
+    print("  OK")
+
+def test_plugin_record_from_quoted_forward():
+    banner("plugin: 引用一条合并转发 -> /warden 存档 用 reply id 取节点")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_record_quote_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    nodes = [{"sender": {"user_id": 2510536451, "nickname": "風見かずき"},
+              "time": 1718600000,
+              "message": [{"type": "text", "data": {"text": "看图"}},
+                          {"type": "image", "data": {"url": "https://x/a.jpg"}}]}]
+    calls = {}
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            calls.setdefault(action, []).append(kw)
+            if action == "get_forward_msg":
+                if kw.get("message_id") == "1481691615":
+                    return {"messages": nodes}
+                raise RuntimeError("unknown forward " + str(kw.get("message_id")))
+            raise RuntimeError("unexpected " + action)
+
+    async def fake_fetch(data):
+        return b"\x89PNG\r\n\x1a\n" + b"9" * 6
+
+    pl._record_fetch_image = fake_fetch
+    reply_seg = {"type": "reply", "data": {"id": "1481691615"}}
+    text_seg = {"type": "text", "data": {"text": "/warden 存档"}}
+    ev = _fake_event(group_id="961583271", user_id="2510536451",
+                     message_id="m-cmd", message=[reply_seg, text_seg],
+                     raw_message={"message": [reply_seg, text_seg]})
+    ev.bot = _Bot()
+    out = _drive_command(pl, ev, pl.cmd_warden_record)[0]
+
+    assert "已存档" in out.text, out.text
+    assert calls.get("get_forward_msg") == [{"message_id": "1481691615"}], calls
+    rows = record_store.list_records(tmp, 5)
+    assert rows and rows[0]["node_count"] == 1, rows
+    assert rows[0]["asset_count"] == 1, rows
+    # 原消息 id 必须是那条转发自己的 id（重发 原地 要用），不是命令消息的 id
+    assert rows[0]["root_msg_id"] == "1481691615", rows
+    print("  OK ->", out.text.splitlines()[0])
+
+
+def test_plugin_record_via_quoted_message_with_forward_seg():
+    banner("plugin: 引用普通消息(内含 forward 段) -> get_msg 找到转发再取")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_record_getmsg_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    nodes = [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+              "message": [{"type": "text", "data": {"text": "hi"}}]}]
+    seen = []
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            seen.append((action, kw.get("message_id")))
+            if action == "get_forward_msg":
+                if kw.get("message_id") == "FWD-1":
+                    return {"messages": nodes}
+                raise RuntimeError("not a forward")
+            if action == "get_msg":
+                return {"message": [{"type": "forward",
+                                    "data": {"id": "FWD-1"}}]}
+            raise RuntimeError("unexpected " + action)
+
+    async def fake_fetch(data):
+        return b"x"
+
+    pl._record_fetch_image = fake_fetch
+    reply_seg = {"type": "reply", "data": {"id": "m-quoted"}}
+    text_seg = {"type": "text", "data": {"text": "/warden 存档"}}
+    ev = _fake_event(message=[reply_seg, text_seg],
+                     raw_message={"message": [reply_seg, text_seg]})
+    ev.bot = _Bot()
+    out = _drive_command(pl, ev, pl.cmd_warden_record)[0]
+
+    assert "已存档" in out.text, out.text
+    assert ("get_msg", "m-quoted") in seen, seen
+    assert ("get_forward_msg", "FWD-1") in seen, seen
+    assert record_store.list_records(tmp, 5)[0]["node_count"] == 1
+    print("  OK ->", out.text.splitlines()[0])
+
+
+def test_plugin_record_hint_without_forward_or_reply():
+    banner("plugin: 既没转发也没引用时 /warden 存档 给出可读提示")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_record_hint_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+    text_seg = {"type": "text", "data": {"text": "/warden 存档"}}
+    ev = _fake_event(message=[text_seg], raw_message={"message": [text_seg]})
+    out = _drive_command(pl, ev, pl.cmd_warden_record)[0]
+    assert "引用" in out.text, out.text
+    assert not record_store.list_records(tmp, 5), "不该落任何存档"
+    print("  OK ->", out.text)
+
+def test_plugin_resend_native_forward():
+    banner("plugin: /warden 重发 原地 -> forward_group_single_msg 用原消息 id")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_resend_native_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    rec = asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "text", "data": {"text": "hi"}}]}],
+        platform="aiocqhttp", group_id="961583271", msg_id="1481691615",
+        storage_root=tmp, fetch_image=lambda d: None, ts=1720000500,
+    ))
+    calls = []
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            calls.append((action, kw))
+            if action == "get_msg":
+                # 原消息就是那条合并转发（forward 段的 id 才是真正要转发的目标）
+                return {"message": [{"type": "forward",
+                                     "data": {"id": "7701368493799210604"}}]}
+            return None
+
+    ev = _fake_event(group_id="961583271", user_id="2510536451")
+    ev.bot = _Bot()
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_resend(e, "原地"))[0]
+
+    # forward_group_single_msg 只认 OneBot 短 message_id, 段里的长 msgId 会
+    # 回「无法找到消息」—— 所以转发的就是 root_msg_id 本身
+    assert calls == [
+        ("get_msg", {"message_id": 1481691615}),
+        ("forward_group_single_msg",
+         {"group_id": "961583271", "message_id": 1481691615}),
+    ], calls
+    assert "原地转发" in out.text, out.text
+    assert not os.path.exists(os.path.join(tmp, "_records", rec["record_id"],
+                                          "assets", "nope")), "不该写奇怪文件"
+    print("  OK ->", out.text)
+
+
+def test_plugin_resend_native_refuses_non_forward_target():
+    banner("plugin: 老存档(root_msg_id 指向命令消息) -> 拒绝原地转发并说明原因")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_resend_stale_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "text", "data": {"text": "hi"}}]}],
+        platform="aiocqhttp", group_id="g1", msg_id="1191941527",
+        storage_root=tmp, fetch_image=lambda d: None, ts=1720000700,
+    ))
+    calls = []
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            calls.append((action, kw))
+            if action == "get_msg":
+                # 这个 id 是一条普通文字消息(就是当时那条 /warden 存档)
+                return {"message": [{"type": "text",
+                                     "data": {"text": "/warden 存档"}}]}
+            return None
+
+    ev = _fake_event(group_id="g1", user_id="u1")
+    ev.bot = _Bot()
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_resend(e, "原地"))[0]
+    assert "不是合并转发" in out.text, out.text
+    assert [c[0] for c in calls] == ["get_msg"], calls
+    print("  OK ->", out.text)
+
+
+def test_plugin_resend_native_reports_failure():
+    banner("plugin: 原地转发失败 -> 错误原样回给用户")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_resend_native_err_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "text", "data": {"text": "hi"}}]}],
+        platform="aiocqhttp", group_id="g1", msg_id="777",
+        storage_root=tmp, fetch_image=lambda d: None, ts=1720000600,
+    ))
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            if action == "get_msg":
+                return {"message": [{"type": "forward", "data": {"id": "777"}}]}
+            raise RuntimeError("消息不存在")
+
+    ev = _fake_event(group_id="g1", user_id="u1")
+    ev.bot = _Bot()
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_resend(e, "native"))[0]
+    assert "原地转发失败" in out.text and "消息不存在" in out.text, out.text
+    print("  OK ->", out.text)
+
+
+def test_plugin_resend_defaults_to_native_then_rebuild():
+    banner("plugin: /warden 重发 默认先原地, 原消息 id 缺失时回退重建")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_resend_auto_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+
+    # 无短 id 的存档（嵌套转发只能拿到长 msgId）: 原地不可用
+    asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "text", "data": {"text": "hi"}}]}],
+        platform="aiocqhttp", group_id="g1", msg_id="",
+        storage_root=tmp, fetch_image=lambda d: None, ts=1720000800,
+    ))
+    ev = _fake_event(group_id="g1", user_id="u1")
+    outs = _drive_command(pl, ev, lambda e: pl.cmd_warden_resend(e))
+    texts = [getattr(o, "text", o) for o in outs]
+    assert any("改用存档重建" in str(x) for x in texts), texts
+    assert isinstance(texts[-1], list), texts[-1]  # 最后一次是 chain_result([Nodes])
+    print("  OK ->", str(texts[0])[:60])
+
+
+PHASE7 = [
+    # v1.12 原型: 聊天记录存档(保存再发送)
+    test_record_capture_roundtrip,
+    test_record_capture_dedupes_identical_bytes,
+    test_record_capture_logs_download_failure,
+    test_record_list_records_order_and_bad_dirs,
+    test_record_image_ref_rules,
+    test_plugin_record_from_quoted_forward,
+    test_plugin_record_via_quoted_message_with_forward_seg,
+    test_plugin_record_hint_without_forward_or_reply,
+    test_plugin_resend_native_forward,
+    test_plugin_resend_native_refuses_non_forward_target,
+    test_plugin_resend_native_reports_failure,
+    test_plugin_resend_defaults_to_native_then_rebuild,
+]
+
 if __name__ == "__main__":
     # 离线冒烟不真等「迟到缓存重查」的 sleep,否则下载失败类用例每个多等 16s。
     # (需要验证等待逻辑本身的用例自己在内部把这一项恢复成真值)
     plugin_main._LATE_CACHE_DELAYS_S = ()
-    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5 + PHASE6:
+    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5 + PHASE6 + PHASE7:
         t()
-    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d phase6=%d, total=%d)"
+    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d phase6=%d "
+          "phase7=%d, total=%d)"
           % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4), len(PHASE5),
-             len(PHASE6), len(PHASE1) + len(PHASE2) + len(PHASE3) + len(PHASE4)
-             + len(PHASE5) + len(PHASE6)))
+             len(PHASE6), len(PHASE7), len(PHASE1) + len(PHASE2) + len(PHASE3)
+             + len(PHASE4) + len(PHASE5) + len(PHASE6) + len(PHASE7)))

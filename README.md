@@ -32,7 +32,7 @@ astrbot-plugin-media-warden/
   metadata.yaml              # AstrBot 插件元数据
   _conf_schema.json          # 配置 schema（WebUI 编辑）
   requirements.txt           # Pillow>=10.0
-  main.py                    # 入口（@register 类 + 钩子 + 6 个命令）
+  main.py                    # 入口（@register 类 + 钩子 + 8 个命令）
   warden/
     __init__.py              # 公开符号
     config.py                # MediaWardenConfig dataclass + 校验
@@ -45,6 +45,7 @@ astrbot-plugin-media-warden/
     index.py                 # SQLite 资产索引
     localcache.py            # 按 MD5 找 QQ 本地图片缓存（rkey 失效时的首选补救）
     avatar.py                # 头像抓取 + 文件缓存
+    record.py                # 聊天记录存档（自包含目录：节点 + 图片字节）
   README.md                  # 本文件
   CHANGELOG.md               # 变更记录
   HANDOVER.md                # 交接文档
@@ -126,6 +127,8 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 ```
 <storage_root>/
   <group_id>/<sender_id>/<date>_<time>_<kind>_<short_id><ext>
+  _records/<record_id>/record.json  # 聊天记录存档
+  _records/<record_id>/assets/      # 该记录里的图片字节
   _warden.db                       # SQLite 资产索引
   _blake/<aa>/<bb>/<hex>.ptr       # blake2b 去重指针
   _avatars/                        # 头像文件缓存
@@ -139,6 +142,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 - **`_warden.db`** —— 每存一个文件记一条元数据，支撑 `/warden list|stats|lookup|export|prune`。删除只丢台账，已存文件不受影响。
 - **`_blake/`** —— 内容指纹指针，指向首存真实文件。命中则复用原路径，不重复写盘。
 - **`_avatars/`** —— 转发节点头像缓存，按容量 LRU 淘汰。
+- **`_records/`** —— 聊天记录存档（v1.12.0）：每条合并转发一个目录，`record.json` 原样保留每节点每段的结构，`assets/` 存节点内图片的**字节**（blake2b-16 命名，同字节只落一份）。它与 `<group>/<sender>/…_forward_json_*.json` 的区别是后者只留 url、rkey 一过期就废；`missing` 字段如实记录取不到的图。
 
 ## 命令
 
@@ -152,6 +156,8 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `/warden lookup <msg_id> [#idx]` / `<sha16>` | 反向查询该消息保存了哪些资产，可选按 idx 过滤；传 16 位 hex 则按内容指纹查它出现过几次（v1.10.0） |
 | `/warden prune <days>` | 从索引删除 N 天前的记录（不删实际文件），同期失败记录一并清掉并分别报数（v1.10.0） |
 | `/warden fail [N]` | 列最近 N 条保存失败（默认 10，上限 50），带 attempts 与 subject；表头带累计次数与「反复失败」top（v1.9.0+ / v1.10.0 补统计） |
+| `/warden 存档 [msg_id]` | **引用（回复）**一条合并转发后发它，把节点 + 节点内图片字节存成 `_records/<id>/`；也可直接转发给机器人，或给 OneBot `message_id`（v1.12.0） |
+| `/warden 重发 [原地\|重建] [record_id\|list]` | 重发存档：默认先**原地**（`forward_group_single_msg`，让 QQ 把原消息再转发一遍，气泡/挂件/头像全保），不行再按存档**重建**合并转发（装饰会丢）；`list` 列最近 10 条（v1.12.0） |
 
 ## 离线自测
 
@@ -161,7 +167,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **115 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **127 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
@@ -176,6 +182,7 @@ python -m pytest -q _smoke.py
 - 预览回传与命令权限注册
 - v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离、raw_message 恢复链接按标识配对（顺序错位也不错领）
 - v1.11.0 补齐（Phase 6）：Windows 反斜杠路径算出公共目录且不切出半截目录、file 段把 http 链接放在 `file` 上仍可下载、转发渲染失败在 failures 表留下 `forward_render` 行、落盘后没有 `.part-` 残骸
+- v1.12.0 补齐（Phase 7）：存档往返（`record.json` + `assets/` + `build_nodes` 还原）、同字节只落一份、单图失败只进 `missing`、列表倒序与坏目录容错、`image_ref` 规则、引用合并转发按 reply id 取节点、引用普通消息时 `get_msg` 找 forward 段、无引用时的可读提示、原地转发用 OneBot 短 id、老存档拒绝原地转发、默认先原地失败回退重建
 
 ## 已知边界
 
@@ -187,6 +194,9 @@ python -m pytest -q _smoke.py
 - 转发节点图（`_save_forward`）走的是节点内嵌 url + 节点 image 段的 `file`(MD5)：**v1.9.6 起会先查 QQ 本地缓存**，但节点段没有 `file` 字段（非 napcat 实现 / 外链图）时仍只有 `[is_origin=1, 原 url]` 两个候选，任一失败即按 v1.5.0 设计整体失败、不落盘
 - **转发节点图里的老图**（v1.9.8/v1.9.9 定论）：NapCat 自己不下载转发节点里的图片字节（`get_forward_msg` 只给元数据），`get_image` 也救不了（它先查 `FileNapCatOneBotUUID` 这个**进程内内存 map**，节点图的 MD5 从未进过那里，直接 `file not found`）。**但接收端 QQ 客户端会在随后几秒~几十秒把图落到本地缓存** —— v1.9.9 的「迟到缓存重查」就是等这个（`late local cache hit after Ns`）。仍失败的只剩「客户端自始至终没下过那张图」这一种。**普通图片**不受此限：QQ 客户端会下，v1.9.5 能命中 `Image/C2C/Image2`
 - **QQ 本地缓存补救依赖 QQ 客户端自己的缓存目录**（`Tencent Files/<QQ号>/…`，Windows 默认在“文档”下）：缓存被清理、机器人跑在与 QQ 不同的机器上、或消息段的 `data.file` 不是 32 位 MD5 时，这条路用不上，会照旧返回失败
+- **合并转发里的装扮（气泡 / 挂件 / 头像）**：2026-10-27 实测两种重发方式结论不同 —— ①**重建节点**（存档 → `Nodes` → `send_group_forward_msg`）只有昵称 + 内容，装饰全丢；②**原地转发**（`forward_group_single_msg`）让 QQ 自己把原消息再转发一次，气泡、挂件、头像、原时间戳全部保留。因此 `/warden 重发` 默认走原地，**但原地依赖原消息仍在服务端**：消息被撤回 / 过期 / 清理后只能回落存档重建（装饰丢失）。
+- **两套 message_id 不能混用**：`forward_group_single_msg` 只认 OneBot 层的短 `message_id`（如 `1481691615`），段里的长 `msgId`（`7701368446137848000`）会回「无法找到消息」；而 `get_forward_msg` 认的正是段里的长 id。插件里 `root_msg_id` 一律存短的，`get_msg` 只用于核验目标是不是合并转发。
+- 存档**不解析视频 / 语音字节**（还原时是占位文本）；节点里只有 `file=<md5>` 没有可下载 url 的图会进 `missing`（NapCat 本来就不下节点图）
 - 高并发群发场景尚未压测
 
 ## 后续可选
