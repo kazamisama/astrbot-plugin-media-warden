@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
 # 只会误导人,已删除.

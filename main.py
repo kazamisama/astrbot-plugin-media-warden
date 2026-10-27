@@ -44,6 +44,7 @@ from .warden.downloader import (
 )
 from .warden.storage import Storage, SaveContext
 from .warden.index import failure_subject
+from .warden import record as record_store
 
 
 def _local_cache_candidates(comp: Component) -> list:
@@ -254,7 +255,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.11.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail, 预览回传 + 可选引用原消息, 命令仅管理员可用",
+    "群聊素材守门人 v1.12.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail, 预览回传 + 可选引用原消息, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -1567,6 +1568,350 @@ class MediaWardenStar(Star):
             )
         except Exception as e:
             yield event.plain_result(f"[Warden] prune 失败: {e!r}")
+
+    # ----------------- 聊天记录存档(原型) -----------------
+
+    def _records_root(self) -> str:
+        """存档目录：跟资产同一个 storage_root（_records/ 是它的子目录）。"""
+        root = getattr(self._storage, "root", None) or self.cfg.storage_root
+        return str(root)
+
+    def _forward_component(self, event: AstrMessageEvent) -> Optional[Component]:
+        """当前消息里的第一个合并转发组件（没有就 None）。"""
+        try:
+            comps = extract_components(event)
+        except Exception:
+            return None
+        for comp in comps:
+            if comp.is_forward:
+                return comp
+        return None
+
+    async def _record_fetch_image(self, data: dict) -> Optional[bytes]:
+        """节点图字节的获取链：QQ 本地缓存 → url 升级 → 直连下载。
+
+        与 on_group_message 里的节点图下载同一条链，但失败只返回 None ——
+        存档不允许因为单张图炸掉整条记录（record 里会记进 missing）。
+        """
+        ref = data if isinstance(data, dict) else {}
+        try:
+            cached = await self._forward_local_cached(ref)
+        except Exception:
+            cached = None
+        if cached is not None:
+            return cached
+        url = record_store.image_ref(ref)
+        if not url:
+            return None
+        hi = _upgrade_qq_image_url(url)
+        candidates = [hi, url] if hi != url else [url]
+        for cand in candidates:
+            try:
+                dl = await download(
+                    Component(kind="image", url=cand),
+                    fetcher=aiohttp_fetcher,
+                    retries=self.cfg.download_retries,
+                    timeout_s=self.cfg.download_timeout_s,
+                    max_bytes=self.cfg.max_file_size_bytes,
+                )
+                return dl.data
+            except Exception:
+                continue
+        return None
+
+    async def _resolve_forward_nodes(self, comp: Component,
+                                    event: AstrMessageEvent) -> Optional[list]:
+        """拿节点内容：优先 get_forward_msg（最新最全），失败退回组件里的快照。"""
+        try:
+            nodes = await self._fetch_forward_nodes(comp, event)
+        except Exception:
+            nodes = None
+        if nodes:
+            return nodes
+        cached = (comp.meta or {}).get("nodes")
+        if isinstance(cached, list) and cached:
+            return cached
+        return None
+
+    def _reply_message_id(self, event: AstrMessageEvent) -> str:
+        """被引用消息的 message_id（没有引用就空串）。
+
+        回复一条合并转发时，当前消息里只有 reply 段，真正的转发是被引用的那条 ——
+        用它的 message_id 直接 get_forward_msg 就能拿到节点（QQ 的 reply id 就是
+        被引用消息的 OneBot message_id）。
+        """
+        obj = getattr(event, "message_obj", None)
+        raw = getattr(obj, "raw_message", None) if obj is not None else None
+        segs = raw.get("message") if isinstance(raw, dict) else None
+        if isinstance(segs, list):
+            for seg in segs:
+                if not isinstance(seg, dict):
+                    continue
+                if (seg.get("type") or "").lower() != "reply":
+                    continue
+                data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+                rid = data.get("id")
+                if rid:
+                    return str(rid)
+        # 兜底: 组件层（raw_message 结构不同时）
+        try:
+            comps = extract_components(event)
+        except Exception:
+            comps = []
+        for comp in comps:
+            if (comp.meta or {}).get("type") != "reply":
+                continue
+            raw_seg = comp.raw if isinstance(comp.raw, dict) else {}
+            data = raw_seg.get("data") if isinstance(raw_seg.get("data"), dict) else {}
+            if data.get("id"):
+                return str(data["id"])
+        return ""
+
+    async def _fetch_forward_by_id(self, message_id: str,
+                                   event: AstrMessageEvent) -> Optional[list]:
+        """用 message_id 直接 get_forward_msg（被引用那条的情形）。"""
+        if not message_id:
+            return None
+        synthetic = Component(kind="forward",
+                              meta={"forward_id": str(message_id)})
+        try:
+            return await self._fetch_forward_nodes(synthetic, event)
+        except Exception as e:
+            self._log(f"record: get_forward_msg({message_id}) failed: {e!r}")
+            return None
+
+    async def _fetch_forward_via_msg(self, message_id: str,
+                                     event: AstrMessageEvent) -> tuple:
+        """引用到的是一条普通消息时：get_msg 里找 forward 段再取。
+
+        返回 (nodes, forward_id)。forward_id 必须留下来当存档的原消息 id ——
+        否则「原地转发」会拿命令消息自己的 id 去转发，什么也转不出来。
+        """
+        bot = getattr(event, "bot", None)
+        call = getattr(bot, "call_action", None) if bot is not None else None
+        if call is None:
+            return None, ""
+        try:
+            res = await call("get_msg", message_id=str(message_id))
+        except Exception as e:
+            self._log(f"record: get_msg({message_id}) failed: {e!r}")
+            return None, ""
+        inner = res
+        if (isinstance(inner, dict) and isinstance(inner.get("data"), dict)
+                and "message" not in inner):
+            inner = inner["data"]
+        segs = inner.get("message") if isinstance(inner, dict) else None
+        if not isinstance(segs, list):
+            return None, ""
+        for seg in segs:
+            if not isinstance(seg, dict):
+                continue
+            if (seg.get("type") or "").lower() in ("forward", "node", "nodes"):
+                fid = self._forward_seg_id(seg)
+                if fid:
+                    nodes = await self._fetch_forward_by_id(fid, event)
+                    if nodes:
+                        return nodes, str(fid)
+        return None, ""
+
+    async def _record_target_nodes(self, event: AstrMessageEvent,
+                                   arg: str = "") -> tuple:
+        """定位要存档的合并转发节点。
+
+        顺序：命令行给的 msg_id → 当前消息自带的 forward 段 → 引用目标的 message_id
+        （先当合并转发取，再当普通消息 get_msg 找里面的 forward 段）。
+        返回 (nodes, hint, forward_id)：nodes 为空时 hint 是回给用户的一句话；
+        forward_id 是「那条合并转发」的 message_id（原地转发要用它，不能拿命令自己的 id）。
+        """
+        arg = (arg or "").strip()
+        if arg.isdigit():
+            nodes = await self._fetch_forward_by_id(arg, event)
+            if nodes:
+                return nodes, "", arg
+            return None, f"msg_id={arg} 取不到合并转发节点", ""
+        comp = self._forward_component(event)
+        if comp is not None:
+            nodes = await self._resolve_forward_nodes(comp, event)
+            if nodes:
+                # 直接发来的合并转发本身就是一个消息: 它的 message_id 才是
+                # forward_group_single_msg 认的那种 id（段里的是长 msgId, 不认）
+                fid = (getattr(event, "message_id", None) or "")
+                return nodes, "", str(fid)
+        rid = self._reply_message_id(event)
+        if not rid:
+            return None, "请【引用】那条合并转发再发命令", ""
+        nodes = await self._fetch_forward_by_id(rid, event)
+        if nodes:
+            return nodes, "", rid
+        nodes, _inner_fid = await self._fetch_forward_via_msg(rid, event)
+        if nodes:
+            # 嵌套转发只有长 msgId 可用, 短 id 拿不到 -> 存空, 原地转发会明确拒绝
+            return nodes, "", ""
+        return None, f"引用消息 {rid} 不是合并转发（或 NapCat 取不到内容）", ""
+
+    @filter.command("warden 存档")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_warden_record(self, event: AstrMessageEvent, arg: str = ""):
+        """用法: 回复一条合并转发 + /warden 存档 —— 把节点和节点内图片落成自包含目录。
+
+        与转发落盘（sidecar JSON）的区别：那个 JSON 里的图还是死的 url，这个把图片
+        字节一起存进 assets/，重发时不再依赖 rkey。
+        """
+        nodes, hint, forward_id = await self._record_target_nodes(event, arg)
+        if not nodes:
+            yield event.plain_result(f"[Warden] {hint}")
+            return
+        msg_obj = getattr(event, "message_obj", None)
+        # 存档的「原消息 id」必须是那条合并转发自己的 id —— 重发 原地 要拿它去转发
+        msg_id = (str(forward_id or "").strip()
+                  or getattr(event, "message_id", None)
+                  or getattr(msg_obj, "message_id", None) or "")
+        root = self._records_root()
+        try:
+            rec = await record_store.capture(
+                nodes,
+                platform=(event_platform(event) or ""),
+                group_id=(event_group_id(event) or ""),
+                msg_id=msg_id,
+                storage_root=root,
+                fetch_image=self._record_fetch_image,
+            )
+        except Exception as e:
+            self._log(f"record capture failed: {e!r}")
+            yield event.plain_result(f"[Warden] 存档失败: {type(e).__name__}: {e}")
+            return
+        miss = len(rec.get("missing") or [])
+        text = (f"[Warden] 已存档 {rec['record_id']}\n"
+                f"  节点 {rec['node_count']} / 图片 {len(rec.get('assets') or [])}")
+        if miss:
+            text += f" / 缺失 {miss}"
+        text += f"\n  目录: {record_store.record_dir(root, rec['record_id'])}"
+        yield event.plain_result(text)
+
+    @filter.command("warden 重发")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_warden_resend(self, event: AstrMessageEvent, arg: str = ""):
+        """用法: /warden 重发 [原地] [record_id|list]
+
+        默认: 用存档节点重建合并转发（图片来自 assets/，不依赖 rkey）。
+        原地: 让 QQ 自己把原消息再转发一遍（forward_group_single_msg），
+              渲染交给客户端 —— 理论上能保住原消息的装扮。
+        """
+        root = self._records_root()
+        tokens = [t for t in (arg or "").split() if t]
+        mode = "auto"
+        if tokens and tokens[0] in ("原地", "native"):
+            mode = "native"
+            tokens = tokens[1:]
+        elif tokens and tokens[0] in ("重建", "rebuild"):
+            mode = "rebuild"
+            tokens = tokens[1:]
+        arg = tokens[0] if tokens else ""
+        if arg in ("list", "ls"):
+            rows = record_store.list_records(root, 10)
+            if not rows:
+                yield event.plain_result("[Warden] 还没有存档")
+                return
+            lines = ["## 存档(最近 10 条)"]
+            for r in rows:
+                stamp = time.strftime("%m-%d %H:%M",
+                                      time.localtime(r["captured_ts"]))
+                lines.append(f"{r['record_id']}  {stamp}  "
+                             f"节点{r['node_count']}  图{r['asset_count']}")
+            yield event.plain_result("\n".join(lines))
+            return
+        if not arg:
+            rows = record_store.list_records(root, 1)
+            if not rows:
+                yield event.plain_result("[Warden] 还没有存档")
+                return
+            arg = rows[0]["record_id"]
+        rec = record_store.load_record(root, arg)
+        if not rec:
+            yield event.plain_result(f"[Warden] 找不到存档 {arg}")
+            return
+        fallback_note = ""
+        if mode in ("auto", "native"):
+            ok, why = await self._try_resend_native(event, rec)
+            if ok:
+                yield event.plain_result(why)
+                return
+            if mode == "native":
+                yield event.plain_result(why)
+                return
+            fallback_note = why
+        try:
+            from astrbot.api.message_components import Nodes
+        except ImportError:
+            yield event.plain_result("[Warden] 当前 AstrBot 没有 Nodes 组件, 发不了合并转发")
+            return
+        try:
+            nodes = record_store.build_nodes(rec, record_store.record_dir(root, arg))
+        except Exception as e:
+            yield event.plain_result(f"[Warden] 还原失败: {type(e).__name__}: {e}")
+            return
+        if not nodes:
+            yield event.plain_result(f"[Warden] 存档 {arg} 里没有可重发的节点")
+            return
+        self._log(f"resend record {arg}: {len(nodes)} nodes")
+        if fallback_note:
+            yield event.plain_result(
+                f"[Warden] 原地转发不可用（{fallback_note}），改用存档重建")
+        yield event.chain_result([Nodes(nodes)])
+
+    async def _try_resend_native(self, event: AstrMessageEvent,
+                                 rec: dict) -> tuple:
+        """原地转发：让 QQ 把 root_msg_id 那条原消息再转发一遍。
+
+        返回 (ok, text)。与重建节点的区别：消息不经过我们，是 QQ 客户端把「那条
+        消息」重新转发一次，因此发送者/气泡装扮/挂件/头像全都是原样 —— 2026-10-27
+        实测确认（重建节点则只剩纯文本+图片）。
+        """
+        rid = rec.get("record_id") or "?"
+        target = str(rec.get("root_msg_id") or "").strip()
+        if not target.isdigit():
+            return False, f"存档 {rid} 没有原消息 id（重建才是它的强项）"
+        group_id = str(event_group_id(event) or rec.get("group_id") or "").strip()
+        bot = getattr(event, "bot", None)
+        call = getattr(bot, "call_action", None) if bot is not None else None
+        if call is None:
+            return False, "当前平台没有 call_action, 不支持原地转发"
+        # 先核验 root_msg_id 真的指向一条合并转发：v1.12.0 之前的存档把「命令消息」
+        # 的 id 存了进来，直接转发会转发出「/warden 存档」那句话本身。
+        is_forward = False
+        try:
+            probe = await call("get_msg", message_id=int(target))
+        except Exception as e:
+            return False, f"取不到原消息 {target}: {type(e).__name__}: {e}"
+        inner = probe
+        if (isinstance(inner, dict) and isinstance(inner.get("data"), dict)
+                and "message" not in inner):
+            inner = inner["data"]
+        segs = inner.get("message") if isinstance(inner, dict) else None
+        for seg in segs if isinstance(segs, list) else []:
+            if not isinstance(seg, dict):
+                continue
+            if (seg.get("type") or "").lower() in ("forward", "node", "nodes"):
+                is_forward = True
+                break
+        if not is_forward:
+            return False, (
+                f"存档 {rid} 的 root_msg_id={target} 不是合并转发"
+                "（v1.12.0 之前的存档存的是命令消息 id）")
+        # 注意: forward_group_single_msg 只认 OneBot 层的短 message_id(1481691615 这种),
+        # 不认段里的长 msgId(7701368446137848000) —— 拿长 id 去会回
+        # "无法找到消息..."。所以这里转发的就是 target 本身。
+        try:
+            res = await call("forward_group_single_msg",
+                             group_id=group_id, message_id=int(target))
+        except Exception as e:
+            return False, f"原地转发失败: {type(e).__name__}: {e}"
+        self._log(f"resend {rid} native: message_id={target} -> {res!r}")
+        if isinstance(res, dict) and str(res.get("status") or "").lower() == "failed":
+            return False, f"原地转发失败: {res.get('message') or res}"
+        return True, (
+            f"[Warden] 已让 QQ 原地转发原消息 {target}"
+            "（客户端渲染, 装扮/挂件/头像原样保留）")
 
     # ----------------- 工具 -----------------
 
