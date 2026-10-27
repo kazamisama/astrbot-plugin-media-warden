@@ -3,8 +3,9 @@
 ## 为什么需要这个
 
 QQ 的图片下载链接（`multimedia.nt.qq.com.cn/download?appid=1407&fileid=…&rkey=…`）
-里的 rkey 会失效，失效后返回 HTTP 400；而 NapCat 的 `get_msg` 只是**原样返回消息里
-那条 url**（实测 `url_same_as_msg=true`），并不会重签，所以「重取」这条路救不了。
+里的 rkey 会失效，失效后返回 HTTP 400。NapCat 的 `get_msg` 会用**当前** rkey 重新
+拼链接（见 main.`_refetch_via_message`）；但 rkey 服务本身坏掉时（2026-10-11 那次
+NapCat 4.18.4 死 rkey 事故）那条路也救不回来 —— 本地缓存是最后一道，且不需要网络。
 
 但图片本体其实**早就在本地**：QQ 客户端收到图片时就按 MD5 存了副本，
 
@@ -70,7 +71,7 @@ def find_cached_image(name: Optional[str]) -> Optional[str]:
         # ① 普通图片缓存: <acct>/Image/C2C/Image2/
         d = os.path.join(acct, "Image", "C2C", "Image2")
         if os.path.isdir(d):
-            hit = _match_in(d, stem, ext, recursive=False)
+            hit = _match_in(d, stem, ext)
             if hit:
                 return hit
         # ② 表情缓存: <acct>/nt_qq/nt_data/Emoji/emoji-recv/<YYYY-MM>/Ori/
@@ -82,7 +83,7 @@ def find_cached_image(name: Optional[str]) -> Optional[str]:
     return None
 
 
-def _match_in(dirpath: str, stem: str, ext: str, *, recursive: bool) -> Optional[str]:
+def _match_in(dirpath: str, stem: str, ext: str) -> Optional[str]:
     """在 dirpath 里按 md5 找同名文件（大小写不敏感）。"""
     if ext:
         for cand in (stem + ext, stem + ext.upper()):
@@ -97,17 +98,6 @@ def _match_in(dirpath: str, stem: str, ext: str, *, recursive: bool) -> Optional
         s, e = os.path.splitext(n)
         if s.lower() == stem:
             return os.path.join(dirpath, n)
-    if recursive:
-        # 兜底:一天一层/一个月一层的子目录
-        try:
-            for sub in os.listdir(dirpath):
-                p = os.path.join(dirpath, sub)
-                if os.path.isdir(p):
-                    hit = _match_in(p, stem, ext, recursive=False)
-                    if hit:
-                        return hit
-        except OSError:
-            pass
     return None
 
 
@@ -129,7 +119,7 @@ def _match_in_emoji(dirpath: str, stem: str, ext: str) -> Optional[str]:
             scanned += 1
             if scanned > _MAX_SCAN_DIRS:
                 return None
-            hit = _match_in(d, stem, ext, recursive=False)
+            hit = _match_in(d, stem, ext)
             if hit:
                 return hit
     return None

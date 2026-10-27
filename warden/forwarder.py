@@ -2,15 +2,19 @@
 
 设计:
   - 自绘气泡:白底圆角 + 发送者 + 时间 + 文本 + 节点内图片缩放贴图
-  - 节点内图片异步下载 -> BytesIO -> PIL -> 缩放到最大 360 宽
+  - 节点内图片异步下载 -> BytesIO -> PIL -> 缩放到气泡内宽 / max_image_width(默认 720)
   - 节点超 N 自动降级:不渲染 image,只把 nodes 落 JSON sidecar
   - 字体:跨平台找系统中文字体 (微软雅黑 / Noto Sans CJK / PingFang)
   - 没有 PIL 时 import 失败 -> ImportError 由调用方处理
 
 公开 API:
   - Forwarder(width, max_nodes, bg_color, text_color, font_size)
-  - forwarder.render(nodes, downloader) -> bytes  (PNG)
+  - forwarder.render(nodes, downloader) -> bytes  (PNG, 串行拉图)
+  - forwarder.render_with_images(nodes, node_imgs=...) -> bytes  (PNG, 用预下载的图)
   - forwarder.can_handle(nodes) -> bool  (判断是否要降级)
+
+两者共用 _paint(nodes, node_pil) —— v1.10.0 之前是两份各 150+ 行、134 行逐字相同的实现,
+改一处忘一处就会让「单测过、线上花」或反过来。
 """
 from __future__ import annotations
 import io
@@ -190,6 +194,36 @@ def _line_h_mixed(line, font_text, font_emoji, base_size: int) -> int:
         if seg_h > h:
             h = seg_h
     return h
+
+
+def _line_h(font, text: str, fallback_size: int) -> int:
+    """单行高度 = bbox 高;字体测量失败时退到字号 + 4."""
+    bbox = font.getbbox(text)
+    return (bbox[3] - bbox[1]) if bbox else fallback_size + 4
+
+
+def _wrap_text_simple(text: str, font, max_w: int) -> List[str]:
+    """无 emoji 字体时的纯字符折行(按像素宽度累加)."""
+    if not text:
+        return []
+    lines: List[str] = []
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            lines.append("")
+            continue
+        cur = ""
+        for ch in paragraph:
+            cand = cur + ch
+            bbox = font.getbbox(cand)
+            w = bbox[2] - bbox[0] if bbox else 0
+            if w <= max_w or not cur:
+                cur = cand
+            else:
+                lines.append(cur)
+                cur = ch
+        if cur:
+            lines.append(cur)
+    return lines
 
 
 # ----------------- 头像圆形 mask -----------------
@@ -388,244 +422,57 @@ class Forwarder:
     async def render(self, nodes: List[ForwardNode],
                      image_downloader: Optional[Callable[[str], Awaitable[bytes]]] = None
                      ) -> bytes:
-        """渲染为 PNG bytes."""
-        from PIL import Image, ImageDraw
-        self._ensure_fonts()
-        cfg = self.cfg
+        """渲染为 PNG bytes —— 图片由本方法串行拉取.
 
-        # 一次性测量:每节点所需高度
-        node_heights: List[int] = []
-        line_heights_cache: dict = {}
-
-        def line_h(font, text):
-            key = (id(font), text)
-            if key in line_heights_cache:
-                return line_heights_cache[key]
-            bbox = font.getbbox(text)
-            h = bbox[3] - bbox[1] if bbox else self.cfg.font_size + 4
-            line_heights_cache[key] = h
-            return h
-
-        def wrap_text(text: str, font, max_w: int) -> List[str]:
-            if not text:
-                return []
-            lines: List[str] = []
-            for paragraph in text.split("\n"):
-                if not paragraph:
-                    lines.append("")
-                    continue
-                # 按 char 切 + 像素累加
-                cur = ""
-                for ch in paragraph:
-                    cand = cur + ch
-                    bbox = font.getbbox(cand)
-                    w = bbox[2] - bbox[0] if bbox else 0
-                    if w <= max_w or not cur:
-                        cur = cand
-                    else:
-                        lines.append(cur)
-                        cur = ch
-                if cur:
-                    lines.append(cur)
-            return lines
-
-        # 预下载图片 -> PIL 或 None
-        node_images: List[List["Image.Image"]] = []
-        if image_downloader is not None:
+        生产路径(main)用的是 render_with_images(并发预下载);这个入口留给
+        单测与独立调用,两者共用同一个 _paint,避免两份绘制实现漂移。
+        """
+        node_pil: List[List["Image.Image"]] = []
+        if image_downloader is None:
+            node_pil = [[] for _ in nodes]
+        else:
+            from PIL import Image as _I
             for nd in nodes:
-                imgs = []
+                imgs: List["Image.Image"] = []
                 for url in nd.image_urls:
                     try:
                         data = await image_downloader(url)
-                        from PIL import Image as _I
                         im = _I.open(io.BytesIO(data)).convert("RGBA")
                         im.load()
                         imgs.append(im)
                     except Exception:
                         continue
-                node_images.append(imgs)
-        else:
-            node_images = [[] for _ in nodes]
-
-        # 逐节点计算高度(混合 layout:emoji 段走 emoji 字体)
-        for nd, imgs in zip(nodes, node_images):
-            _, _, bubble_w = _bubble_layout(cfg, nd)
-            has_avatar = nd.avatar_path is not None and self.cfg.enable_user_avatar
-            avatar_offset = (self.cfg.avatar_size + 6) if has_avatar else 0
-            text_w = bubble_w - cfg.padding * 2 - avatar_offset
-            if self._font_emoji is not None:
-                lines = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
-            else:
-                lines = wrap_text(nd.text, self._font, text_w)
-            h = cfg.padding  # 顶 padding
-            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
-            if nd.avatar_path is not None and self.cfg.enable_user_avatar:
-                _hdr_h = max(_hdr_h, self.cfg.avatar_size)
-            h += _hdr_h
-            h += 4
-            for ln in lines:
-                if self._font_emoji is not None:
-                    h += _line_h_mixed(ln, self._font, self._font_emoji, self.cfg.font_size) + 2
-                else:
-                    h += line_h(self._font, ln) + 2
-            if nd.time:
-                h += 6 + line_h(self._font_time, _fmt_time(nd.time))
-            if imgs:
-                h += 8
-            for im in imgs:
-                _, nh = self._scale_image(im, text_w)
-                h += nh + 6
-            h += cfg.padding  # 底 padding
-            node_heights.append(h)
-
-        total_h = cfg.padding * 2  # 上下 padding
-        total_h += line_h(self._font_header, cfg.title) + 8
-        for nh in node_heights:
-            total_h += nh + cfg.gap
-        if node_heights:
-            total_h -= cfg.gap  # 最后一个 gap 不用
-        total_h = max(total_h, 200)
-
-        img = Image.new("RGB", (cfg.width, total_h), cfg.bg)
-        draw = ImageDraw.Draw(img)
-
-        y = cfg.padding
-        # 标题
-        draw.text((cfg.padding, y), cfg.title, fill=cfg.header_color,
-                  font=self._font_header)
-        y += line_h(self._font_header, cfg.title) + 8
-
-        for nd, imgs, nh in zip(nodes, node_images, node_heights):
-            depth, bubble_x, bubble_w = _bubble_layout(cfg, nd)
-            bubble_bg, bubble_border = _bubble_style(cfg, nd)
-            # 气泡背景
-            draw.rounded_rectangle(
-                (bubble_x, y, bubble_x + bubble_w, y + nh),
-                radius=cfg.bubble_radius,
-                fill=bubble_bg,
-                outline=bubble_border,
-            )
-            if depth:
-                draw.line(
-                    (bubble_x + 7, y + 10, bubble_x + 7, y + nh - 10),
-                    fill=_nested_line_color(nd),
-                    width=3,
-                )
-            tx = bubble_x + cfg.padding
-            ty = y + cfg.padding
-            _avatar_im = None
-            if nd.avatar_path is not None and self.cfg.enable_user_avatar:
-                try:
-                    _avatar_im = Image.open(nd.avatar_path).convert("RGBA")
-                    _avatar_im = _avatar_im.resize(
-                        (self.cfg.avatar_size, self.cfg.avatar_size),
-                        getattr(getattr(Image, "Resampling", Image), "LANCZOS"),
-                    )
-                except Exception:
-                    _avatar_im = None
-            if _avatar_im is not None:
-                _mask = _circle_mask(self.cfg.avatar_size)
-                img.paste(_avatar_im, (tx, ty), mask=_mask)
-                tx += self.cfg.avatar_size + 6
-            draw.text((tx, ty), nd.sender_name or "anon",
-                      fill=cfg.header_color, font=self._font_header)
-            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
-            if _avatar_im is not None:
-                _hdr_h = max(_hdr_h, self.cfg.avatar_size)
-            ty += _hdr_h + 4
-            # 文本(混合 layout:emoji 段走 emoji 字体)
-            has_avatar = nd.avatar_path is not None and self.cfg.enable_user_avatar
-            avatar_offset = (self.cfg.avatar_size + 6) if has_avatar else 0
-            text_w = bubble_w - cfg.padding * 2 - avatar_offset
-            if self._font_emoji is not None:
-                _mixed = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
-                for ln_runs in _mixed:
-                    cur_x = tx
-                    for seg, is_emoji in ln_runs:
-                        _f = self._font_emoji if is_emoji else self._font
-                        draw.text((cur_x, ty), seg, fill=cfg.text_color, font=_f)
-                        cur_x += sum(_char_w(c, _f) for c in seg)
-                    ty += _line_h_mixed(ln_runs, self._font, self._font_emoji, self.cfg.font_size) + 2
-            else:
-                for ln in wrap_text(nd.text, self._font, text_w):
-                    draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
-                    ty += line_h(self._font, ln) + 2
-            if nd.time:
-                ty += 6
-                draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
-                          font=self._font_time)
-                ty += line_h(self._font_time, _fmt_time(nd.time))
-            # 图片
-            if imgs:
-                ty += 8
-            for im in imgs:
-                nw, nh_im = self._scale_image(im, text_w)
-                im2 = im.resize((nw, nh_im), getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
-                img.paste(im2, (tx, ty), mask=im2.getchannel("A"))
-                ty += nh_im + 6
-            y += nh + cfg.gap
-
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
+                node_pil.append(imgs)
+        return await self._paint(nodes, node_pil)
 
     async def render_with_images(self, nodes: List[ForwardNode],
                                  *, node_imgs: Optional[dict] = None) -> bytes:
-        """与 render() 同功能,但用调用方预下载的图片 dict{node_index: [bytes, ...]}.
+        """用调用方预下载的 dict{node_index: [bytes, ...]} 渲染.
 
-        主要让 main.py 用并发下载,避免 forwarder 内部串行拉图.
-        node_imgs 为 None 时走原来的"无图片"路径(等同于把所有图当加载失败).
+        main.py 用它配合并发下载,避免 forwarder 内部串行拉图。
+        node_imgs 为 None 时按"所有图都下载失败"渲染。
         """
-        if node_imgs is None:
-            node_imgs = {i: [] for i in range(len(nodes))}
         from PIL import Image as _I
-        # 把预下载的 bytes 转 PIL
-        converted: List[List[_I.Image]] = []
-        for nd, imgs in zip(nodes, [node_imgs.get(i, []) for i in range(len(nodes))]):
-            pil_imgs = []
-            for b in imgs:
+        node_imgs = node_imgs or {}
+        node_pil: List[List["Image.Image"]] = []
+        for i in range(len(nodes)):
+            pil_imgs: List["Image.Image"] = []
+            for b in node_imgs.get(i, []):
                 try:
                     im = _I.open(io.BytesIO(b)).convert("RGBA")
                     im.load()
                     pil_imgs.append(im)
                 except Exception:
                     continue
-            converted.append(pil_imgs)
-        # 走原来的"无 fetcher"渲染路径
-        return await self._render_with_pil(nodes, converted)
+            node_pil.append(pil_imgs)
+        return await self._paint(nodes, node_pil)
 
-    async def _render_with_pil(self, nodes: List[ForwardNode],
-                                node_pil: List[List["Image.Image"]]) -> bytes:
-        """内部:已知 PIL 图片列表,直接渲染."""
+    async def _paint(self, nodes: List[ForwardNode],
+                     node_pil: List[List["Image.Image"]]) -> bytes:
+        """唯一的绘制实现:高度测量 + 逐节点气泡 + 文本/图片/头像."""
         from PIL import Image, ImageDraw
         self._ensure_fonts()
         cfg = self.cfg
-
-        def line_h(font, text):
-            bbox = font.getbbox(text)
-            return (bbox[3] - bbox[1]) if bbox else self.cfg.font_size + 4
-
-        def wrap_text(text: str, font, max_w: int) -> List[str]:
-            if not text:
-                return []
-            lines: List[str] = []
-            for paragraph in text.split("\n"):
-                if not paragraph:
-                    lines.append("")
-                    continue
-                cur = ""
-                for ch in paragraph:
-                    cand = cur + ch
-                    bbox = font.getbbox(cand)
-                    w = bbox[2] - bbox[0] if bbox else 0
-                    if w <= max_w or not cur:
-                        cur = cand
-                    else:
-                        lines.append(cur)
-                        cur = ch
-                if cur:
-                    lines.append(cur)
-            return lines
 
         node_heights: List[int] = []
         for nd, imgs in zip(nodes, node_pil):
@@ -636,9 +483,9 @@ class Forwarder:
             if self._font_emoji is not None:
                 lines = _wrap_mixed(nd.text, self._font, self._font_emoji, text_w)
             else:
-                lines = wrap_text(nd.text, self._font, text_w)
+                lines = _wrap_text_simple(nd.text, self._font, text_w)
             h = cfg.padding
-            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
+            _hdr_h = _line_h(self._font_header, nd.sender_name or "anon", cfg.header_size)
             if nd.avatar_path is not None and self.cfg.enable_user_avatar:
                 _hdr_h = max(_hdr_h, self.cfg.avatar_size)
             h += _hdr_h
@@ -647,22 +494,19 @@ class Forwarder:
                 if self._font_emoji is not None:
                     h += _line_h_mixed(ln, self._font, self._font_emoji, self.cfg.font_size) + 2
                 else:
-                    h += line_h(self._font, ln) + 2
+                    h += _line_h(self._font, ln, cfg.font_size) + 2
             if nd.time:
-                h += 6 + line_h(self._font_time, _fmt_time(nd.time))
+                h += 6 + _line_h(self._font_time, _fmt_time(nd.time), cfg.header_size - 2)
             if imgs:
                 h += 8
             for im in imgs:
-                w, ih = im.size
-                scale = min(text_w / max(w, 1), cfg.max_image_width / max(w, 1))
-                nw = max(1, int(w * scale))
-                nh_im = max(1, int(ih * scale))
+                _, nh_im = self._scale_image(im, text_w)
                 h += nh_im + 6
             h += cfg.padding
             node_heights.append(h)
 
         total_h = cfg.padding * 2
-        total_h += line_h(self._font_header, cfg.title) + 8
+        total_h += _line_h(self._font_header, cfg.title, cfg.header_size) + 8
         for nh in node_heights:
             total_h += nh + cfg.gap
         if node_heights:
@@ -675,7 +519,7 @@ class Forwarder:
         y = cfg.padding
         draw.text((cfg.padding, y), cfg.title, fill=cfg.header_color,
                   font=self._font_header)
-        y += line_h(self._font_header, cfg.title) + 8
+        y += _line_h(self._font_header, cfg.title, cfg.header_size) + 8
 
         for nd, imgs, nh in zip(nodes, node_pil, node_heights):
             depth, bubble_x, bubble_w = _bubble_layout(cfg, nd)
@@ -710,7 +554,7 @@ class Forwarder:
                 tx += self.cfg.avatar_size + 6
             draw.text((tx, ty), nd.sender_name or "anon",
                       fill=cfg.header_color, font=self._font_header)
-            _hdr_h = line_h(self._font_header, nd.sender_name or "anon")
+            _hdr_h = _line_h(self._font_header, nd.sender_name or "anon", cfg.header_size)
             if _avatar_im is not None:
                 _hdr_h = max(_hdr_h, self.cfg.avatar_size)
             ty += _hdr_h + 4
@@ -727,14 +571,14 @@ class Forwarder:
                         cur_x += sum(_char_w(c, _f) for c in seg)
                     ty += _line_h_mixed(ln_runs, self._font, self._font_emoji, self.cfg.font_size) + 2
             else:
-                for ln in wrap_text(nd.text, self._font, text_w):
+                for ln in _wrap_text_simple(nd.text, self._font, text_w):
                     draw.text((tx, ty), ln, fill=cfg.text_color, font=self._font)
-                    ty += line_h(self._font, ln) + 2
+                    ty += _line_h(self._font, ln, cfg.font_size) + 2
             if nd.time:
                 ty += 6
                 draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
                           font=self._font_time)
-                ty += line_h(self._font_time, _fmt_time(nd.time))
+                ty += _line_h(self._font_time, _fmt_time(nd.time), cfg.header_size - 2)
             if imgs:
                 ty += 8
             for im in imgs:

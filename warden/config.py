@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.9.9"
+VERSION = "1.10.0"
 EXPORT_FORMAT_VERSION = "1.0"
 
 
@@ -21,9 +21,13 @@ class MediaWardenConfig:
         "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}"
     )
     forward_render_mode: str = "image"
+    # 取值保留 pil/playwright/wkhtml 三个历史槽位,但只有 pil 落地:
+    # main.initialize() 会对非 pil 打一条明确的告警并继续用 pil(不静默生效)。
     forward_image_engine: str = "pil"
     forward_image_width: int = 720
-    reply_to_original: bool = True
+    # v1.10.0: 以前这个开关是空壳(代码里从没读过),实际行为 = 不引用。
+    # 现在接上了 Reply 组件,默认值保持 false 以免升级后突然给每条回执加引用。
+    reply_to_original: bool = False
     reply_preview: bool = True
     max_file_size_mb: int = 100
     dedupe: bool = True
@@ -102,13 +106,6 @@ class MediaWardenConfig:
             raise ValueError(
                 f"avatar_platforms must be a list of strings, got {self.avatar_platforms!r}"
             )
-
-    @classmethod
-    def from_raw(cls, raw: dict | None) -> "MediaWardenConfig":
-        raw = raw or {}
-        known = {f.name for f in cls.__dataclass_fields__.values() if f.init}
-        kwargs = {k: v for k, v in raw.items() if k in known}
-        return cls(**kwargs)
 
     @classmethod
     def from_raw_lenient(cls, raw: dict | None) -> tuple["MediaWardenConfig", List[str]]:

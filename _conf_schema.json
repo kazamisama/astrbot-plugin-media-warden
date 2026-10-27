@@ -46,7 +46,7 @@
         "default": 100,
         "min": 1,
         "description": "单文件大小上限（MB），超过则跳过",
-        "hint": "对单个媒体 / 转发图 / 头像生效。超限直接丢弃对应项。"
+        "hint": "对单个媒体 / 转发图生效，超限直接丢弃对应项。头像另有固定 5MB 上限（avatar_cache_size_mb 只管缓存总量），不受本项影响。"
       },
       "dedupe": {
         "type": "bool",
@@ -102,6 +102,19 @@
       }
     }
   },
+  "logging": {
+    "description": "日志",
+    "type": "object",
+    "hint": "插件自身日志开关（v1.10.0 起可在 WebUI 配置，之前只存在于代码与 README）。",
+    "items": {
+      "log_to_stdout": {
+        "type": "bool",
+        "default": true,
+        "description": "把插件日志打到 AstrBot 标准输出",
+        "hint": "命中的消息、每一级补救、失败原因都会打印。排查问题时打开，长期运行想清静可关闭（失败仍会进索引库，可用 /warden fail 查）。"
+      }
+    }
+  },
   "forward": {
     "description": "转发渲染",
     "type": "object",
@@ -117,7 +130,7 @@
         "type": "string",
         "default": "pil",
         "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)",
-        "hint": "v1.2+ 仅 pil 落地；playwright/wkhtml 是预留槽位，切换会触发 'forwarder init failed' 并降级 JSON。"
+        "hint": "只有 pil 真正实现。选 playwright/wkhtml 也能启动：插件会打一条明确告警（'forward_image_engine=… 未实现 — 实际使用 PIL 渲染'）并继续用 PIL，不会静默切引擎，也不会降级成 JSON。"
       },
       "forward_image_width": {
         "type": "int",
@@ -175,9 +188,9 @@
     "items": {
       "reply_to_original": {
         "type": "bool",
-        "default": true,
-        "description": "回复时是否引用原消息",
-        "hint": "由 AstrBot adapter 实现；本插件只设置 plain_result。"
+        "default": false,
+        "description": "回执是否引用原消息（v1.10.0 起真正生效）",
+        "hint": "开启后回执会带一个 Reply 组件引用被保存的那条消息；适配器不支持 Reply 或 message_id 不可用时自动退化为普通文本。默认关闭（= v1.9.x 的实际行为）。"
       },
       "reply_preview": {
         "type": "bool",

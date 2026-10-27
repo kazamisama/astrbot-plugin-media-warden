@@ -1,7 +1,7 @@
 """过滤策略 —— 决定一条事件是否进入流水线.
 
 策略:
-  - v1 仅服务群聊(私聊直接放行,不进入流水线)
+  - v1 仅服务群聊:没有 group_id 的事件(私聊/系统消息)一律 skip,不进入流水线
   - whitelist: 群白名单 AND 用户白名单(任一为空表示该维不限)
   - blacklist: 群黑名单 OR 用户黑名单
 
@@ -82,7 +82,7 @@ def event_sender_name(event) -> str:
 
 
 def _is_group_event(event) -> bool:
-    """v1 仅服务群聊 —— 没有 group_id 直接放行."""
+    """是否群聊事件 —— 没有 group_id 的(私聊/系统消息)返回 False,调用方会 skip."""
     return bool(event_group_id(event))
 
 

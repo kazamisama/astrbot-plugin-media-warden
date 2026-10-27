@@ -30,7 +30,9 @@ import time
 from typing import Any, Optional
 
 
-SCHEMA = """
+# v1.10: 建表 / 建索引分开 —— 旧库补列必须在建索引之前,
+# 否则 CREATE INDEX ... ON failures(subject) 会在 subject 还不存在时直接报错。
+SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS assets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -39,12 +41,6 @@ CREATE TABLE IF NOT EXISTS assets (
   kind TEXT, path TEXT, size INTEGER,
   sha16 TEXT, forward_meta TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_assets_msg
-  ON assets(platform, group_id, msg_id, idx);
-CREATE INDEX IF NOT EXISTS ix_assets_sha
-  ON assets(sha16);
-CREATE INDEX IF NOT EXISTS ix_assets_ts
-  ON assets(ts DESC);
 CREATE TABLE IF NOT EXISTS failures (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -52,6 +48,15 @@ CREATE TABLE IF NOT EXISTS failures (
   msg_id TEXT, idx INTEGER, kind TEXT,
   err TEXT, subject TEXT, url TEXT, attempts INTEGER DEFAULT 1
 );
+"""
+
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_assets_msg
+  ON assets(platform, group_id, msg_id, idx);
+CREATE INDEX IF NOT EXISTS ix_assets_sha
+  ON assets(sha16);
+CREATE INDEX IF NOT EXISTS ix_assets_ts
+  ON assets(ts DESC);
 CREATE INDEX IF NOT EXISTS ix_fail_ts
   ON failures(ts DESC);
 CREATE INDEX IF NOT EXISTS ix_fail_subject
@@ -60,6 +65,16 @@ CREATE INDEX IF NOT EXISTS ix_fail_subject
 
 _FAILURE_COLS = ("id", "ts", "platform", "group_id", "sender_id",
                  "msg_id", "idx", "kind", "err", "subject", "url", "attempts")
+
+# v1.10: 旧库升级清单 —— CREATE TABLE IF NOT EXISTS 不会给已存在的表补列,
+# 所以 open() 里显式对比 PRAGMA table_info 并 ALTER TABLE ADD COLUMN。
+# 键是表名,值是 {列名: 列声明}(只用于"补列",不改已有列的类型)。
+_COLUMN_SPECS: dict = {
+    "assets": {"forward_meta": "TEXT"},
+    "failures": {"err": "TEXT", "subject": "TEXT", "url": "TEXT",
+                 "attempts": "INTEGER DEFAULT 1"},
+}
+SCHEMA_VERSION = 1
 
 
 def failure_subject(url: Optional[str], *, file_id: Optional[str] = None,
@@ -95,12 +110,29 @@ class AssetIndex:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
+        self.migrated: list[str] = []
 
     def open(self) -> None:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
-        self._conn.executescript(SCHEMA)
+        self._conn.executescript(SCHEMA_TABLES)
+        self.migrated = self._ensure_columns()
+        self._conn.executescript(SCHEMA_INDEXES)
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _ensure_columns(self) -> list[str]:
+        """把旧版本的库补齐到当前 schema;返回实际新增的「表.列」列表."""
+        c = self._require()
+        added: list[str] = []
+        for table, cols in _COLUMN_SPECS.items():
+            have = {row[1] for row in c.execute(f"PRAGMA table_info({table})")}
+            for name, decl in cols.items():
+                if name in have:
+                    continue
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                added.append(f"{table}.{name}")
+        return added
 
     def close(self) -> None:
         if self._conn is not None:
@@ -185,12 +217,6 @@ class AssetIndex:
                     for r in top],
         }
 
-    def prune_failures_older_than(self, cutoff_ts: int) -> int:
-        c = self._require()
-        cur = c.execute("DELETE FROM failures WHERE ts < ?", (int(cutoff_ts),))
-        c.commit()
-        return cur.rowcount
-
     def recent(self, limit: int = 10) -> list[dict]:
         c = self._require()
         cur = c.execute(
@@ -254,16 +280,20 @@ class AssetIndex:
         c = self._require()
         return c.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
 
-    def prune_older_than(self, cutoff_ts: int) -> int:
-        """删除 ts < cutoff 的记录;不删文件,只删索引.返回删除条数.
+    def prune_older_than(self, cutoff_ts: int) -> dict:
+        """删除 ts < cutoff 的 assets 与 failures;不删文件,只删索引.
 
         v1.9: 同时清掉同期的 failures 记录,避免失败表只涨不落。
+        v1.10: 两张表都在删,所以返回 {"assets": n, "failures": m} —— 回执不再
+               只报资产条数,把静默删掉的失败记录也说清楚。
         """
         c = self._require()
-        cur = c.execute("DELETE FROM assets WHERE ts < ?", (int(cutoff_ts),))
-        c.execute("DELETE FROM failures WHERE ts < ?", (int(cutoff_ts),))
+        n_assets = c.execute("DELETE FROM assets WHERE ts < ?",
+                             (int(cutoff_ts),)).rowcount
+        n_fail = c.execute("DELETE FROM failures WHERE ts < ?",
+                           (int(cutoff_ts),)).rowcount
         c.commit()
-        return cur.rowcount
+        return {"assets": n_assets, "failures": n_fail}
 
     def stats(self) -> dict:
         c = self._require()

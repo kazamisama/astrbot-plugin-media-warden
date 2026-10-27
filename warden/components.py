@@ -10,6 +10,11 @@ OneBot v11 segment 形态参考:
   {"type": "json",   "data": {"data": "<json string>"}}
   {"type": "node",   "data": {"content": [segment, ...]}}     # 合并转发节点
   {"type": "text",   "data": {"text": "..."}}
+
+AstrBot 的 message_obj.message 有两种形态:OneBot dict 段,或 AstrBot 自己的
+Pydantic 组件对象。两者字段语义一致(只是取值方式不同),所以这里用 _Fields
+适配器统一到同一条归一化路径 —— v1.10 之前是两份平行实现,已经出现过
+face 段 / image meta 的形态分叉。
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -37,10 +42,6 @@ class Component:
     def is_forward(self) -> bool:
         return self.kind == "forward"
 
-    @property
-    def is_text_only(self) -> bool:
-        return self.kind == "text"
-
 
 def _comp_type_name(item: Any) -> Optional[str]:
     """AstrBot Pydantic 组件对象的 type 是 ComponentType 枚举，取其字符串名."""
@@ -52,79 +53,133 @@ def _comp_type_name(item: Any) -> Optional[str]:
     return name.lower()
 
 
-def _coerce_obj(item: Any) -> Component:
-    """处理 AstrBot 消息组件对象（Image/Face/Video/Record/File/Node/Forward/Json/Plain/At ...）."""
-    tn = _comp_type_name(item)
-    g = lambda *names: next(
-        (v for n in names for v in [getattr(item, n, None)] if v not in (None, "")),
-        None,
-    )
+class _Fields:
+    """统一的字段取值器:对象走 getattr,OneBot data 走 dict.get."""
 
-    if tn == "image":
-        # Image.file 可能是 url / file:// / base64:// / 本地路径
-        f = g("url") or g("file")
+    __slots__ = ("_get",)
+
+    def __init__(self, getter) -> None:
+        self._get = getter
+
+    @classmethod
+    def of_obj(cls, item: Any) -> "_Fields":
+        return cls(lambda n: getattr(item, n, None))
+
+    @classmethod
+    def of_dict(cls, data: dict) -> "_Fields":
+        return cls(data.get)
+
+    def first(self, *names: str):
+        for n in names:
+            v = self._get(n)
+            if v not in (None, ""):
+                return v
+        return None
+
+    def get(self, name: str):
+        return self._get(name)
+
+
+def _str_or_none(v) -> Optional[str]:
+    return v if isinstance(v, str) and v else None
+
+
+def _media_url(f: _Fields) -> Optional[str]:
+    """图片/视频/语音的下载源:优先 url;没有 url 时 file 若是 http 就用它.
+
+    (AstrBot 的 Image 有时把 http 链接放在 file 上。)
+    """
+    url = _str_or_none(f.first("url"))
+    if url:
+        return url
+    fid = _str_or_none(f.first("file"))
+    if fid and fid.startswith(("http://", "https://")):
+        return fid
+    return None
+
+
+def _int_or_none(v) -> Optional[int]:
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce(t: Optional[str], f: _Fields, raw: Any) -> Component:
+    """唯一归一化路径: t 是段/组件类型名(已小写), f 是字段取值器."""
+    t = (t or "").lower()
+
+    if t == "image":
+        meta = {}
+        for key in ("path", "summary"):
+            v = f.get(key)
+            if v not in (None, ""):
+                meta[key] = v
         return Component(
             kind="image",
-            url=g("url") or (f if isinstance(f, str) and f.startswith("http") else None),
-            file_id=g("file"),
-            meta={"path": getattr(item, "path", None)},
-            raw=item,
+            url=_media_url(f),
+            file_id=_str_or_none(f.first("file", "file_id")),
+            name=_str_or_none(f.first("name", "summary")),
+            size=_int_or_none(f.first("size", "file_size")),
+            meta=meta,
+            raw=raw,
         )
-    if tn == "video":
-        f = g("file")
+    if t == "video":
         return Component(
             kind="video",
-            url=g("url") or (f if isinstance(f, str) and f.startswith("http") else None),
-            file_id=g("file"),
-            raw=item,
+            url=_media_url(f),
+            file_id=_str_or_none(f.first("file")),
+            name=_str_or_none(f.first("name")),
+            size=_int_or_none(f.first("size", "file_size")),
+            raw=raw,
         )
-    if tn in ("record", "voice", "audio"):
-        f = g("file")
+    if t in ("record", "voice", "audio"):
         return Component(
             kind="voice",
-            url=g("url") or (f if isinstance(f, str) and f.startswith("http") else None),
-            file_id=g("file"),
-            raw=item,
+            url=_media_url(f),
+            file_id=_str_or_none(f.first("file")),
+            name=_str_or_none(f.first("name")),
+            size=_int_or_none(f.first("size", "file_size")),
+            raw=raw,
         )
-    if tn == "file":
-        size = None
-        for n in ("size", "file_size"):
-            v = getattr(item, n, None)
-            if v not in (None, ""):
-                try:
-                    size = int(v)
-                    break
-                except (TypeError, ValueError):
-                    pass
+    if t == "file":
         return Component(
             kind="file",
-            url=g("url"),
-            file_id=g("file"),
-            name=g("name"),
-            size=size,
-            raw=item,
+            url=_str_or_none(f.first("url")),
+            file_id=_str_or_none(f.first("file")),
+            name=_str_or_none(f.first("name")),
+            size=_int_or_none(f.first("size", "file_size")),
+            raw=raw,
         )
-    if tn == "face":
-        # QQ 内置表情：只有 id，无图片数据，归为 json 元数据保存
+    if t == "face":
+        # QQ 内置表情:只有 id,无图片数据,归为 json 元数据保存。
+        # (v1.10 起 OneBot dict 段也走这条,不再落到 unknown)
         return Component(
             kind="json",
-            meta={"data": {"face_id": getattr(item, "id", None)}},
-            raw=item,
+            meta={"data": {"face_id": f.first("id")}},
+            raw=raw,
         )
-    if tn == "json":
-        return Component(kind="json", meta={"data": g("data")}, raw=item)
-    if tn in ("node", "nodes", "forward"):
-        nodes = getattr(item, "content", None)
-        fwd_id = g("id", "resid", "res_id")
+    if t == "json":
+        return Component(kind="json", meta={"data": f.first("data")}, raw=raw)
+    if t in ("node", "nodes", "forward"):
         return Component(
             kind="forward",
-            meta={"nodes": nodes, "forward_id": fwd_id},
-            raw=item,
+            meta={
+                "nodes": f.first("content", "nodes"),
+                "forward_id": f.first("id", "resid", "res_id"),
+            },
+            raw=raw,
         )
-    if tn == "plain":
-        return Component(kind="text", name=g("text"), raw=item)
+    if t in ("plain", "text"):
+        return Component(kind="text", name=_str_or_none(f.first("text")), raw=raw)
+    return Component(kind="unknown", meta={"type": t}, raw=raw)
 
-    return Component(kind="unknown", meta={"type": tn}, raw=item)
+
+def _coerce_obj(item: Any) -> Component:
+    """处理 AstrBot 消息组件对象（Image/Face/Video/Record/File/Node/Forward/Json/Plain/At ...）."""
+    return _coerce(_comp_type_name(item), _Fields.of_obj(item), item)
 
 
 def _coerce_one(item: Any) -> Component:
@@ -133,63 +188,10 @@ def _coerce_one(item: Any) -> Component:
             return _coerce_obj(item)
         return Component(kind="unknown", raw=item)
 
-    t = (item.get("type") or "").lower()
-    data = item.get("data") or {}
+    data = item.get("data")
     if not isinstance(data, dict):
         data = {}
-
-    if t == "image":
-        return Component(
-            kind="image",
-            url=data.get("url"),
-            file_id=data.get("file"),
-            meta={"summary": data.get("summary")},
-            raw=item,
-        )
-    if t == "video":
-        return Component(
-            kind="video",
-            url=data.get("url"),
-            file_id=data.get("file"),
-            raw=item,
-        )
-    if t in ("record", "voice", "audio"):
-        return Component(
-            kind="voice",
-            url=data.get("url"),
-            file_id=data.get("file"),
-            raw=item,
-        )
-    if t == "file":
-        size_raw = data.get("file_size")
-        try:
-            size = int(size_raw) if size_raw not in (None, "") else None
-        except (TypeError, ValueError):
-            size = None
-        return Component(
-            kind="file",
-            url=data.get("url"),
-            file_id=data.get("file"),
-            name=data.get("name"),
-            size=size,
-            raw=item,
-        )
-    if t == "json":
-        return Component(kind="json", meta={"data": data.get("data")}, raw=item)
-    if t in ("node", "nodes", "forward"):
-        nodes = data.get("content") if isinstance(data, dict) else None
-        fwd_id = (
-            data.get("id") or data.get("resid") or data.get("res_id")
-        ) if isinstance(data, dict) else None
-        return Component(
-            kind="forward",
-            meta={"nodes": nodes, "forward_id": fwd_id},
-            raw=item,
-        )
-    if t == "text":
-        return Component(kind="text", name=data.get("text"), raw=item)
-
-    return Component(kind="unknown", meta={"type": t}, raw=item)
+    return _coerce(item.get("type"), _Fields.of_dict(data), item)
 
 
 def _seg_type(seg: Any) -> Optional[str]:
@@ -243,21 +245,12 @@ def recover_raw_media_refs(event) -> List[dict]:
             continue
         data = _seg_data(seg)
         url = data.get("url")
-        size = None
-        for n in ("file_size", "size"):
-            v = data.get(n)
-            if v not in (None, ""):
-                try:
-                    size = int(v)
-                    break
-                except (TypeError, ValueError):
-                    pass
         out.append({
             "kind": kind,
             "url": url if isinstance(url, str) and url.startswith(("http://", "https://")) else None,
             "file": data.get("file"),
             "name": data.get("file") or data.get("name"),
-            "size": size,
+            "size": _int_or_none(data.get("file_size") if data.get("file_size") not in (None, "") else data.get("size")),
         })
     return out
 

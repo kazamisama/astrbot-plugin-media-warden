@@ -5,19 +5,13 @@
   - 抓取失败(404 / 网络错 / 超时) → 返回 None,渲染时跳过头像
   - 文件缓存:storage_root/_avatars/{platform}_{sender_id}.jpg
   - 容量控制:超过 avatar_cache_size_mb 时按 mtime LRU 删旧
-  - 单文件上限 2MB(防异常大头像把缓存打爆)
-  - 单请求超时 5s(防 OneBot / CDN 拖慢整条消息)
+  - 单文件上限 5MB(防异常大头像把缓存打爆;与 max_file_size_mb 无关)
+  - 单请求超时取 avatar_timeout_s(默认 10s,防 OneBot / CDN 拖慢整条消息)
 """
 from __future__ import annotations
 import asyncio
 import os
-import time
-from typing import Awaitable, Callable, Optional, Tuple, TYPE_CHECKING
-
-import aiohttp
-
-if TYPE_CHECKING:
-    pass
+from typing import Awaitable, Callable, Optional, Tuple
 
 
 _QQ_AVATAR_BASE = "https://q1.qlogo.cn/g"
@@ -62,10 +56,22 @@ class AvatarCache:
         return None
 
     async def _fetch_bytes(self, url: str) -> Optional[bytes]:
-        """GET URL,200 + size OK 返回 bytes,其他情况 None."""
+        """GET URL,200 + size OK 返回 bytes,其他情况 None.
+
+        aiohttp 在函数内懒导入:缺包时头像功能静默降级(返回 None),
+        不让整个插件在 import 阶段就挂掉(与 downloader 的处理一致)。
+        """
         try:
-            timeout = aiohttp.ClientTimeout(total=self.timeout_s)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            import aiohttp
+        except ImportError:
+            return None
+        # 环境里可能装的是桩模块(单测)或没有 ClientError 的极简实现:
+        # 头像是 best-effort,任何异常都按"抓不到"处理,不能拖垮整条消息的保存。
+        client_err = getattr(aiohttp, "ClientError", Exception)
+        timeout_cls = getattr(aiohttp, "ClientTimeout", None)
+        try:
+            kwargs = {"timeout": timeout_cls(total=self.timeout_s)} if timeout_cls else {}
+            async with aiohttp.ClientSession(**kwargs) as session:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         return None
@@ -84,7 +90,7 @@ class AvatarCache:
                             return None
                         buf.extend(chunk)
                     return bytes(buf)
-        except (asyncio.TimeoutError, aiohttp.ClientError, Exception):
+        except (asyncio.TimeoutError, client_err, OSError, ValueError):
             return None
 
     def _evict_if_needed(self) -> None:

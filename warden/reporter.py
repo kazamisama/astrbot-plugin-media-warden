@@ -4,9 +4,10 @@ Phase 1 仅做格式骨架,Phase 2 接入真实数据.
 
 v1.9: 失败原因分类(下载失败 / 落盘失败),让回执说清是"源链接失效拿不到料"
 还是"拿到料但写不进磁盘"。
+v1.10: 三种失败文案(failure_phrase / 原因行 / 回执头)统一走 _split_fetch_save,
+不再各处重算一遍 fetch/save 分解。
 """
 from __future__ import annotations
-import posixpath
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -20,7 +21,7 @@ class AssetResult:
     size: Optional[int] = None
     preview_path: Optional[str] = None
     reused: bool = False
-    # v1.9: 失败分类("fetch"/"save")与补充说明(补救链结果 / 历史失败次数 / 链接已重取)
+    # v1.9: 失败分类("fetch"/"save"/"other")与补充说明(补救链结果 / 历史失败次数 / 链接已重取)
     failure_kind: Optional[str] = None
     note: Optional[str] = None
 
@@ -88,13 +89,19 @@ class BatchResult:
             out[cat] = out.get(cat, 0) + 1
         return out
 
+    def _split_fetch_save(self) -> tuple[int, int]:
+        """(拿不到料, 拿到料但写不进去/其它) —— 三种文案共用的唯一算法.
+
+        "other" 归到第二类:它同样不是源链接的问题,@ 文案里不该说"链接失效"。
+        """
+        fetch_n = self.failure_breakdown().get("fetch", 0)
+        return fetch_n, self.fail_count - fetch_n
+
     def failure_phrase(self) -> str:
         """给 @ 触发者的那句话:说清是「源链接拿不到」还是「写不进磁盘」。"""
         if self.fail_count == 0:
             return "0 个媒体保存失败"
-        bd = self.failure_breakdown()
-        fetch_n = bd.get("fetch", 0)
-        save_n = self.fail_count - fetch_n
+        fetch_n, save_n = self._split_fetch_save()
         if fetch_n and not save_n:
             return (f"{self.fail_count} 个媒体没能保存 —— 下载失败(源链接已失效)"
                     f"，{self.ok_count}/{self.total} 已保存")
@@ -134,17 +141,11 @@ def classify_error(err: Optional[str]) -> str:
     return "other"
 
 
-def failure_summary(res: "BatchResult") -> Optional[str]:
-    """失败回执里的一行明细; 无失败返回 None。"""
-    if res.fail_count == 0:
-        return None
-    labels = {
-        k: _ERROR_CATEGORY_LABELS.get(k, k)
-        for k in res.failure_breakdown()
-    }
+def _reason_line(breakdown: dict) -> str:
+    """失败回执里的一行明细(按分类计数)。"""
     parts = [
-        f"{labels[cat]}×{n}"
-        for cat, n in sorted(res.failure_breakdown().items())
+        f"{_ERROR_CATEGORY_LABELS.get(cat, cat)}×{n}"
+        for cat, n in sorted(breakdown.items())
     ]
     if len(parts) == 1:
         return f"  原因: {parts[0]}"
@@ -162,14 +163,13 @@ def format_batch(res: BatchResult) -> str:
         else:
             head = "[Warden] ✅ 已保存"
     else:
-        bd = res.failure_breakdown()
-        fetch_n = bd.get("fetch", 0)
+        fetch_n, save_n = res._split_fetch_save()
         if fetch_n == res.fail_count:
             detail = "下载失败（源链接失效）"
         elif fetch_n == 0:
             detail = "落盘失败"
         else:
-            detail = f"下载失败 {fetch_n} + 落盘失败 {res.fail_count - fetch_n}"
+            detail = f"下载失败 {fetch_n} + 落盘失败 {save_n}"
         head = (
             f"[Warden] ⚠️ 部分保存失败 ({res.ok_count}/{res.total})"
             f" — {detail}"
@@ -179,9 +179,8 @@ def format_batch(res: BatchResult) -> str:
     if reused_count and reused_count != res.ok_count:
         lines.append(f"  去重: {reused_count} 项为已保存过的重复内容")
     lines.append(f"  用时: {res.duration_s:.2f}s")
-    summary = failure_summary(res)
-    if summary:
-        lines.append(summary)
+    if res.fail_count:
+        lines.append(_reason_line(res.failure_breakdown()))
 
     from collections import Counter
     kinds = Counter(x.kind for x in res.items)
@@ -203,7 +202,7 @@ def format_batch(res: BatchResult) -> str:
         if len(ok_items) > 10:
             lines.append(f"    ... (+{len(ok_items) - 10} more)")
 
-    fail_items = [x for x in res.items if not x.ok]
+    fail_items = res.fail_items
     if fail_items:
         lines.append(f"  失败 ({len(fail_items)}):")
         for x in fail_items[:10]:

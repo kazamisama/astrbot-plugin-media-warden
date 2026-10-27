@@ -10,7 +10,7 @@ from .policy import (
 from .components import Component, extract_components, summarize, recover_raw_media_refs
 from .reporter import (
     AssetResult, BatchResult, format_batch,
-    classify_error, failure_summary,
+    classify_error,
 )
 from .avatar import AvatarCache, qq_avatar_url, fetch_many as fetch_many_avatars
 
@@ -31,7 +31,6 @@ __all__ = [
     "BatchResult",
     "format_batch",
     "classify_error",
-    "failure_summary",
     "AvatarCache",
     "qq_avatar_url",
     "fetch_many_avatars",

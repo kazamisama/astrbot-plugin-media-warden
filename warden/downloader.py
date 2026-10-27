@@ -13,9 +13,11 @@ v1.3 增强:
 v1.9 增强(http 源链接失效后的补救):
   - astrbot_component_fetcher 的 http 分支失败后回退到组件本地副本
     (meta["path"] / raw.convert_to_file_path / convert_to_base64)
-  - download(..., fallback=...) 在主 fetcher 重试耗尽后跑一次补救链
-    (OneBot get_image 重取值 / 本地副本)
-  - 补救链失败时把原因附到原始错误上(不覆盖主错误)
+  - 本地副本也失败时,把原因附到**原始**错误上(不覆盖主错误)
+
+v1.10: 删掉 download(fallback=) 与 refresher 两个钩子 —— 生产路径从来没用过它们,
+       真正的多级补救链在 main._download_one 里(本地缓存 → get_image/get_msg →
+       本地副本 → 迟到缓存重查)。两套并存的补救机制只会让读代码的人误判。
 """
 from __future__ import annotations
 import asyncio
@@ -130,16 +132,14 @@ async def astrbot_component_fetcher(component: "Component",
                                     *,
                                     timeout_s: float = 30.0,
                                     max_bytes: int = 200 * 1024 * 1024,
-                                    session=None,
-                                    refresher=None) -> Downloaded:
+                                    session=None) -> Downloaded:
     """优先走 url;http 失败或没 url 时回退到组件本地副本.
 
     商城表情 / napcat / lagrange 的 Image 常常 url 为空或直接是本地缓存路径（非 http），
     AstrBot 组件自带的 convert_to_file_path() 能把 file_id / file:// / base64:// 统一解析为本地文件。
 
     v1.9: url 是 http(s) 但下载失败（典型: QQ rkey 授权链接过期 -> 400）时，
-    不再直接抛错，而是先给 refresher(OneBot get_image 重取链接)一次机会，
-    再回退到组件本地副本（PreProcessStage 可能已经落过一份）。
+    不再直接抛错，而是回退到组件本地副本（PreProcessStage 可能已经落过一份）。
     """
     url = component.url or ""
     if url.startswith("http://") or url.startswith("https://"):
@@ -148,22 +148,6 @@ async def astrbot_component_fetcher(component: "Component",
                 component, timeout_s=timeout_s, max_bytes=max_bytes, session=session
             )
         except DownloadError as primary:
-            if callable(refresher):
-                try:
-                    fresh = await refresher(component)
-                except Exception:
-                    fresh = None
-                if fresh and fresh != url:
-                    try:
-                        dl = await aiohttp_fetcher(
-                            Component(kind=component.kind, url=fresh),
-                            timeout_s=timeout_s, max_bytes=max_bytes,
-                            session=session,
-                        )
-                        dl.origin = fresh
-                        return dl
-                    except DownloadError as e:
-                        primary.fallback_error = f"refreshed url {fresh!r}: {e}"
             try:
                 return await _local_fallback(component, max_bytes)
             except DownloadError as e:
@@ -287,7 +271,6 @@ async def download(component: "Component",
                    retries: int = 2,
                    backoff_base: float = 0.5,
                    backoff_cap: float = 4.0,
-                   fallback: Optional[Callable[[], Awaitable[Downloaded]]] = None,
                    **fetcher_kwargs) -> Downloaded:
     """统一入口 + 指数退避重试.
 
@@ -295,9 +278,7 @@ async def download(component: "Component",
     retries=N -> 最多重试 N 次
     backoff: 0.5s, 1s, 2s, ... jitter 0~0.5s,封顶 backoff_cap
 
-    v1.9: fallback 是主 fetcher(含重试)耗尽后跑一次的补救链
-    (OneBot get_image 重取链接 / 组件本地副本)。补救也失败时抛出**原始**错误,
-    补救失败原因挂在 e.fallback_error 上,不覆盖主错误。
+    v1.9: 主错误上可能挂 fallback_error(补救链失败原因),由调用方读出来写回执。
     """
     fn = fetcher or aiohttp_fetcher
     attempt = 0
@@ -316,22 +297,5 @@ async def download(component: "Component",
             attempt += 1
     if last_exc is None:  # 不可达,这里只是让类型检查器安心
         raise DownloadError("download failed without an exception")
-    if fallback is not None:
-        try:
-            return await fallback()
-        except Exception as fe:
-            last_exc.fallback_error = str(fe)
     raise last_exc
-
-
-async def download_many(components: list, fetcher: Optional[Fetcher] = None,
-                        **kwargs) -> list:
-    """并发下载多个 Component;返回与输入等长的 Downloaded 列表,失败项抛 DownloadError.
-
-    使用 asyncio.gather(..., return_exceptions=False) 让首个失败冒泡,其他已完成结果丢失.
-    如需"全部完成即便部分失败"传 return_exceptions=True.
-    """
-    return await asyncio.gather(
-        *(download(c, fetcher=fetcher, **kwargs) for c in components)
-    )
 

@@ -39,7 +39,7 @@ from .warden import (
 from .warden.components import Component
 from .warden.downloader import (
     aiohttp_fetcher, astrbot_component_fetcher,
-    download, download_many, DownloadError, Downloaded, _local_fallback,
+    download, DownloadError, Downloaded, _local_fallback,
     _read_local_file,
 )
 from .warden.storage import Storage, SaveContext
@@ -52,12 +52,11 @@ def _local_cache_candidates(comp: Component) -> list:
     顺序：消息段原始 `file`（`meta["raw_file"]`）→ `comp.file_id` → `meta["path"]`
     的文件名 → url 的最后一段。去重、保序、丢掉空值与非字符串。
     """
-    import os as _os
     out: list = []
     meta = comp.meta or {}
     for v in (meta.get("raw_file"), comp.file_id, meta.get("path")):
         if isinstance(v, str) and v.strip():
-            out.append(_os.path.basename(v.strip()))
+            out.append(os.path.basename(v.strip()))
     url = (comp.url or "").strip()
     if url and "://" in url:
         try:
@@ -90,40 +89,6 @@ def _url_fileid(url: str) -> Optional[str]:
         if vals and vals[0]:
             return vals[0]
     return None
-
-
-def _get_media_url_candidates(resp) -> list[str]:
-    """从 OneBot get_image 的返回里提取可用 url（兼容多种实现形态）。"""
-    if resp is None:
-        return []
-    data = resp
-    if isinstance(resp, dict) and isinstance(resp.get("data"), (dict, str)):
-        data = resp["data"]
-    out: list[str] = []
-    if isinstance(data, dict):
-        for key in ("url", "file", "file_url", "path"):
-            v = data.get(key)
-            if isinstance(v, str) and v:
-                out.append(v)
-    elif isinstance(data, str):
-        out.append(data)
-    else:
-        for key in ("url", "file", "file_url", "path"):
-            v = getattr(data, key, None)
-            if isinstance(v, str) and v:
-                out.append(v)
-    if isinstance(resp, dict):
-        for key in ("url", "file", "file_url"):
-            v = resp.get(key)
-            if isinstance(v, str) and v:
-                out.append(v)
-    seen: set = set()
-    uniq: list[str] = []
-    for u in out:
-        if u not in seen:
-            seen.add(u)
-            uniq.append(u)
-    return uniq
 
 
 # OneBot get_image 的参数形态:AstrBot 核心的 quoted_message/image_resolver.py 也是
@@ -233,6 +198,23 @@ def _media_urls_from_resp(resp, *, old: str = "", hint: Optional[str] = None) ->
     return hit + other
 
 
+def _is_sha16(token: str) -> bool:
+    """16 位十六进制 = 本插件的内容指纹(storage 用 blake2b 取前 16 位)."""
+    return len(token) == 16 and all(c in "0123456789abcdefABCDEF" for c in token)
+
+
+def _format_asset_row(r: dict) -> str:
+    """/warden list 与 /warden lookup 共用的单行渲染(时间可读,不是裸 epoch)."""
+    ts = time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))
+    fwd = f" | fwd={r['forward_meta']}" if r.get("forward_meta") else ""
+    return (
+        f"- id={r['id']} [{ts}] {r['platform']}:{r['group_id']} "
+        f"sender={r['sender_id']} idx={r['idx']} "
+        f"kind={r['kind']} size={r['size']} "
+        f"sha16={r.get('sha16')}{fwd} -> {r['path']}"
+    )
+
+
 def _failure_subject_for(comp: Component) -> str:
     """稳定去重键:优先 fileid（rkey 换了也能对上同一张图）,否则 host+path。"""
     fid = (comp.meta or {}).get("fileid") or comp.file_id or ""
@@ -269,7 +251,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.9.9: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本), 失败入库可查, /warden lookup 反查 + 预览回传, 命令仅管理员可用",
+    "群聊素材守门人 v1.10.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail, 预览回传 + 可选引用原消息, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -309,14 +291,27 @@ class MediaWardenStar(Star):
         except Exception as e:
             self._log(f"avatar cache init failed: {e!r} — runs without avatars")
             self._avatar_cache = None
+        # 引擎只有 pil 落地:另外两个取值留着兼容旧配置,但必须说清楚(不静默生效)
+        engine = (self.cfg.forward_image_engine or "pil").lower()
+        if engine != "pil":
+            self._log(
+                f"forward_image_engine={engine!r} 未实现 — 实际使用 PIL 渲染"
+                f"(明确告警而非静默降级)"
+            )
         try:
+            # 提前探测 Pillow:forwarder 模块本身不 import PIL(全在函数内),
+            # 所以等到渲染时才失败会让每条消息都白跑一次,这里提前降级到 JSON。
+            import PIL  # noqa: F401
             from .warden.forwarder import Forwarder
             self._forwarder = Forwarder(
                 width=self.cfg.forward_image_width,
                 max_nodes=self.cfg.forward_render_max_nodes,
             )
         except ImportError as e:
-            self._log(f"forwarder init failed: {e!r} — falls back to JSON sidecar")
+            self._log(f"forwarder unavailable (Pillow 缺失?): {e!r} — JSON sidecar 兜底")
+            self._forwarder = None
+        except Exception as e:
+            self._log(f"forwarder init failed: {e!r} — JSON sidecar 兜底")
             self._forwarder = None
         if self.cfg.enable_index_db:
             try:
@@ -409,7 +404,8 @@ class MediaWardenStar(Star):
         ]
         if self.cfg.index_reuse_saved and self._index is not None:
             for i, comp in enumerate(media):
-                hit = self._find_saved_asset(msg_id, i)
+                hit = self._find_saved_asset(msg_id, i, platform=platform,
+                                             group_id=group_id)
                 if hit is not None:
                     reuse[i] = self._reuse_saved(comp, save_contexts[i], hit)
         missing = [i for i, (r, _) in enumerate(reuse) if r is None]
@@ -433,7 +429,12 @@ class MediaWardenStar(Star):
 
         batch.duration_s = time.time() - t0
         text = format_batch(batch)
-        yield event.plain_result(text)
+        # reply_to_original: 把回执挂成对原消息的引用(默认关闭 = v1.9 的实际行为)
+        reply_prefix = self._reply_prefix(msg_id)
+        if reply_prefix:
+            yield event.chain_result(reply_prefix + [Plain(text)])
+        else:
+            yield event.plain_result(text)
         for extra in self._build_previews(event, batch):
             yield extra
         if self.cfg.at_on_save_failure and batch.fail_count > 0:
@@ -499,8 +500,8 @@ class MediaWardenStar(Star):
         用 Semaphore 限流到 cfg.max_concurrent.
         单个失败 -> 该项是 DownloadError,其他继续;最后返回 list[Downloaded|DownloadError].
 
-        v1.9: 每个组件按「原 url 重试 -> OneBot get_image 重取新链接 -> 组件本地副本」
-        三级回退;三级都失败才记失败(入索引库 + 写日志)。
+        v1.9: 每个组件按「本地缓存 -> 原 url 重试 -> OneBot get_image/get_msg 重取 ->
+        组件本地副本 -> 迟到缓存重查」逐级回退;全败才记失败(入索引库 + 写日志)。
         """
         if not media:
             return []
@@ -517,24 +518,27 @@ class MediaWardenStar(Star):
 
         return await asyncio.gather(*(_one(c) for c in media))
 
-    async def _cached_copy(self, comp: Component):
-        """查 QQ 本地图片缓存(按消息段里的 MD5)。命中就直接用,不走网络。
+    async def _cached_copy(self, comp: Component) -> tuple:
+        """查 QQ 本地图片缓存(按消息段里的 MD5)。返回 (Downloaded|None, 未命中候选)。
 
-        QQ 收到图片时已经按 MD5 存了副本，而消息段的 `data.file` 就是那个 MD5。
+        QQ 收到图片时已经按 MD5 存了副本，而消息段的 data.file 就是那个 MD5。
         链接因 rkey 过期返回 400 时，本地这份是唯一还能拿到的来源 —— 所以放在
         **最前面**：有就不必再等一次注定失败的 http。
+
+        v1.10: 未命中的候选随返回值一起给出(调用方写进失败回执),不再挂到
+        self._local_cache_misses —— 并发下载时那是跨组件的共享状态。
         """
         if not self.cfg.get_media_fallback:
-            return None
+            return None, []
         cands = _local_cache_candidates(comp)
         if not cands:
-            return None
+            return None, []
         try:
             from .warden.localcache import find_cached_image as _find  # 局部导入便于测试打桩
         except Exception as e:  # noqa: BLE001
             self._log(f"localcache module unavailable: {e!r}")
-            return None
-        misses = []
+            return None, []
+        misses: list[str] = []
         for cand in cands:
             try:
                 path = await asyncio.to_thread(_find, cand)
@@ -555,9 +559,8 @@ class MediaWardenStar(Star):
                 continue
             data.origin = f"localcache:{path}"
             self._log(f"used QQ local cache for {comp.kind}: {path}")
-            return data
-        self._local_cache_misses = misses
-        return None
+            return data, misses
+        return None, misses
 
     async def _download_one(self, comp: Component, event=None):
         """单个组件的下载回退链;全失败时抛首个(最对症的)下载错误。
@@ -567,14 +570,14 @@ class MediaWardenStar(Star):
         ① 正常 http / 组件 fetcher(内部含 raw 本地副本回退)
         ② 向 bot 重取(get_image / get_msg) —— 只对「消息段里有新 url」的情况有效
         ③ 组件本地副本(temp 缓存 / raw 转换)
+        ④ 等一等再查本地缓存(客户端可能刚把图下载下来)
         """
-        cached = await self._cached_copy(comp)
+        cached, misses = await self._cached_copy(comp)
         if cached is not None:
             return cached
-        attempts: list = []
-        _misses = list(getattr(self, "_local_cache_misses", None) or [])
-        if _misses:
-            attempts.append("qcache: no local copy for " + ", ".join(_misses[:2]))
+        attempts: list[str] = []
+        if misses:
+            attempts.append("qcache: 本地无副本 " + ", ".join(misses[:2]))
         try:
             dl = await download(
                 comp, fetcher=astrbot_component_fetcher,
@@ -590,15 +593,9 @@ class MediaWardenStar(Star):
             dl = None
             # 第二级: 向 bot 重取(get_image / get_msg) —— rkey 过期唯一能救回来的路
             if self.cfg.get_media_fallback and event is not None:
-                self._refetch_last_error = None
-                self._refetch_trace = []
-                dl = await self._refetch_media(comp, event)
+                dl, trace = await self._refetch_media(comp, event)
                 if dl is None:
-                    tr = getattr(self, "_refetch_trace", None) or []
-                    why = getattr(self, "_refetch_last_error", None)
-                    detail = (tr[-1] if tr else (str(why) if why is not None
-                                                 else "no usable ref"))
-                    attempts.append(f"refetch: {detail}")
+                    attempts.append(f"refetch: {trace[-1] if trace else 'no usable ref'}")
             # 第三级: 组件本地副本(napcat 的 temp 缓存 / raw 转换) —— 与 event 无关,总是试
             if dl is None:
                 try:
@@ -609,42 +606,39 @@ class MediaWardenStar(Star):
                     self._log(f"used local copy for {comp.kind} after download failure")
             if dl is None:
                 # 第四级: 等一会儿再看 QQ 本地缓存。
-                # (只在真的全败时才走, 单次代价 = sum(_LATE_CACHE_DELAYS_S))
-                for delay in _LATE_CACHE_DELAYS_S:
-                    await asyncio.sleep(self._sleep_scale * delay)
-                    dl = await self._cached_copy(comp)
-                    if dl is not None:
-                        self._log(
-                            f"late local cache hit after {delay}s for {comp.kind}"
-                        )
-                        break
+                async def _probe():
+                    got, _ = await self._cached_copy(comp)
+                    return got
+
+                dl = await self._late_cache(_probe, f"late local cache ({comp.kind})")
             if dl is None:
                 primary.fallback_error = "; ".join(attempts[:3])[:300]
                 raise primary
         return dl
 
     async def _refetch_media(self, comp: Component, event):
-        """二级补救:向 bot 重取这张图的可用链接。
+        """二级补救:向 bot 重取这张图的可用链接。返回 (Downloaded|None, trace)。
 
         两条路,依次尝试:
 
-        ① `get_image` —— 对 (候选值 × 参数形态 `file`/`file_id`/`id`/`image`) 组合试。
-           注意 napcat 的 `get_image` 其实**只认它自己发出去的消息文件 uuid**
-           （`FileNapCatOneBotUUID`，内存 map，进程重启或超过 ttl 就没了）；用文件名
-           当候选时会走到 `FileApi.searchForFile`，图片不在那个缓存里 → `file not found`。
-        ② `get_msg` —— 拿消息 id 让 napcat 重新解析整条消息。它的 picElement → OB11
-           转换器每次都调 `getImageUrl()`，即用**当前** rkey 重新拼链接，所以这是唯一
+        ① get_image —— 对 (候选值 × 参数形态 file/file_id/id/image) 组合试。
+           注意 napcat 的 get_image 其实**只认它自己发出去的消息文件 uuid**
+           （FileNapCatOneBotUUID，内存 map，进程重启或超过 ttl 就没了）；用文件名
+           当候选时会走到 FileApi.searchForFile，图片不在那个缓存里 → file not found。
+        ② get_msg —— 拿消息 id 让 napcat 重新解析整条消息。它的 picElement → OB11
+           转换器每次都调 getImageUrl()，即用**当前** rkey 重新拼链接，所以这是唯一
            能绕开「消息里那条已过期 url」的路(2026-10-11 线上 400 的根因)。
 
-        全败时返回 None,调用方跳到第三级本地副本。
+        全败时返回 (None, trace),调用方跳到第三级本地副本。
+        v1.10: trace 随返回值给出,不再写 self._refetch_trace/_refetch_last_error ——
+        那些属性在一批消息并发下载时会互相覆盖,回执里的原因会张冠李戴。
         """
         call = self._resolve_call_action(event)
         if call is None:
-            return None
+            return None, ["refetch: event has no call_action"]
         cands = _media_refetch_candidates(comp)
         old = (comp.url or "").strip()
         trace: list[str] = []
-        primary = None
         attempts = 0
 
         for cand in cands[:_MAX_REFETCH_CANDIDATES]:
@@ -655,7 +649,6 @@ class MediaWardenStar(Star):
                 try:
                     resp = await call("get_image", **{key: cand})
                 except Exception as e:  # ActionFailed / 不支持该参数形态
-                    primary = e
                     trace.append(f"get_image {key}={_short(cand)} -> {type(e).__name__}: {e}")
                     continue
                 data = resp.get("data") if isinstance(resp, dict) else None
@@ -669,9 +662,9 @@ class MediaWardenStar(Star):
                 if isinstance(fresh, str) and fresh and fresh != old:
                     dl = await self._download_fresh(comp, fresh)
                     if dl is not None:
-                        self._refetch_trace = trace
                         self._log(f"get_image refreshed url via {key} for {comp.kind}")
-                        return dl
+                        return dl, trace
+                    trace.append(f"download fresh url failed: {_short(fresh, 50)}")
                     continue
                 b64 = data.get("base64")
                 if isinstance(b64, str) and b64 and len(b64) >= 16:
@@ -679,28 +672,24 @@ class MediaWardenStar(Star):
                     if raw:
                         dl = Downloaded(data=raw, mime=None, size=len(raw))
                         dl.origin = f"base64:{_short(cand, 24)}"
-                        self._refetch_trace = trace
                         self._log(f"get_image returned base64 for {comp.kind}")
-                        return dl
+                        return dl, trace
             if attempts >= _MAX_REFETCH_ATTEMPTS:
                 break
 
         # ② get_msg:让 napcat 用当前 rkey 重新解析这条消息
         dl = await self._refetch_via_message(comp, event, trace)
         if dl is not None:
-            self._refetch_trace = trace
-            return dl
+            return dl, trace
 
-        self._refetch_trace = trace
-        self._refetch_last_error = primary
         self._log(f"refetch exhausted for {comp.kind} "
                   f"({len(cands)} candidate(s), get_image={attempts})")
         for line in trace[-4:]:
             self._log(f"  refetch: {line}")
-        return None
+        return None, trace
 
     async def _download_fresh(self, comp: Component, fresh: str):
-        """把重取到的新链接下载成 Downloaded;失败返回 None 并把异常记进 _refetch_last_error。"""
+        """把重取到的新链接下载成 Downloaded;失败返回 None(原因由调用方记 trace)."""
         try:
             dl = await download(
                 Component(kind=comp.kind, url=fresh,
@@ -710,11 +699,44 @@ class MediaWardenStar(Star):
                 max_bytes=self.cfg.max_file_size_bytes,
                 timeout_s=self.cfg.download_timeout_s,
             )
-        except DownloadError as e:
-            self._refetch_last_error = e
+        except DownloadError:
             return None
         dl.origin = fresh
         return dl
+
+    async def _late_cache(self, probe, label: str):
+        """等客户端把图下载下来再查一次本地缓存(见 _LATE_CACHE_DELAYS_S).
+
+        媒体与转发节点图共用这一段 —— 两处以前各写一份 sleep 循环。
+        probe 是无参 async 函数,命中返回非 None。
+        """
+        for delay in _LATE_CACHE_DELAYS_S:
+            await asyncio.sleep(self._sleep_scale * delay)
+            got = await probe()
+            if got is not None:
+                self._log(f"{label} hit after {delay}s")
+                return got
+            self._log(f"{label} still miss after {delay}s")
+        return None
+
+    def _reply_prefix(self, msg_id) -> list:
+        """reply_to_original 打开时,给回执套一个 Reply(引用原消息).
+
+        特性探测:拿不到 Reply 组件/构造失败就返回空列表,回执退化为纯文本 ——
+        一个展示开关不该让保存失败。
+        """
+        if not self.cfg.reply_to_original:
+            return []
+        if not msg_id or str(msg_id) in ("nomsg", "nonemsg", "0"):
+            return []
+        try:
+            from astrbot.api.message_components import Reply  # type: ignore
+        except Exception:
+            return []
+        try:
+            return [Reply(id=str(msg_id))]
+        except Exception:
+            return []
 
     async def _refetch_via_message(self, comp: Component, event, trace: list):
         """用 `get_msg` 重取:napcat 会用当前 rkey 重新生成这条消息里的图片链接。"""
@@ -805,7 +827,8 @@ class MediaWardenStar(Star):
 
     def _failed(self, comp: Component, ctx: SaveContext, stage: str,
                 err: str, err_obj=None, *, url: Optional[str] = None,
-                subject: Optional[str] = None) -> AssetResult:
+                subject: Optional[str] = None,
+                failure_kind: Optional[str] = None) -> AssetResult:
         """统一构造失败结果:失败原因分类 + 入索引库 + 写日志。"""
         note = getattr(err_obj, "fallback_error", None)
         if self._index is not None:
@@ -825,18 +848,26 @@ class MediaWardenStar(Star):
         self._log(f"{stage} failed for {comp.kind}: {err[:200]}")
         return AssetResult(
             kind=comp.kind, ok=False, err=err,
-            failure_kind="fetch" if classify_error(err) == "fetch" else "save",
+            failure_kind=failure_kind or classify_error(err),
             note=note,
         )
 
-    def _find_saved_asset(self, msg_id: str, idx: int) -> Optional[dict]:
-        """找同一条消息同一 idx 已落盘的资产(用于复用,不再下载)。"""
+    def _find_saved_asset(self, msg_id: str, idx: int, *,
+                          platform: Optional[str] = None,
+                          group_id: Optional[str] = None) -> Optional[dict]:
+        """找同一条消息同一 idx 已落盘的资产(用于复用,不再下载).
+
+        v1.10: 带上 platform/group_id 过滤 —— 只按 msg_id 查会让不同群/不同平台的
+        同名 msg_id 互相顶掉,复用出别人的文件。
+        """
         if self._index is None or not msg_id or idx is None:
             return None
         if msg_id in ("nomsg", "nonemsg", "0"):
             return None
         try:
-            rows = self._index.find_by_msg(msg_id)
+            rows = self._index.find_by_msg(
+                msg_id, platform=platform, group_id=group_id
+            )
         except Exception as e:
             self._log(f"index lookup failed: {e!r}")
             return None
@@ -1082,6 +1113,17 @@ class MediaWardenStar(Star):
         nodes = from_component(comp)
         results: list[AssetResult] = []
 
+        # v1.10: 节点内容真的空(既没有 inline 也没有 get_forward_msg 结果)时,
+        # 落一个 nodes=null 的 JSON 只是"看起来成功"的垃圾 —— 明确报失败并入库。
+        if not nodes:
+            return [self._failed(
+                comp, ctx, "forward",
+                "forward: 未取到节点内容(get_forward_msg 为空 / 节点无内容)",
+                url=comp.url,
+                subject=f"forward:{ctx.msg_id}#{ctx.idx}",
+                failure_kind="fetch",
+            )]
+
         want_image = self.cfg.forward_render_mode in ("image", "both")
         want_json = self.cfg.forward_render_mode in ("json", "both")
 
@@ -1115,18 +1157,28 @@ class MediaWardenStar(Star):
                     self._log(f"avatar fetch failed: {e!r} — proceed without")
 
         if want_json or not want_image:
-            payload = json.dumps(
-                {"forward": True, "node_count": len(nodes),
-                 "nodes": (comp.meta or {}).get("nodes")},
-                ensure_ascii=False, indent=2,
-            )
             comp_json = Component(
                 kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
                 raw=comp.raw,
             )
             try:
+                payload = json.dumps(
+                    {"forward": True, "node_count": len(nodes),
+                     "nodes": (comp.meta or {}).get("nodes")},
+                    ensure_ascii=False, indent=2,
+                )
                 sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
                                          mime="application/json")
+            except (TypeError, ValueError, OSError, RuntimeError) as e:
+                # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
+                # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
+                results.append(self._failed(
+                    comp, ctx, "json",
+                    f"json save: {type(e).__name__}: {e}", e,
+                    subject=f"forward_json:{ctx.msg_id}#{ctx.idx}",
+                    failure_kind="save",
+                ))
+            else:
                 if self._index is not None:
                     try:
                         self._index.record(
@@ -1140,8 +1192,6 @@ class MediaWardenStar(Star):
                 results.append(AssetResult(kind="forward", ok=True,
                                            path=sr.path, size=len(payload),
                                            reused=sr.reused))
-            except ValueError as e:
-                results.append(AssetResult(kind="forward", ok=False, err=f"json save: {e}"))
 
         if want_image and nodes:
             # 节点内图片也并发下载
@@ -1183,22 +1233,19 @@ class MediaWardenStar(Star):
                                 return dl.data
                             except DownloadError as e:
                                 last = e
-                                # v1.9.9 诊断: 候选序号 + 完整 url + 败因(用完即删)
+                                # v1.10.0: 本行起不再「用完即删」 ---- 候选序号/完整 url/败因是区分「url 死了」与「请求姿势不对」的唯一线索
                                 self._log(
                                     f"fwd dl candidate {ci + 1}/{len(candidates)} "
                                     f"failed: {e} | url={cand}"
                                 )
                         # 等客户端落盘后再查一次本地缓存(见 _LATE_CACHE_DELAYS_S)
-                        for delay in _LATE_CACHE_DELAYS_S:
-                            await asyncio.sleep(self._sleep_scale * delay)
-                            cached = await self._forward_local_cached(ref)
-                            if cached is not None:
-                                self._log(
-                                    f"fwd late local cache hit after {delay}s: "
-                                    f"{ref.get('file') if isinstance(ref, dict) else ref}"
-                                )
-                                return cached
-                            self._log(f"fwd late cache still miss after {delay}s")
+                        ref_name = ref.get("file") if isinstance(ref, dict) else ref
+                        cached = await self._late_cache(
+                            lambda: self._forward_local_cached(ref),
+                            f"fwd late local cache ({_short(ref_name, 40)})",
+                        )
+                        if cached is not None:
+                            return cached
                         raise last if last is not None else DownloadError(
                             f"no candidate url for {url!r}")
 
@@ -1327,9 +1374,10 @@ class MediaWardenStar(Star):
         lines = [f"## 最近 {len(rows)} 条"]
         for r in rows:
             lines.append(
-                f"- [{r['ts']}] {r['platform']}:{r['group_id']} "
-                f"sender={r['sender_id']} msg={r['msg_id']}#{r['idx']} "
-                f"kind={r['kind']} size={r['size']} -> {r['path']}"
+                f"- [{time.strftime('%m-%d %H:%M', time.localtime(r['ts']))}] "
+                f"{r['platform']}:{r['group_id']} sender={r['sender_id']} "
+                f"msg={r['msg_id']}#{r['idx']} kind={r['kind']} "
+                f"size={r['size']} -> {r['path']}"
             )
         yield event.plain_result("\n".join(lines))
 
@@ -1367,6 +1415,19 @@ class MediaWardenStar(Star):
             yield event.plain_result("[Warden] (没有失败记录)")
             return
         lines = [f"## 最近 {len(rows)} 条保存失败"]
+        # v1.10: failure_stats 之前是死代码,现在把"反复失败的都是谁"露出来
+        try:
+            st = self._index.failure_stats()
+        except Exception as e:
+            st = {}
+            self._log(f"failure_stats failed: {e!r}")
+        if st.get("total"):
+            lines.append(f"累计 {st['total']} 次失败")
+            top = [x for x in st.get("top", []) if x.get("count", 0) > 1]
+            if top:
+                lines.append("  反复失败:")
+                for x in top:
+                    lines.append(f"    - {x['subject']} × {x['count']}")
         for r in rows:
             ts = time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))
             lines.append(
@@ -1416,6 +1477,16 @@ class MediaWardenStar(Star):
             except ValueError:
                 yield event.plain_result(f"[Warden] 非法 idx: {idx_s!r}")
                 return
+        # v1.10: 16 位十六进制按内容 sha 反查(「这张图还在别处出现过吗」)
+        if idx_filter is None and _is_sha16(msg_id):
+            rows = self._index.find_by_sha(msg_id.lower())
+            if not rows:
+                yield event.plain_result(f"[Warden] 未找到 sha16={msg_id} 的资产")
+                return
+            lines = [f"## sha16={msg_id} 出现 {len(rows)} 次"]
+            lines.extend(_format_asset_row(r) for r in rows)
+            yield event.plain_result("\n".join(lines))
+            return
         rows = self._index.find_by_msg(msg_id)
         if idx_filter is not None:
             rows = [r for r in rows if r["idx"] == idx_filter]
@@ -1423,16 +1494,7 @@ class MediaWardenStar(Star):
             yield event.plain_result(f"[Warden] 未找到 msg_id={msg_id} 的资产")
             return
         lines = [f"## lookup msg_id={msg_id} ({len(rows)} 条)"]
-        for r in rows:
-            fwd = ""
-            if r.get("forward_meta"):
-                fwd = f" | fwd={r['forward_meta']}"
-            lines.append(
-                f"- id={r['id']} [{r['ts']}] {r['platform']}:{r['group_id']} "
-                f"sender={r['sender_id']} idx={r['idx']} "
-                f"kind={r['kind']} size={r['size']} "
-                f"sha16={r.get('sha16')}{fwd} -> {r['path']}"
-            )
+        lines.extend(_format_asset_row(r) for r in rows)
         yield event.plain_result("\n".join(lines))
 
     @filter.command("warden prune")
@@ -1453,7 +1515,10 @@ class MediaWardenStar(Star):
         cutoff = int(time.time()) - days * 86400
         try:
             n = self._index.prune_older_than(cutoff)
-            yield event.plain_result(f"[Warden] 已删除 {n} 条索引记录 (> {days} 天前)")
+            yield event.plain_result(
+                f"[Warden] 已删除 {n['assets']} 条索引记录"
+                f"（另有 {n['failures']} 条失败记录）(> {days} 天前)"
+            )
         except Exception as e:
             yield event.plain_result(f"[Warden] prune 失败: {e!r}")
 

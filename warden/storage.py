@@ -292,8 +292,7 @@ class Storage:
             raise ValueError(
                 f"data {len(data)}B exceeds max_bytes {self.max_bytes}"
             )
-        # path-safety: 解析后路径必须在 self._real_root 内
-        self._real_root = self._real_root or os.path.realpath(self.root)
+        # path-safety: 解析后路径必须在 self._real_root 内(见 __init__)
         digest = _blake_digest(data) if self.dedupe else None
 
         if digest and self.dedupe:
