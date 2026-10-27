@@ -1,14 +1,44 @@
-# 交接文档 · astrbot-plugin-media-warden v1.9.9
+# 交接文档 · astrbot-plugin-media-warden v1.10.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.9.9（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步）
+- 版本：v1.10.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.10.0 是重构/补齐版，**外部行为只有下面 §1.0 列的几处变化**）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
-- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=19, total=102)`
+- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 各单独一次提交（显式路径，未用 `git add -A`）
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=27, total=110)`
+
+
+## 1.0 v1.10.0（重构 + 补齐，当前版本）
+
+审出来的问题分三类，一次处理完：**看起来有其实没有**的配置、**只有测试在用**的索引能力、**两份走散的重复实现**。
+
+### 外部行为变化（只有这几处）
+- `reply_to_original` 从「0 处生产引用」变成真生效（回执带 `Reply(id=msg_id)`，适配器不支持则退化纯文本），**默认值同步改为 `false`** —— 不这样改，升级的人会突然被引用回复刷屏。
+- `forward_image_engine` 选 `playwright` / `wkhtml` 时：启动日志明确告警 + 继续用 PIL（以前文档说会降级 JSON，实际两样都没发生）。
+- 转发节点取到空内容时**记为失败并入库**（以前落一个 `{"nodes": null}` 还回 ✅）。
+- `/warden prune` 现在把同期失败记录数也报出来（以前静默删掉、只报索引行数）。
+
+### 被删的 API（别在旧笔记里继续引用）
+`warden/downloader.py`：`download(fallback=…)`、`astrbot_component_fetcher(refresher=…)`、`download_many()`；`main.py:_get_media_url_candidates()`；`warden/config.py:from_raw()`；`warden/index.py:prune_failures_older_than()`；`warden/components.is_text_only()`；`warden/reporter.py:failure_summary()`。
+
+### 签名变化（改测试/改调用前先看这里）
+- `_cached_copy(comp) -> (Downloaded|None, misses: list[str])`（不再写 `self._local_cache_misses`）
+- `_refetch_media(comp, event) -> (Downloaded|None, trace: list[str])`（不再写 `self._refetch_trace` / `_refetch_last_error` —— 那是在 self 上放按组件状态，并发下会串味）
+- `_download_fresh(comp, fresh)` 失败只返回 None，不存状态
+- `_late_cache(probe, label)`：媒体与转发节点图共用同一份迟到重查循环
+- `_reply_prefix(msg_id) -> list`：决定这条回执带不带 `Reply`
+- `_failed(..., failure_kind=None)`：`failure_kind` 缺省走 `classify_error(err)`（`"other"` 因此可达）
+- `_find_saved_asset(msg_id, idx, *, platform=None, group_id=None)`
+- `AssetIndex.open()` 会跑 `_ensure_columns()`（`PRAGMA user_version` + 缺列 `ALTER TABLE`），迁移结果放在 `index.migrated`；**建表与建索引分成 `SCHEMA_TABLES` / `SCHEMA_INDEXES`**，顺序不能换
+- `prune_older_than(cutoff_ts) -> {"assets": n, "failures": m}`
+
+### 结构
+- `main.py` 1534 行；`warden/forwarder.py` 606 行（两份渲染器合成 `render()` / `render_with_images()` → `_paint(nodes, node_pil)`）
+- `warden/components.py` 只有一条归一化路径 `_coerce(t, _Fields, raw)`
+- `warden/reporter.py` 的 fetch/save 分布只算一次（`_split_fetch_save()` + `_reason_line()`）
 
 ## 1.-6 真根因（2026-10-11 晚取证并修复）：**NapCat 4.18.4 在发一条早就死掉的 rkey**
 
@@ -112,10 +142,12 @@ NapCat **4.18.37 自己的包有缺陷**，与本插件无关，但会盖掉「�
 转发节点图只能靠上面的「迟到重查」。转发失败率对照（按天 `forward fetched` vs `aborted`）：
 9-20~10-06 是 0%~4.8%，10-11 当天 `5 / 5 = 100%`。
 
-### 诊断输出（临时，确认修复后可以删）
+### 诊断输出（保留）
 
 - 转发节点图每个候选 url 失败时打全 url：
   `fwd dl candidate 1/2 failed: http 400 for '…' | url=https://multimedia.nt.qq.com.cn/download?appid=…`
+- 这段日志 v1.9.9 时标成「取证完即删」，**v1.10.0 决定保留**：它是线上唯一能区分「url 死了」和「请求姿势不对」的线索，三条字段（候选序号 / 完整 url / 败因）缺一不可。
+
 
 ## 1.-4 转发节点图为什么难救（**v1.9.8 的取证，结论已被 §1.-5 修正**）
 
@@ -270,7 +302,7 @@ v1.9.2 的修法 —— 加第二条重取路径 **`get_msg`**：
 - 新增 `_media_urls_from_resp(resp, old=…, hint=…)`：兼容 `{"data":{"message":[…]}}` 与
   `{"message":[…]}` 两种包裹；按 `data.file` 与候选文件名匹配挑对那一段（多图消息），
   匹配不到退回第一个可用图。
-- 每一跳都进 `_refetch_trace`；全败时日志打 `refetch: …` 最后 4 条，回执里带
+- 每一跳都进 `trace` 列表（v1.9.2 时存在 `self._refetch_trace`，**v1.10.0 改成 `_refetch_media()` 的返回值**）；全败时日志打 `refetch: …` 最后 4 条，回执里带
   `refetch: <最后一跳>` —— 不再只有一句 "exhausted"。
 - 顺带：`_refetch_media` 现在**没有候选也会试 `get_msg`**（v1.9.1 里 `if not cands: return None` 会短路掉这条路）。
 
@@ -312,18 +344,18 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 - `download()` 新增 `fallback: Optional[Callable[[], Awaitable[Downloaded]]]`：主 fetcher（含重试）耗尽后跑一次补救链，补救失败则 `raise last_exc`（原始错误）。
 - `_local_fallback(component, max_bytes)`：只用本地副本解析（`_url_to_local_path(url)` → `_url_to_local_path(meta["path"])` → `raw.convert_to_file_path()` → `raw.convert_to_base64()`）。
 - `main.py:_download_one()` 改为三级：① `download(comp, fetcher=astrbot_component_fetcher, retries=cfg.download_retries, …)`；② 若 `cfg.get_media_fallback and event is not None` → `_refetch_media()`（v1.9.0 里叫 `_fresh_media_url()`，v1.9.1 重写）发 OneBot `get_image` 换新链接并用 `aiohttp_fetcher` 重下（成功后 `dl.origin = fresh`）；③ `if dl is None:` **无条件**跑 `_local_fallback`（与 event 无关，这是本次修掉的一处死代码：原实现把第 ③ 级关在 `event is not None` 分支里）。三级全败才 `primary.fallback_error = "; ".join(attempts[:3])[:300]` 并 `raise primary`。
-- `_fresh_media_url()`（v1.9.0 版，**v1.9.1 已被 `_refetch_media()` 取代，见 §1.1**）：`bot.call_action("get_image", file=<fileid>)`，fileid 取 `meta["fileid"]` → `comp.file_id` → `meta["path"]` → `_url_fileid(comp.url)`；响应经 `_get_media_url_candidates()` 兼容 dict/`data`/`url`/`file`/`file_url`/`path` 去重，返回第一个 ≠ 旧 url 的候选。
+- `_fresh_media_url()`（v1.9.0 版，**v1.9.1 已被 `_refetch_media()` 取代，见 §1.1**）：`bot.call_action("get_image", file=<fileid>)`，fileid 取 `meta["fileid"]` → `comp.file_id` → `meta["path"]` → `_url_fileid(comp.url)`；响应经 `_get_media_url_candidates()` 兼容 dict/`data`/`url`/`file`/`file_url`/`path` 去重，返回第一个 ≠ 旧 url 的候选。（该函数 v1.10.0 已删 —— 0 生产引用；现在 `_refetch_media` 自己解响应。）
 - `_recover_original_urls()` 恢复原始 url 时同时把 `_url_fileid(url)` 存进 `comp.meta["fileid"]`（rkey 会过期，fileid 是重取键）；v1.9.1 起同时存 `comp.meta["raw_file"] = ref["file"]`。
 
 ### 2) 失败原因区分
 
-- `warden/reporter.py`：`AssetResult` 新增 `failure_kind` / `note`；新增 `classify_error(err) -> "fetch"|"save"|"other"`（fetch 判据：`image download failed` / `download:` / `get_media:` / `http ` / `timeout` / `connection error`；save 判据：`save:` / `json save:` / `render:`）、`failure_summary()`、`BatchResult.fail_items` / `failure_breakdown()` / `failure_phrase()`。
+- `warden/reporter.py`：`AssetResult` 新增 `failure_kind` / `note`；新增 `classify_error(err) -> "fetch"|"save"|"other"`（fetch 判据：`image download failed` / `download:` / `get_media:` / `http ` / `timeout` / `connection error`；save 判据：`save:` / `json save:` / `render:`）、`BatchResult.fail_items` / `failure_breakdown()` / `failure_phrase()`。（`failure_summary()` 在 v1.10.0 被删 —— 它和 `failure_phrase()` 算的是同一件事。）
 - `format_batch()` 表头带原因：全 fetch → `部分保存失败 (k/N) — 下载失败（源链接失效）`，全 save → `— 落盘失败`，混合 → `— 下载失败 X + 落盘失败 Y`；多一行 `原因:`；明细项末尾追加 `[note]`。
 - @ 触发者文案：`N 个媒体没能保存 —— 下载失败(源链接已失效)，X/Y 已保存`（全 save / 混合另有措辞）。
 
 ### 3) 失败入库 + /warden fail
 
-- `warden/index.py` 新增 `failures` 表（`ts/platform/group_id/sender_id/msg_id/idx/kind/err/subject/url/attempts`）+ `ix_fail_ts` / `ix_fail_subject`；新增 `failure_subject()`（`fileid:<id>` 优先，其次 `url:<host><path>`，丢 query 吸收 rkey/sign）、`record_failure()`（`attempts` = 同 subject+kind 历史条数+1）、`recent_failures()`、`failure_stats()`、`prune_failures_older_than()`；`stats()` 增加 `failures` / `failures_by_kind`，`prune_older_than()` 同时清同期 failures。
+- `warden/index.py` 新增 `failures` 表（`ts/platform/group_id/sender_id/msg_id/idx/kind/err/subject/url/attempts`）+ `ix_fail_ts` / `ix_fail_subject`；新增 `failure_subject()`（`fileid:<id>` 优先，其次 `url:<host><path>`，丢 query 吸收 rkey/sign）、`record_failure()`（`attempts` = 同 subject+kind 历史条数+1）、`recent_failures()`、`failure_stats()`（`prune_failures_older_than()` 在 v1.10.0 被并入 `prune_older_than()`，后者现在返回 `{"assets": n, "failures": m}`）；`stats()` 增加 `failures` / `failures_by_kind`，`prune_older_than()` 同时清同期 failures。
 - `main.py` 新增 `_failed()`：统一写日志 + `record_failure()` + 返回带 `failure_kind` / `note` 的 `AssetResult`；`attempts > 1` 时 note 追加 `[历史第 N 次,上次 MM-DD HH:MM]`。
 - 新命令 `/warden fail [N]`（ADMIN，默认 10、上限 50）；`/warden stats` 增 `failures:` 与 `failures_by_kind:`。
 
@@ -355,15 +387,31 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `CHANGELOG.md` | v1.9.0 … v1.9.6 记录 |
 | `HANDOVER.md` | 本文档 |
 
+### 3.1 v1.10.0 主要修改文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `main.py`（1534 行） | 删 `_get_media_url_candidates`；`_cached_copy` / `_refetch_media` 改返回元组；抽 `_late_cache` / `_reply_prefix` / `_is_sha16` / `_format_asset_row`；空转发记失败；JSON 分支 `json.dumps` 进 try；`_failed` 用 `classify_error`；`_find_saved_asset` 带 platform/group；`/warden lookup <sha16>` + `/warden fail` 反复失败 top + prune 双计数 + list 可读时间；启动时告警未实现引擎并真探 Pillow |
+| `warden/forwarder.py`（606 行） | 两份渲染器合一 → `_paint(nodes, node_pil)`；`_line_h` / `_wrap_text_simple` 提升到模块级 |
+| `warden/components.py` | 单一 `_coerce(t, _Fields, raw)`；`_Fields.of_obj/of_dict`；face/image 两条路径统一 |
+| `warden/reporter.py` | 删 `failure_summary`；`_split_fetch_save()` + `_reason_line()` |
+| `warden/index.py` | `SCHEMA_TABLES`/`SCHEMA_INDEXES` 分离 + `_ensure_columns()` + `PRAGMA user_version=1` + `index.migrated`；`prune_older_than` 返回 dict；删 `prune_failures_older_than`；`find_by_msg(platform=, group_id=)` |
+| `warden/downloader.py` | 删 `download(fallback=)` / `astrbot_component_fetcher(refresher=)` / `download_many` |
+| `warden/avatar.py` | aiohttp 按需导入；文档更正（5MB 上限 / 默认 10s） |
+| `warden/config.py` | 删 `from_raw`；`VERSION=1.10.0`；`reply_to_original` 默认 `false` |
+| `warden/localcache.py` | 删死分支 `_match_in(recursive=)`；文档改为「get_msg 确实能用当前 rkey 重签」 |
+| `_conf_schema.json` | 第 6 组「日志」（`log_to_stdout`）；`max_file_size_mb` / 引擎 / `reply_to_original` 的 hint 诚实化 |
+| `_smoke.py`（110 项） | 9 个新测试 + 4 个依赖被删 API 的测试重写 |
+
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=18, total=101)`
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=27, total=110)`（v1.10.0）
 - `_conf_schema.json` JSON 解析通过
 - **v1.9.5 的本机实测**：8 张线上失败图逐个在 `C:\Users\chiriu\Documents\Tencent Files\` 下按 MD5 命中，单次查找 <1ms；`deadbeef…` / 短名 / 空串 / `None` 均正确返回 `None`（不误报）
 - **v1.9.5 的线上实测（20:02:19）**：`used QQ local cache for image: …\Image\C2C\Image2\74760010d20c862b46a660054f601ead.jpg` → `✅ 已保存 …20261011_200219_image_9dbbb5a0.jpg 18749B [链接已重取: localcache:…]` —— 同一张图 19:59 还是 `http 400`
-- 单测覆盖：`_url_fileid` 提取、fetch/save 分类、失败文案、三级回退三条路径、失败入库 + attempts 累加、索引复用命中/文件缺失、`/warden fail` + `stats`、`failure_stats`/`prune`、补救候选排序、`get_image` 多参数形态 + base64 返回、`get_msg` 重解析 + 多图挑段、**本地缓存命中零网络调用 / 未命中照旧回退 / `get_media_fallback=false` 时被忽略**、**转发节点图走整条 `_save_forward` 时同样零网络调用且 PNG 正常**
+- 单测覆盖：`_url_fileid` 提取、fetch/save 分类、失败文案、三级回退三条路径、失败入库 + attempts 累加、索引复用命中/文件缺失、`/warden fail` + `stats`、`failure_stats`/`prune`、补救候选排序、`get_image` 多参数形态 + base64 返回、`get_msg` 重解析 + 多图挑段、**本地缓存命中零网络调用 / 未命中照旧回退 / `get_media_fallback=false` 时被忽略**、**转发节点图走整条 `_save_forward` 时同样零网络调用且 PNG 正常**；v1.10.0 追加：schema↔配置双向对齐、组件双路径一致、AvatarCache 磁盘/LRU、旧库迁移、空转发失败、引擎告警、Reply 引用、索引按群隔离
 
 未验证：
 

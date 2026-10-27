@@ -47,3 +47,5 @@ warden_test/
 # 本地工具产物
 .codegraph/
 .irmia/
+_smoke_tmp/
+.dsh_tmp/

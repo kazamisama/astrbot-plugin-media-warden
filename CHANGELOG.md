@@ -23,6 +23,45 @@
   不转义路径空格。本机因此保留 `C:\application\NapCat\start-napcat.bat`（自提权 + 自动补 loader）
   与 `C:\application\NapCatLoader\loadNapCat.js`，细节见 `HANDOVER.md` §1.-6。
 
+## v1.10.0
+
+一次**不改外部行为**的重构 + 补齐：删掉空转的配置与死代码，把重复实现合成一份，把只有测试在用的索引能力接回命令，并补上索引 schema 迁移。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=27, total=110)`。
+
+### Removed（判明是死代码 / 空转）
+- `warden/downloader.py`：`download(fallback=…)`、`astrbot_component_fetcher(refresher=…)`、`download_many()` —— 生产路径一次都没用过（真正的补救链在 `main._download_one`），留着只会让下一个读者以为还有第二套补救。
+- `main.py:_get_media_url_candidates()`（v1.9.0 遗留、0 引用）、`import os as _os`。
+- `warden/config.py:from_raw()`（只有测试在用；测试改用 `from_raw_lenient()`）。
+- `warden/index.py:prune_failures_older_than()`（并入 `prune_older_than()`）、`warden/components.is_text_only()`、`warden/reporter.py:failure_summary()`。
+
+### Changed（重复实现合一）
+- **转发渲染**：`Forwarder.render()`（183 行）与 `_render_with_pil()`（153 行）有 134 行逐字相同（最长一段 34 行），`line_h` / `wrap_text` 各自定义两遍。现在两者只做「取字节 / 转 PIL」，然后调同一个 `_paint(nodes, node_pil)`；`line_h` / `wrap_text` 提升为模块级 `_line_h()` / `_wrap_text_simple()`。文件 606 行。
+- **组件归一化**：`_coerce_obj` / `_coerce_one` 两份并行实现已经走散（`face` 只有 object 路径支持，image 的 meta 一边叫 `path` 一边叫 `summary`）。现在只有一条 `_coerce(t, _Fields, raw)`，`_Fields.of_obj()` / `_Fields.of_dict()` 只负责取字段。
+- **失败文案**：`failure_summary()` / `failure_phrase()` / `format_batch()` 各自重算 fetch/save 分布。现在统一走 `BatchResult._split_fetch_save()` + `_reason_line()`；回执字符串一字未改（有测试锁着）。
+- **迟到缓存重查**：媒体路径与转发节点图路径各自那一份 `for delay in _LATE_CACHE_DELAYS_S` 循环，合成 `_late_cache(probe, label)`。
+
+### Fixed（之前只是「看起来有」）
+- `reply_to_original` **真正生效**：v1.9.x 里它 0 处生产引用，改什么都没用。现在回执走 `event.chain_result([Reply(id=msg_id), Plain(text)])`；适配器没有 `Reply`（或 msg_id 是 `nomsg` / `nonemsg` / `0`）时自动退化为纯文本。**默认值改为 `false`** —— 对一个从没生效过的开关改默认，等于让升级的用户突然被引用回复刷屏。
+- `forward_image_engine` 不再假装支持 `playwright` / `wkhtml`：启动日志明确告警「未实现 — 实际使用 PIL 渲染」，**继续用 PIL**，而不是静默降级成 JSON（那会让用户以为是自己配错了）。
+- `main.initialize()` 里那个 `except ImportError` 以前**永远不可能触发**（`warden/forwarder.py` 顶层不 import PIL，PIL 全在方法里）。现在真的探一次 `import PIL`，缺 Pillow 才降级 JSON —— 与文档一致。
+- `warden/avatar.py` 顶层 `import aiohttp` 改为按需导入：缺 `aiohttp` 不再让整个插件 import 失败（`_smoke.py` 的 aiohttp 桩可以继续留着，但不再是必需品）。
+- **转发节点内容为空**（`get_forward_msg` 返回空 / 节点全空）以前会把 `{"nodes": null}` 当成功落盘并回 `✅`。现在记为失败（`failure_kind="fetch"`，`subject=forward:<msg>#<idx>`），索引里看得见。
+- 转发 JSON 分支的 `json.dumps` 移进 `try`：`TypeError` / `OSError` 不再逃出 `on_group_message`（以前那种情况下这条消息连回执都没有）。
+- `_failed()` 的 `failure_kind` 改为 `classify_error(err)` 的结果：之前非 fetch 一律标 `"save"`，`"other"` 这个分类永远不可达。
+- **索引查询不再跨群串味**：`_find_saved_asset()` 带上 `platform` / `group_id` 过滤（`find_by_msg()` 支持这两个可选参数）。
+- **索引补 schema 迁移**：新增 `PRAGMA user_version` + `_ensure_columns()`（`PRAGMA table_info` 发现缺列就 `ALTER TABLE ADD COLUMN`），旧库升级不再因为缺 `forward_meta` / `subject` / `attempts` 而炸。注意**建表与建索引必须分开**（`SCHEMA_TABLES` / `SCHEMA_INDEXES`）：旧库上 `CREATE INDEX … ON failures(subject)` 会在补列之前执行而直接报错。
+
+### Added
+- `/warden lookup <sha16>`：16 位 hex 直接查内容指纹在索引里出现过几次（`find_by_sha()` 以前 0 个生产调用者）。
+- `/warden fail` 表头补「累计 N 次失败」与「反复失败」top（`failure_stats()` 以前也是死代码，只列 count>1 的）。
+- `/warden prune` 同时报失败记录数：`prune_older_than()` 返回 `{"assets": n, "failures": m}`（以前只报索引行数，失败记录被静默删掉）。
+- `/warden list` 的时间戳改成可读的 `MM-DD HH:MM`（之前直接打 epoch）。
+- `_conf_schema.json` 新增第 6 组「日志」，把一直存在却不可配的 `log_to_stdout` 放进去；`max_file_size_mb` 的 hint 不再暗示头像也受它限制（头像有独立的 5MB 上限）。
+
+### Tests
+- 冒烟 **102 → 110**（phase5 19 → 27）：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、`fetch_many` 单点失败不影响其他头像、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`reply_to_original` 走 `Reply`、索引复用按 platform/group 隔离。
+- 依赖被删 API 的 4 个测试重写：`download_many` 并发 → 直接驱动 `_download_all`；「`get_image` 重取新链接」那条被 `get_msg` 覆盖后删掉；fetcher 本地回退测试不再传 `refresher`。
+
 ## v1.9.9
 
 ### 修正 v1.9.8 的结论：转发节点图不是「无解」，而是**晚一步**
@@ -56,7 +95,7 @@ rkey url 本身已经失效，不是本插件请求姿势不对。
   只在前面的路全败时才走，代价 = `sum(_LATE_CACHE_DELAYS_S)`。
   测试里用 `_sleep_scale`/`_LATE_CACHE_DELAYS_S` 关掉真实等待。
 
-### Diagnostics（临时，取证完即删）
+### Diagnostics（保留：定位 400 的唯一线索）
 - 转发节点图每个候选 url 失败时打全 url 与败因：
   `fwd dl candidate 1/2 failed: http 400 for '…' | url=https://multimedia.nt.qq.com.cn/download?appid=…`
   —— 以前只看到「几个失败」，看不到到底是哪条 url、哪个候选、什么状态码。
@@ -359,14 +398,15 @@ NapCat 从没拉过 → 无解。已把这条写进 `HANDOVER.md §1.-4` 与 REA
 
 ## v1.4.8
 
-### ??
-- ??????????????????? QQ ???? url ? `is_origin=0` ??? `is_origin=1`?`gchat.qpic.cn` / `multimedia.nt.qq` ???????????? url?
+> **原文已损坏**：这条记录在提交 `2e7d89b` 里就已经是一串 `?`（中文在写入时丢了，git 历史里没有干净版本）。以下按该提交的 diff 与 commit message 重述，措辞是事后补的，事实部分可逐条对 diff 核。
 
-### ??
-- ???????? LANCZOS ????????????????????????
-- ?????????`max_image_width` 360 ? 720????????????????
-- ????????????????????????????
+### 转发节点图取原图
+- `gchat.qpic.cn` 的图 url 带 `is_origin=0`（缩略图），改成 `is_origin=1` 取原图；只对 `gchat.qpic.cn` / `multimedia.nt.qq` 两个域改写，其他 url 原样返回。换原图失败时仍退回缩略图 url。
 
-### ??
-- ?????? JSON?napcat/OneBot ??? forward id ?????? `get_forward_msg` ??????????/???
-- ?? forward / node ??? `forward_id`??? napcat `get_forward_msg` ?????
+### 渲染对齐
+- 图片重采样改用 LANCZOS，按气泡内宽铺满；`max_image_width` 从 360 提到 720。
+- 图片与时间戳之间加间距，不再压住时间戳。
+
+### 节点获取
+- 只有 forward id 被推过来时（内联 `nodes` 为空），通过 `get_forward_msg` 拉节点；两者都没有才降级 JSON 保存（修「空 JSON」）。
+- 解析 `forward` / `node` 段时把 `forward_id` 记进 `meta`（napcat 的 `get_forward_msg` 需要它）。

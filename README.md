@@ -22,6 +22,7 @@
 - v1.9.6：**合并转发的节点图接同一条本地缓存** —— `ForwardNode` 新增 `image_refs` 保留节点 image 段的 `file`(MD5)，`_save_forward` 拉节点图前先查本地缓存
 - v1.9.8：确认**转发节点图里的老图救不回来**（NapCat 从不下载转发节点的图片字节，`get_image` 的内存 uuid 表里也没有它们）—— 详见「已知边界」
 - v1.9.9：**迟到缓存重查** —— 三级补救全败后隔 `4s`/`12s` 再查一次 QQ 本地缓存（接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）
+- v1.10.0：**重构 + 补齐** —— 删掉空转配置与死代码（`download(fallback=)` / `download_many` / `from_raw` …），把重复实现合成一份（转发渲染双实现、组件双归一、失败文案三处），补上索引 schema 迁移、空转发记为失败、`reply_to_original` 真正生效（默认改为关闭）、`/warden lookup <sha16>` 与「反复失败」统计；冒烟 110 项
 
 ## 目录
 
@@ -65,7 +66,7 @@ pip install Pillow  # forwarder 自绘气泡
 
 ## 配置
 
-AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。schema 按 5 组组织：监听范围 / 保存与索引 / 下载与并发 / 转发渲染 / 回复行为。
+AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。schema 按 6 组组织：监听范围 / 保存与索引 / 下载与并发 / 日志 / 转发渲染 / 回复行为。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
@@ -83,7 +84,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `download_timeout_s` | `30` | 单次下载超时（> 0） |
 | `get_media_fallback` | `true` | 下载失败后的补救链：QQ 本地缓存（按 MD5）→ OneBot `get_image` / `get_msg` 重取链接 → 组件本地副本 → 迟到缓存重查（v1.9.0+，v1.9.1 修入参，v1.9.2 加 `get_msg`，v1.9.9 加迟到重查） |
 | `forward_render_mode` | `image` | `image` \| `json` \| `both` |
-| `forward_image_engine` | `pil` | `pil` \| `playwright` \| `wkhtml`（当前仅 `pil` 落地） |
+| `forward_image_engine` | `pil` | `pil` \| `playwright` \| `wkhtml`（仅 `pil` 实现；选别的会在启动日志明确告警并继续用 PIL 渲染，不静默降级 JSON） |
 | `forward_image_width` | `720` | 转发渲染图宽度（>= 1） |
 | `forward_render_max_nodes` | `30` | 单条转发渲染最大节点数，超限降级 JSON（>= 1） |
 | `enable_user_avatar` | `true` | 是否在转发渲染中绘制节点头像 |
@@ -91,7 +92,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `avatar_timeout_s` | `10` | 单头像抓取超时 |
 | `avatar_cache_size_mb` | `50` | 头像缓存容量上限（>= 0） |
 | `avatar_platforms` | `["aiocqhttp", "qq_official"]` | 允许抓取头像的平台白名单 |
-| `reply_to_original` | `true` | 是否引用原消息回复 |
+| `reply_to_original` | `false` | 是否用 Reply 引用原消息回复（v1.10.0 起真正生效；适配器不支持 `Reply` 或拿不到 msg_id 时退化为纯文本；默认关闭 = v1.9.x 的实际行为） |
 | `reply_preview` | `true` | 是否附带第一张图作预览 |
 | `at_on_save_failure` | `true` | 保存失败时 @ 触发消息的监听对象 |
 | `log_to_stdout` | `true` | 是否把匹配消息打到日志 |
@@ -147,9 +148,9 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `/warden list [N]` | 列最近 N 条索引记录（默认 10，上限 50） |
 | `/warden stats` | 资产统计：总数 / 类型分布 / 总字节数 / db 路径 |
 | `/warden export [path]` | 导出索引为 JSON；path 必须落在 `storage_root` 内，默认 `_export.json` |
-| `/warden lookup <msg_id> [#idx]` | 反向查询该消息保存了哪些资产，可选按 idx 过滤 |
-| `/warden prune <days>` | 从索引删除 N 天前的记录（不删实际文件） |
-| `/warden fail [N]` | 列最近 N 条保存失败（默认 10，上限 50），带 attempts 与 subject（v1.9.0+） |
+| `/warden lookup <msg_id> [#idx]` / `<sha16>` | 反向查询该消息保存了哪些资产，可选按 idx 过滤；传 16 位 hex 则按内容指纹查它出现过几次（v1.10.0） |
+| `/warden prune <days>` | 从索引删除 N 天前的记录（不删实际文件），同期失败记录一并清掉并分别报数（v1.10.0） |
+| `/warden fail [N]` | 列最近 N 条保存失败（默认 10，上限 50），带 attempts 与 subject；表头带累计次数与「反复失败」top（v1.9.0+ / v1.10.0 补统计） |
 
 ## 离线自测
 
@@ -159,7 +160,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **102 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 19），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **110 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 27），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
@@ -172,11 +173,12 @@ python -m pytest -q _smoke.py
 - 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成 / json 模式不抓头像
 - 索引：写入 / recent / sha 查复用 / stats / export / lookup / prune / failure_stats
 - 预览回传与命令权限注册
+- v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离
 
 ## 已知边界
 
 - 主力验证平台为 OneBot/QQ 系（`aiocqhttp`、`qq_official`），其他平台的消息组件 schema 未逐一验证
-- `playwright` / `wkhtml` 渲染引擎为预留槽位，切换会降级 JSON
+- `playwright` / `wkhtml` 渲染引擎未实现：选了会在启动日志明确告警并继续用 PIL 渲染（v1.10.0 起不再静默降级 JSON）
 - 私聊 / 系统消息默认跳过
 - 透明 GIF / WebP 动画按首帧处理，未做帧动画合成
 - 命令权限、头像网络抓取、`image_result` 协议差异需要真实 AstrBot runtime 验证
