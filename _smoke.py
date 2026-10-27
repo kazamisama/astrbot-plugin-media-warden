@@ -83,8 +83,22 @@ def _install_stub():
         def __init__(self, text=""):
             self.text = text
 
+    class Reply:
+        def __init__(self, id=None, **kw):
+            self.id = id
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    class Image:
+        def __init__(self, file="", **kw):
+            self.file = file
+            for k, v in kw.items():
+                setattr(self, k, v)
+
     mc.At = At
     mc.Plain = Plain
+    mc.Reply = Reply
+    mc.Image = Image
     sys.modules["astrbot"] = a
     sys.modules["astrbot.api"] = ai
     sys.modules["astrbot.api.star"] = sm
@@ -159,7 +173,7 @@ from warden import (
 )
 from warden.downloader import (
     aiohttp_fetcher, astrbot_component_fetcher,
-    download, download_many, DownloadError, Downloaded,
+    download, DownloadError, Downloaded,
 )
 from warden.storage import Storage, SaveContext, render_filename, _safe_name, _guess_ext
 
@@ -170,7 +184,6 @@ from warden.storage import Storage, SaveContext, render_filename, _safe_name, _g
 DownloadError = plugin_warden.downloader.DownloadError
 Downloaded = plugin_warden.downloader.Downloaded
 download = plugin_warden.downloader.download
-download_many = plugin_warden.downloader.download_many
 aiohttp_fetcher = plugin_warden.downloader.aiohttp_fetcher
 astrbot_component_fetcher = plugin_warden.downloader.astrbot_component_fetcher
 
@@ -184,14 +197,15 @@ def banner(t):
 # =========================================================
 
 
-def test_config_from_raw_with_overrides():
-    banner("config: from_raw accepts overrides + drops unknowns")
-    cfg = MediaWardenConfig.from_raw({
+def test_config_lenient_with_overrides():
+    banner("config: lenient load accepts known overrides + drops unknowns")
+    cfg, errors = MediaWardenConfig.from_raw_lenient({
         "match_mode": "blacklist",
         "target_groups": ["aiocqhttp:111", "222"],
         "max_file_size_mb": 50,
         "unknown_field_xxx": "ignored",
     })
+    assert errors == [], errors
     assert cfg.match_mode == "blacklist"
     assert cfg.max_file_size_bytes == 50 * 1024 * 1024
     assert "aiocqhttp:111" in cfg.matched_groups_set()
@@ -1080,7 +1094,7 @@ def test_plugin_skip_text_only():
 
 
 PHASE1 = [
-    test_config_from_raw_with_overrides,
+    test_config_lenient_with_overrides,
     test_config_rejects_invalid_mode,
     test_config_rejects_zero_concurrency,
     test_config_from_raw_lenient_preserves_valid_fields,
@@ -2238,21 +2252,32 @@ def test_downloader_give_up_after_max():
     print(f"  OK -> gave up after {calls['n']} attempts")
 
 
-def test_downloader_many_concurrent():
-    banner("downloader: download_many fetches concurrently, preserves order")
+def test_plugin_download_all_concurrent():
+    banner("plugin: _download_all fetches concurrently, preserves order")
     import asyncio, time
+    tmp = tempfile.mkdtemp(prefix="warden_many_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    pl.cfg.max_concurrent = 4
+    pl.cfg.download_retries = 0
+    pl.cfg.get_media_fallback = False   # 跳过本地缓存查找,只测并发下载与顺序
+    asyncio.run(pl.initialize())
+
     comps = [_make_component(url=f"https://x/{i}.png", file_id=str(i))
              for i in range(5)]
 
     async def slow(c, **kw):
         await asyncio.sleep(0.05)
-        idx = int(c.file_id)
-        return Downloaded(data=f"img-{idx}".encode(), mime="image/png",
+        return Downloaded(data=f"img-{c.file_id}".encode(), mime="image/png",
                           size=5 + len(c.file_id))
 
-    t0 = time.time()
-    out = asyncio.run(download_many(comps, fetcher=slow, retries=0))
-    elapsed = time.time() - t0
+    orig = plugin_main.download
+    plugin_main.download = slow
+    try:
+        t0 = time.time()
+        out = asyncio.run(pl._download_all(comps, None))
+        elapsed = time.time() - t0
+    finally:
+        plugin_main.download = orig
 
     assert len(out) == 5
     assert [d.data for d in out] == [f"img-{i}".encode() for i in range(5)]
@@ -2584,11 +2609,11 @@ def test_index_count_and_prune_older_than():
     assert pl._index.count() == 5
     cutoff = int(_t.time()) - 7 * 86400
     removed = pl._index.prune_older_than(cutoff)
-    assert removed == 3
+    assert removed["assets"] == 3, removed
     assert pl._index.count() == 2
 
     removed2 = pl._index.prune_older_than(cutoff)
-    assert removed2 == 0
+    assert removed2["assets"] == 0, removed2
 
     pl._index.close()
     print(f"  OK -> removed 3, left 2")
@@ -2615,25 +2640,24 @@ def test_plugin_e2e_concurrent_download_two_images():
             mime="image/png", size=58,
         )
 
-    from warden import downloader as dl_mod
-    orig = dl_mod.aiohttp_fetcher
-    dl_mod.aiohttp_fetcher = stub_fetcher
+    # 走插件自己的并发入口(main._download_all),不是 downloader 的辅助函数
+    pl.cfg.get_media_fallback = False
+    orig = plugin_main.download
+    plugin_main.download = stub_fetcher
     try:
         comps = [
             _make_component(url="https://x/1.png", file_id="1"),
             _make_component(url="https://x/2.png", file_id="2"),
         ]
         t0 = _t.time()
-        dls = asyncio.run(dl_mod.download_many(
-            comps, fetcher=stub_fetcher, retries=0,
-        ))
+        dls = asyncio.run(pl._download_all(comps, None))
         elapsed = _t.time() - t0
 
         assert len(dls) == 2
         assert all(isinstance(d, Downloaded) for d in dls)
         assert elapsed < 0.09, f"expected < 0.09s, got {elapsed:.3f}s"
     finally:
-        dl_mod.aiohttp_fetcher = orig
+        plugin_main.download = orig
 
     pl._index.close()
     print(f"  OK -> 2 images in {elapsed:.3f}s (serial ~0.10s)")
@@ -2696,9 +2720,28 @@ def test_downloader_retries_aiohttp_client_error():
     banner("downloader: retries aiohttp.ClientError then succeeds")
     import asyncio
     import sys
-    import warden.avatar as _avatar
-    sys.modules["aiohttp"] = _avatar.aiohttp
-    aiohttp = _avatar.aiohttp
+    import types
+
+    # aiohttp_fetcher 在函数内懒导入 aiohttp;这里给它一个最小桩(带 ClientError),
+    # 用完恢复 sys.modules,避免污染后续用例。
+    aiohttp = types.ModuleType("aiohttp")
+
+    class _ClientError(Exception):
+        pass
+
+    class _ClientTimeout:
+        def __init__(self, total=None, **kw):
+            self.total = total
+
+    class _ClientSession:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("this test injects an explicit session")
+
+    aiohttp.ClientError = _ClientError
+    aiohttp.ClientTimeout = _ClientTimeout
+    aiohttp.ClientSession = _ClientSession
+    _orig_aiohttp = sys.modules.get("aiohttp")
+    sys.modules["aiohttp"] = aiohttp
 
     class _Content:
         async def iter_chunked(self, n):
@@ -2734,16 +2777,22 @@ def test_downloader_retries_aiohttp_client_error():
 
     comp = Component(kind="image", url="https://x/a.png")
     sess = _Sess()
-    out = asyncio.run(
-        download(
-            comp,
-            fetcher=aiohttp_fetcher,
-            session=sess,
-            retries=2,
-            backoff_base=0.001,
-            backoff_cap=0.01,
+    try:
+        out = asyncio.run(
+            download(
+                comp,
+                fetcher=aiohttp_fetcher,
+                session=sess,
+                retries=2,
+                backoff_base=0.001,
+                backoff_cap=0.01,
+            )
         )
-    )
+    finally:
+        if _orig_aiohttp is not None:
+            sys.modules["aiohttp"] = _orig_aiohttp
+        else:
+            sys.modules.pop("aiohttp", None)
     assert out.data == b"PNG-bytes"
     assert sess.remaining[0] == 0
     print("  OK -> retried transient ClientError then succeeded")
@@ -2811,7 +2860,7 @@ PHASE4 = [
     test_downloader_retry_transient,
     test_downloader_no_retry_on_non_transient,
     test_downloader_give_up_after_max,
-    test_downloader_many_concurrent,
+    test_plugin_download_all_concurrent,
     test_component_fetcher_local_url_reads_file,
     test_component_fetcher_fileurl_and_encoded,
     test_storage_path_safety_rejects_outside_root,
@@ -2986,7 +3035,7 @@ def test_downloader_falls_back_to_local_copy():
 
 
 def test_downloader_fallback_keeps_primary_error():
-    banner("downloader: 三级全败时保留原始错误 + fallback 说明")
+    banner("downloader: 本地副本也失败时保留原始错误 + fallback 说明")
     import asyncio
     comp = _make_component(url="https://x/a.png", file_id="f1")
     comp.meta["fileid"] = "f1"
@@ -2994,57 +3043,21 @@ def test_downloader_fallback_keeps_primary_error():
     async def http_400(c, **kw):
         raise DownloadError("http 400 for 'https://x/a.png'")
 
-    async def refresh(c):
-        return "https://x/fresh.png"
-
     orig = plugin_warden.downloader.aiohttp_fetcher
     plugin_warden.downloader.aiohttp_fetcher = http_400
     try:
         try:
-            asyncio.run(download(comp, fetcher=astrbot_component_fetcher,
-                                 retries=0, refresher=refresh))
+            asyncio.run(download(comp, fetcher=astrbot_component_fetcher, retries=0))
             raise AssertionError("expected DownloadError")
         except DownloadError as e:
             msg = str(e)
             assert "400" in msg, msg
-            # 原始 400 保留,补救链失败原因挂在 fallback_error 上
+            # 原始 400 保留,本地副本失败的原因挂在 fallback_error 上(不覆盖主错误)
             fb = getattr(e, "fallback_error", "")
             assert fb, "fallback_error should record why the rescue chain failed"
-            assert "no usable url" in fb, fb
     finally:
         plugin_warden.downloader.aiohttp_fetcher = orig
     print("  OK -> primary 400 preserved, fallback note attached")
-
-
-def test_downloader_falls_back_to_refreshed_url():
-    banner("downloader: get_image 重取的新链接把这张图救回来")
-    import asyncio
-    comp = _make_component(url="https://old.example/a.png", file_id="f1")
-    comp.meta["fileid"] = "f1"
-    calls = {"orig": 0, "fresh": 0}
-
-    async def fetcher(c, **kw):
-        if c.url.startswith("https://old."):
-            calls["orig"] += 1
-            raise DownloadError(f"http 400 for {c.url!r}")
-        calls["fresh"] += 1
-        return Downloaded(data=b"fresh-bytes", mime="image/png", size=11)
-
-    async def refresh(c):
-        return "https://new.example/a.png"
-
-    # astrbot_component_fetcher 内部调 downloader 模块全局的 aiohttp_fetcher
-    orig = plugin_warden.downloader.aiohttp_fetcher
-    plugin_warden.downloader.aiohttp_fetcher = fetcher
-    try:
-        dl = asyncio.run(download(comp, fetcher=astrbot_component_fetcher,
-                                  retries=0, refresher=refresh))
-    finally:
-        plugin_warden.downloader.aiohttp_fetcher = orig
-    assert dl.data == b"fresh-bytes"
-    assert dl.origin == "https://new.example/a.png", dl.origin
-    assert calls == {"orig": 1, "fresh": 1}, calls
-    print("  OK -> refreshed url downloaded after the original 400")
 
 
 def test_main_get_media_fallback_uses_local_copy():
@@ -3167,7 +3180,7 @@ def test_main_refetch_tries_param_forms_and_base64():
     comp = _make_component(url="https://multimedia.nt.qq.com.cn/download?fileid=FID9")
     comp.file_id = None
     comp.meta["raw_file"] = "RAW-1"
-    dl = asyncio.run(pl._refetch_media(comp, _Ev()))
+    dl, _trace = asyncio.run(pl._refetch_media(comp, _Ev()))
     assert dl is not None, "base64 branch should rescue the image"
     assert dl.data == b"PNG-FROM-BASE64", dl.data
     assert (dl.origin or "").startswith("base64:"), dl.origin
@@ -3228,7 +3241,7 @@ def test_main_refetch_via_get_msg_regenerates_url():
     try:
         comp = _make_component(url=dead)
         comp.meta["raw_file"] = "C0C9610D.jpg"
-        dl = asyncio.run(pl._refetch_media(comp, ev))
+        dl, trace = asyncio.run(pl._refetch_media(comp, ev))
         assert dl is not None, "get_msg should rescue the image"
         assert dl.data == b"FRESH-FROM-GETMSG", dl.data
         assert dl.origin == fresh, dl.origin
@@ -3237,8 +3250,7 @@ def test_main_refetch_via_get_msg_regenerates_url():
         gm = [kw for a, kw in seen_actions if a == "get_msg"][0]
         assert gm.get("message_id") == "1795993480", gm
         # trace 会说清是靠 get_msg 救回来的(回执 note 用的就是它)
-        trace = getattr(pl, "_refetch_trace", [])
-        assert any("get_msg" in t for t in trace), trace
+        assert any("get_msg" in ln for ln in trace), trace
     finally:
         plugin_warden.downloader.aiohttp_fetcher = orig_dl
         plugin_main.aiohttp_fetcher = orig_main
@@ -3375,12 +3387,12 @@ def test_index_failure_stats_and_prune():
     # prune 覆盖 failures
     old = int(_t.time()) - 10 * 86400
     n = idx.prune_older_than(int(_t.time()))
-    assert n == 0, n
+    assert n["assets"] == 0 and n["failures"] == 0, n
     assert idx.failure_stats()["total"] == 4
     idx._conn.execute("UPDATE failures SET ts = ?", (old - 86400,))
     idx._conn.commit()
     n2 = idx.prune_older_than(int(_t.time()))
-    assert n2 == 0, n2
+    assert n2["failures"] == 4, n2
     assert idx.failure_stats()["total"] == 0, idx.failure_stats()
     idx.close()
     print("  OK -> failure_stats aggregates by subject; prune clears failures too")
@@ -3648,13 +3660,258 @@ def test_main_late_local_cache_retry():
     print("  OK -> 首次 miss/网络 400 → 等待后第二次查到本地文件即成功; 始终没有仍报原错误")
 
 
+# =========================================================
+# Phase 6 (v1.10.0): 审计补齐的覆盖
+# =========================================================
+
+
+def test_conf_schema_covers_all_config_fields():
+    banner("schema: _conf_schema.json 与 MediaWardenConfig 字段一一对应")
+    import json
+    path = os.path.join(HERE, "_conf_schema.json")
+    with open(path, encoding="utf-8") as fh:
+        schema = json.load(fh)
+    fields = set()
+    for group, spec in schema.items():
+        assert "description" in spec, group
+        assert "items" in spec and isinstance(spec["items"], dict), group
+        fields |= set(spec["items"].keys())
+    expected = {f.name for f in MediaWardenConfig.__dataclass_fields__.values() if f.init}
+    missing = expected - fields
+    extra = fields - expected
+    assert not missing, f"schema 缺少字段: {sorted(missing)}"
+    assert not extra, f"schema 多出字段: {sorted(extra)}"
+    # v1.10.0: log_to_stdout 以前只存在于代码里,WebUI 里根本配不到
+    assert schema["logging"]["items"]["log_to_stdout"]["type"] == "bool"
+    print(f"  OK -> {len(expected)} 个可配字段全覆盖,{len(schema)} 个分组")
+
+
+def test_components_dict_and_object_paths_agree():
+    banner("components: OneBot dict 段与 AstrBot 对象走同一条归一化路径")
+    # face: 对象形态与 dict 形态必须得到同一个 Component
+    class _CT:
+        def __init__(self, v): self.value = v
+
+    class _Comp:
+        def __init__(self, type_name, **kw):
+            self.type = _CT(type_name)
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    obj = extract_components(_fake_event(message=[_Comp("Face", id=178)]))[0]
+    dic = extract_components(_fake_event(
+        message=[{"type": "face", "data": {"id": 178}}]))[0]
+    assert (obj.kind, dic.kind) == ("json", "json"), (obj.kind, dic.kind)
+    assert obj.meta == dic.meta == {"data": {"face_id": 178}}, (obj.meta, dic.meta)
+
+    # image: dict 段里的 path 也要进 meta(以前只有对象形态保留)
+    img = extract_components(_fake_event(message=[{
+        "type": "image",
+        "data": {"file": "a.jpg", "url": "https://x/a.png", "path": "/tmp/a.jpg"},
+    }]))[0]
+    assert img.kind == "image" and img.url == "https://x/a.png"
+    assert img.file_id == "a.jpg"
+    assert img.meta.get("path") == "/tmp/a.jpg", img.meta
+    print("  OK -> face/image 两种形态字段一致")
+
+
+def test_avatar_cache_disk_hit_and_lru():
+    banner("avatar: 磁盘命中不重复抓取 + 超限按 mtime LRU 淘汰")
+    import asyncio
+    from warden.avatar import AvatarCache
+    root = tempfile.mkdtemp(prefix="warden_avatar_")
+    payload = b"JPEG" + b"a" * 60
+    calls = []
+
+    async def fetch(url):
+        calls.append(url)
+        return payload
+
+    cache = AvatarCache(root, max_bytes=2 * len(payload), timeout_s=5)
+    p1 = asyncio.run(cache.get_or_fetch("aiocqhttp", "u1", fetcher=fetch))
+    assert p1 and os.path.isfile(p1)
+    assert len(calls) == 1 and "nk=u1" in calls[0], calls
+    os.utime(p1, (1000, 1000))
+    # 第二次命中磁盘,不再调用 fetcher
+    p1b = asyncio.run(cache.get_or_fetch("aiocqhttp", "u1", fetcher=fetch))
+    assert p1b == p1 and len(calls) == 1, calls
+
+    p2 = asyncio.run(cache.get_or_fetch("aiocqhttp", "u2", fetcher=fetch))
+    os.utime(p2, (2000, 2000))
+    p3 = asyncio.run(cache.get_or_fetch("aiocqhttp", "u3", fetcher=fetch))
+    assert p3 and os.path.isfile(p3)
+    assert not os.path.exists(p1), "最旧的头像应被 LRU 淘汰"
+    assert os.path.exists(p2), "较新的头像应保留"
+
+    async def boom(url):
+        raise RuntimeError("network down")
+
+    assert asyncio.run(cache.get_or_fetch("aiocqhttp", "u9", fetcher=boom)) is None
+
+    async def huge(url):
+        return b"x" * (cache.max_file_bytes + 1)
+
+    assert asyncio.run(cache.get_or_fetch("aiocqhttp", "u8", fetcher=huge)) is None
+    print(f"  OK -> 磁盘命中 1 次抓取;LRU 保留新文件;失败/超限返回 None")
+
+
+def test_avatar_fetch_many_isolates_failures():
+    banner("avatar: fetch_many 并发抓取,单项失败映射 None")
+    import asyncio
+    from warden.avatar import fetch_many
+
+    class _Stub:
+        async def get_or_fetch(self, platform, sender_id):
+            return None if sender_id == "bad" else f"/cache/{sender_id}.jpg"
+
+    out = asyncio.run(fetch_many(_Stub(), [("p", "ok"), ("p", "bad")], concurrency=2))
+    assert out == {("p", "ok"): "/cache/ok.jpg", ("p", "bad"): None}, out
+    assert asyncio.run(fetch_many(_Stub(), [], concurrency=2)) == {}
+    print("  OK -> 单项失败不拖累其他项")
+
+
+def test_index_migrates_legacy_schema():
+    banner("index: 旧库缺列时自动补列(PRAGMA user_version + ALTER TABLE)")
+    import sqlite3
+    tmp = tempfile.mkdtemp(prefix="warden_mig_")
+    db = os.path.join(tmp, "old.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE assets (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts INTEGER NOT NULL, platform TEXT, group_id TEXT, sender_id TEXT,"
+        " msg_id TEXT, idx INTEGER, kind TEXT, path TEXT, size INTEGER, sha16 TEXT);"
+        "CREATE TABLE failures (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts INTEGER NOT NULL, platform TEXT, group_id TEXT, sender_id TEXT,"
+        " msg_id TEXT, idx INTEGER, kind TEXT);"
+    )
+    conn.commit()
+    conn.close()
+
+    from warden.index import AssetIndex
+    idx = AssetIndex(db)
+    idx.open()
+    assert "assets.forward_meta" in idx.migrated, idx.migrated
+    assert "failures.subject" in idx.migrated, idx.migrated
+    assert "failures.attempts" in idx.migrated, idx.migrated
+    idx.record(platform="p", group_id="g", sender_id="u", msg_id="m", idx=0,
+               kind="forward", path="/x", size=1, sha16="a" * 16,
+               forward_meta={"node_count": 3})
+    _id, attempts, _ts = idx.record_failure(
+        platform="p", group_id="g", sender_id="u", msg_id="m", idx=0,
+        kind="image", err="download: http 400", subject="fileid:S")
+    assert attempts == 1
+    rows = idx.find_by_msg("m")
+    assert rows and rows[0]["forward_meta"] == {"node_count": 3}, rows
+    idx.close()
+
+    # 再开一次:已经补齐,不应重复 ALTER
+    idx2 = AssetIndex(db)
+    idx2.open()
+    assert idx2.migrated == [], idx2.migrated
+    idx2.close()
+    print("  OK -> 补列 + 再开幂等")
+
+
+def test_plugin_forward_without_nodes_reports_failure():
+    banner("plugin: 转发节点取不到内容 -> 明确失败(不再落 nodes:null 的假成功)")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_fwdempty_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+    comp = Component(kind="forward", meta={"nodes": [], "forward_id": "FID-EMPTY"})
+    ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                      sender_name="u", msg_id="m-empty", idx=0, ts=0)
+    results = asyncio.run(pl._save_forward(comp, ctx, None))
+    assert results and not results[0].ok, results
+    assert results[0].err.startswith("forward:"), results[0].err
+    assert results[0].failure_kind == "fetch", results[0].failure_kind
+    jsons = [f for _r, _d, fs in os.walk(tmp) for f in fs if f.endswith(".json")]
+    assert not jsons, jsons
+    rows = pl._index.recent_failures(5)
+    assert rows and rows[0]["kind"] == "forward", rows
+    pl._index.close()
+    print(f"  OK -> {results[0].err[:40]}... 且已入库")
+
+
+def test_plugin_warns_on_unimplemented_render_engine():
+    banner("plugin: forward_image_engine=playwright 明确告警并继续用 PIL")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_engine_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=True)
+    pl.cfg.forward_image_engine = "playwright"
+    logs = []
+    pl._log = lambda m: logs.append(m)
+    asyncio.run(pl.initialize())
+    assert any("forward_image_engine" in m and "PIL" in m for m in logs), logs
+    assert pl._forwarder is not None, "非 pil 引擎不应导致 forwarder 缺失"
+    print("  OK ->", [m for m in logs if "engine" in m][0])
+
+
+def test_plugin_reply_to_original_quotes_message():
+    banner("plugin: reply_to_original=true 时回执 chain 以 Reply 引用原消息")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_reply_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    pl.cfg.reply_to_original = True
+    asyncio.run(pl.initialize())
+
+    async def fake_download(comp, **kw):
+        return Downloaded(data=b"PNG-DATA", mime="image/png", size=8)
+
+    orig = plugin_main.download
+    plugin_main.download = fake_download
+    try:
+        ev = _fake_event(
+            group_id="g1", user_id="u1", message_id="m42",
+            message=[{"type": "image",
+                      "data": {"file": "a.jpg", "url": "https://x/a.png"}}],
+        )
+
+        async def _drive():
+            gen = pl.on_group_message(ev)
+            return await anext(gen)
+
+        out = asyncio.run(_drive())
+    finally:
+        plugin_main.download = orig
+
+    assert isinstance(out.text, list), out.text
+    assert type(out.text[0]).__name__ == "Reply", out.text
+    assert str(out.text[0].id) == "m42", out.text[0].id
+    assert "✅" in out.text[-1].text, out.text[-1].text
+
+    # 开关关闭(默认) -> 普通文本;message_id 不可用也不炸
+    pl.cfg.reply_to_original = False
+    assert pl._reply_prefix("m42") == []
+    pl.cfg.reply_to_original = True
+    assert pl._reply_prefix("nomsg") == []
+    print("  OK -> Reply(id=m42) + Plain,关闭退化为 plain_result")
+
+
+def test_main_index_reuse_is_scoped_to_platform_and_group():
+    banner("plugin: 索引复用按 platform+group 限定,不跨群顶同名 msg_id")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_scope_")
+    pl = _build_plugin_for_command(tmp, enable_index=True, log_to_stdout=False)
+    asyncio.run(pl.initialize())
+    real = os.path.join(tmp, "g2.png")
+    with open(real, "wb") as fh:
+        fh.write(b"X")
+    pl._index.record(platform="aiocqhttp", group_id="g2", sender_id="u9",
+                     msg_id="m77", idx=0, kind="image", path=real, size=1)
+    assert pl._find_saved_asset("m77", 0, platform="aiocqhttp", group_id="g1") is None
+    hit = pl._find_saved_asset("m77", 0, platform="aiocqhttp", group_id="g2")
+    assert hit is not None and hit["path"] == real, hit
+    pl._index.close()
+    print("  OK -> g1 查不到 g2 的 m77")
+
+
 PHASE5 = [
     test_url_fileid_extraction,
     test_reporter_classify_fetch_vs_save,
     test_reporter_failure_phrase_fetch_only,
     test_downloader_falls_back_to_local_copy,
     test_downloader_fallback_keeps_primary_error,
-    test_downloader_falls_back_to_refreshed_url,
     test_main_get_media_fallback_uses_local_copy,
     test_main_get_media_fallback_uses_get_image_url,
     test_main_media_refetch_candidates_prefer_raw_file,
@@ -3668,6 +3925,16 @@ PHASE5 = [
     test_main_download_prefers_qq_local_cache,
     test_forward_local_cached_uses_node_file_md5,
     test_main_late_local_cache_retry,
+    # v1.10.0: 审计补齐的覆盖
+    test_conf_schema_covers_all_config_fields,
+    test_components_dict_and_object_paths_agree,
+    test_avatar_cache_disk_hit_and_lru,
+    test_avatar_fetch_many_isolates_failures,
+    test_index_migrates_legacy_schema,
+    test_plugin_forward_without_nodes_reports_failure,
+    test_plugin_warns_on_unimplemented_render_engine,
+    test_plugin_reply_to_original_quotes_message,
+    test_main_index_reuse_is_scoped_to_platform_and_group,
 ]
 
 
