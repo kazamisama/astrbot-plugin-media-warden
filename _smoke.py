@@ -2884,11 +2884,11 @@ PHASE4 = [
 def test_recover_raw_url_overrides_local_jpeg():
     banner("recover: raw_message http url overrides PreProcessStage-jpeg'd component")
     from warden.components import Component
-    # ?? AstrBot 4.26 PreProcessStage ??????: url/file ???? jpeg
+    # 复现 AstrBot 4.26 PreProcessStage 的覆盖: url/file 都成了 jpeg 静帧
     comp = Component(kind="image", url=r"C:\\temp\\media_image_x.jpg",
                      file_id=r"C:\\temp\\media_image_x.jpg")
     media = [comp]
-    # raw_message ?? napcat ???: ?? gif ? http ??
+    # raw_message 里是 napcat 的原始段: 真实 gif 的 http 链接
     raw = {"message": [
         {"type": "text", "data": {"text": "hi"}},
         {"type": "image", "data": {
@@ -2906,7 +2906,7 @@ def test_recover_raw_url_overrides_local_jpeg():
     assert refs[0]["name"] == "ABCD.gif"
     assert refs[0]["size"] == 1226503
 
-    # ????????
+    # 恢复后组件应拿到原始链接、名字、大小
     _ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
     star = plugin_main.MediaWardenStar(_ctx, config=None)
     star._recover_original_urls(ev, media)
@@ -2925,7 +2925,7 @@ def test_recover_raw_no_http_keeps_local():
     from warden.components import Component
     comp = Component(kind="image", url=r"C:\\temp\\media_image_y.jpg")
     media = [comp]
-    # ??? url ????????(napcat ???) -> ????
+    # 只有本地路径没有 http url(非 napcat 平台) -> 不改动
     raw = {"message": [
         {"type": "image", "data": {"file": "z.jpg",
                                    "url": r"C:\\temp\\media_image_y.jpg"}},
@@ -2937,15 +2937,52 @@ def test_recover_raw_no_http_keeps_local():
     star = plugin_main.MediaWardenStar(_ctx, config=None)
     star._recover_original_urls(ev, media)
     assert comp.url == r"C:\\temp\\media_image_y.jpg", "must stay unchanged"
-    # ? raw_message ?????
+    # 没有 raw_message 时保持原样
     ev2 = _fake_event(message=[{"type": "image", "data": {}}], raw_message=None)
     star._recover_original_urls(ev2, [Component(kind="image", url="x")])
     print("  OK -> local-only raw and no-raw both leave component unchanged")
 
 
+def test_recover_pairs_refs_by_identity_not_position():
+    banner("recover: two images out of order -> each component keeps its own url")
+    from warden.components import Component
+    # 两个组件都已被 PreProcessStage 覆盖成静帧名,只有 file_id 留着原始 md5 名
+    c1 = Component(kind="image", file_id="AAA.jpg", url=r"C:\\temp\\a_still.jpg")
+    c2 = Component(kind="image", file_id="BBB.jpg", url=r"C:\\temp\\b_still.jpg")
+    raw = {"message": [
+        {"type": "image", "data": {"file": "BBB.jpg", "url": "https://cdn/b.jpg"}},
+        {"type": "image", "data": {"file": "AAA.jpg", "url": "https://cdn/a.jpg"}},
+    ]}
+    ev = _fake_event(message=[{"type": "image", "data": {}},
+                              {"type": "image", "data": {}}], raw_message=raw)
+    _ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    star = plugin_main.MediaWardenStar(_ctx, config=None)
+    star._recover_original_urls(ev, [c1, c2])
+    assert c1.url == "https://cdn/a.jpg", c1.url
+    assert c2.url == "https://cdn/b.jpg", c2.url
+    assert c1.meta.get("raw_file") == "AAA.jpg", c1.meta
+    assert c2.meta.get("raw_file") == "BBB.jpg", c2.meta
+    print("  OK -> identity matching beats positional order")
+
+    # 没有可配对的标识时退回顺序取:行为与 v1.9 一致,不会丢链接
+    d1 = Component(kind="image", url=r"C:\\temp\\x.jpg")
+    d2 = Component(kind="image", url=r"C:\\temp\\y.jpg")
+    raw2 = {"message": [
+        {"type": "image", "data": {"file": "p.jpg", "url": "https://cdn/p.jpg"}},
+        {"type": "image", "data": {"file": "q.jpg", "url": "https://cdn/q.jpg"}},
+    ]}
+    ev2 = _fake_event(message=[{"type": "image", "data": {}},
+                               {"type": "image", "data": {}}], raw_message=raw2)
+    star._recover_original_urls(ev2, [d1, d2])
+    assert d1.url == "https://cdn/p.jpg", d1.url
+    assert d2.url == "https://cdn/q.jpg", d2.url
+    print("  OK -> positional fallback still assigns one url per component")
+
+
 PHASE4 += [
     test_recover_raw_url_overrides_local_jpeg,
     test_recover_raw_no_http_keeps_local,
+    test_recover_pairs_refs_by_identity_not_position,
     test_forwarder_emoji_mixed_layout,
 ]
 

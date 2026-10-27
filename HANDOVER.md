@@ -8,7 +8,7 @@
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=27, total=110)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27, total=111)`
 
 
 ## 1.0 v1.10.0（重构 + 补齐，当前版本）
@@ -29,6 +29,8 @@
 - `_refetch_media(comp, event) -> (Downloaded|None, trace: list[str])`（不再写 `self._refetch_trace` / `_refetch_last_error` —— 那是在 self 上放按组件状态，并发下会串味）
 - `_download_fresh(comp, fresh)` 失败只返回 None，不存状态
 - `_late_cache(probe, label)`：媒体与转发节点图共用同一份迟到重查循环
+- `_local_cache_read(names) -> (Downloaded|None, path, misses)`：媒体与转发节点图共用同一份「查 QQ 本地缓存并读字节」；`_cached_copy` / `_forward_local_cached` 只剩包壳
+- `_recover_original_urls` 先按标识（file / name / fileid / url 末段）配对，配不上才退回顺序
 - `_reply_prefix(msg_id) -> list`：决定这条回执带不带 `Reply`
 - `_failed(..., failure_kind=None)`：`failure_kind` 缺省走 `classify_error(err)`（`"other"` 因此可达）
 - `_find_saved_asset(msg_id, idx, *, platform=None, group_id=None)`
@@ -36,7 +38,7 @@
 - `prune_older_than(cutoff_ts) -> {"assets": n, "failures": m}`
 
 ### 结构
-- `main.py` 1532 行；`warden/forwarder.py` 608 行（两份渲染器合成 `render()` / `render_with_images()` → `_paint(nodes, node_pil)`）
+- `main.py` 1564 行；`warden/forwarder.py` 609 行（两份渲染器合成 `render()` / `render_with_images()` → `_paint(nodes, node_pil)`）
 - `warden/components.py` 只有一条归一化路径 `_coerce(t, _Fields, raw)`
 - `warden/reporter.py` 的 fetch/save 分布只算一次（`_split_fetch_save()` + `_reason_line()`）
 
@@ -391,8 +393,8 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 
 | 文件 | 改动 |
 | --- | --- |
-| `main.py`（1532 行） | 删 `_get_media_url_candidates`；`_cached_copy` / `_refetch_media` 改返回元组；抽 `_late_cache` / `_reply_prefix` / `_is_sha16` / `_format_asset_row`；空转发记失败；JSON 分支 `json.dumps` 进 try；`_failed` 用 `classify_error`；`_find_saved_asset` 带 platform/group；`/warden lookup <sha16>` + `/warden fail` 反复失败 top + prune 双计数 + list 可读时间；启动时告警未实现引擎并真探 Pillow |
-| `warden/forwarder.py`（608 行） | 两份渲染器合一 → `_paint(nodes, node_pil)`；`_line_h` / `_wrap_text_simple` 提升到模块级 |
+| `main.py`（1564 行） | 删 `_get_media_url_candidates`；`_cached_copy` / `_refetch_media` 改返回元组；抽 `_late_cache` / `_reply_prefix` / `_is_sha16` / `_format_asset_row`；空转发记失败；JSON 分支 `json.dumps` 进 try；`_failed` 用 `classify_error`；`_find_saved_asset` 带 platform/group；`/warden lookup <sha16>` + `/warden fail` 反复失败 top + prune 双计数 + list 可读时间；启动时告警未实现引擎并真探 Pillow |
+| `warden/forwarder.py`（609 行） | 两份渲染器合一 → `_paint(nodes, node_pil)`；`_line_h` / `_wrap_text_simple` 提升到模块级 |
 | `warden/components.py` | 单一 `_coerce(t, _Fields, raw)`；`_Fields.of_obj/of_dict`；face/image 两条路径统一 |
 | `warden/reporter.py` | 删 `failure_summary`；`_split_fetch_save()` + `_reason_line()` |
 | `warden/index.py` | `SCHEMA_TABLES`/`SCHEMA_INDEXES` 分离 + `_ensure_columns()` + `PRAGMA user_version=1` + `index.migrated`；`prune_older_than` 返回 dict；删 `prune_failures_older_than`；`find_by_msg(platform=, group_id=)` |
@@ -401,13 +403,13 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `warden/config.py` | 删 `from_raw`；`VERSION=1.10.0`；`reply_to_original` 默认 `false` |
 | `warden/localcache.py` | 删死分支 `_match_in(recursive=)`；文档改为「get_msg 确实能用当前 rkey 重签」 |
 | `_conf_schema.json` | 第 6 组「日志」（`log_to_stdout`）；`max_file_size_mb` / 引擎 / `reply_to_original` 的 hint 诚实化 |
-| `_smoke.py`（110 项） | 9 个新测试 + 4 个依赖被删 API 的测试重写 |
+| `_smoke.py`（111 项） | 9 个新测试 + 1 个恢复配对测试 + 4 个依赖被删 API 的测试重写 |
 
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=27, total=110)`（v1.10.0）
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27, total=111)`（v1.10.0）
 - `_conf_schema.json` JSON 解析通过
 - **v1.9.5 的本机实测**：8 张线上失败图逐个在 `C:\Users\chiriu\Documents\Tencent Files\` 下按 MD5 命中，单次查找 <1ms；`deadbeef…` / 短名 / 空串 / `None` 均正确返回 `None`（不误报）
 - **v1.9.5 的线上实测（20:02:19）**：`used QQ local cache for image: …\Image\C2C\Image2\74760010d20c862b46a660054f601ead.jpg` → `✅ 已保存 …20261011_200219_image_9dbbb5a0.jpg 18749B [链接已重取: localcache:…]` —— 同一张图 19:59 还是 `http 400`

@@ -8,7 +8,7 @@
 - AstrBot 版本 / platform adapter (aiocqhttp? Telegram?)
 - warden 版本 (从 `metadata.yaml` 看)
 - 复现步骤
-- `_smoke.py` 输出 (110 项必须全绿,否则先解决本地问题)
+- `_smoke.py` 输出 (111 项必须全绿,否则先解决本地问题)
 - 关键配置(`_conf_schema.json` 字段值,记得脱敏)
 
 模板: `.github/ISSUE_TEMPLATE/bug.md`
@@ -21,7 +21,7 @@
 
 1. fork 仓库,新建分支
 2. 修改代码
-3. 在 `astrbot-plugin-media-warden/` 下跑 `python -X utf8 _smoke.py`,110 项必须全绿
+3. 在 `astrbot-plugin-media-warden/` 下跑 `python -X utf8 _smoke.py`,111 项必须全绿
 4. 新增功能时务必**在 `_smoke.py` 加对应测试**(沿用 mock 注入模式,见 hippocampus 的 `_smoke_v13.py` 写法)
 5. PR 标题用 `[type] 简述`,如 `[fix] /warden lookup 解析 #idx 失败`
 6. CI 跑过才会被 review (branch protection 已设)

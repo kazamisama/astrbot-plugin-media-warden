@@ -160,7 +160,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **110 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 24 / Phase 5: 27），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **111 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
@@ -173,7 +173,7 @@ python -m pytest -q _smoke.py
 - 转发链：JSON / PNG / both / 超限降级 / 嵌套展开 / 透明图 alpha 合成 / json 模式不抓头像
 - 索引：写入 / recent / sha 查复用 / stats / export / lookup / prune / failure_stats
 - 预览回传与命令权限注册
-- v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离
+- v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离、raw_message 恢复链接按标识配对（顺序错位也不错领）
 
 ## 已知边界
 

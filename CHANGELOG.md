@@ -26,7 +26,7 @@
 ## v1.10.0
 
 一次**不改外部行为**的重构 + 补齐：删掉空转的配置与死代码，把重复实现合成一份，把只有测试在用的索引能力接回命令，并补上索引 schema 迁移。
-冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=24 phase5=27, total=110)`。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27, total=111)`。
 
 ### Removed（判明是死代码 / 空转）
 - `warden/downloader.py`：`download(fallback=…)`、`astrbot_component_fetcher(refresher=…)`、`download_many()` —— 生产路径一次都没用过（真正的补救链在 `main._download_one`），留着只会让下一个读者以为还有第二套补救。
@@ -39,6 +39,7 @@
 - **组件归一化**：`_coerce_obj` / `_coerce_one` 两份并行实现已经走散（`face` 只有 object 路径支持，image 的 meta 一边叫 `path` 一边叫 `summary`）。现在只有一条 `_coerce(t, _Fields, raw)`，`_Fields.of_obj()` / `_Fields.of_dict()` 只负责取字段。
 - **失败文案**：`failure_summary()` / `failure_phrase()` / `format_batch()` 各自重算 fetch/save 分布。现在统一走 `BatchResult._split_fetch_save()` + `_reason_line()`；回执字符串一字未改（有测试锁着）。
 - **迟到缓存重查**：媒体路径与转发节点图路径各自那一份 `for delay in _LATE_CACHE_DELAYS_S` 循环，合成 `_late_cache(probe, label)`。
+- **QQ 本地缓存读取**：媒体（`_cached_copy`）与转发节点图（`_forward_local_cached`）各写了一遍「查缓存 → 读字节 → 记未命中」，合成 `_local_cache_read(names)`；两个调用方只剩「候选怎么来、命中包成什么」不同。
 
 ### Fixed（之前只是「看起来有」）
 - `reply_to_original` **真正生效**：v1.9.x 里它 0 处生产引用，改什么都没用。现在回执走 `event.chain_result([Reply(id=msg_id), Plain(text)])`；适配器没有 `Reply`（或 msg_id 是 `nomsg` / `nonemsg` / `0`）时自动退化为纯文本。**默认值改为 `false`** —— 对一个从没生效过的开关改默认，等于让升级的用户突然被引用回复刷屏。
@@ -59,7 +60,7 @@
 - `_conf_schema.json` 新增第 6 组「日志」，把一直存在却不可配的 `log_to_stdout` 放进去；`max_file_size_mb` 的 hint 不再暗示头像也受它限制（头像有独立的 5MB 上限）。
 
 ### Tests
-- 冒烟 **102 → 110**（phase5 19 → 27）：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、`fetch_many` 单点失败不影响其他头像、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`reply_to_original` 走 `Reply`、索引复用按 platform/group 隔离。
+- 冒烟 **102 → 111**（phase4 24 → 25，phase5 19 → 27）：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、`fetch_many` 单点失败不影响其他头像、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`reply_to_original` 走 `Reply`、索引复用按 platform/group 隔离、`raw_message` 恢复链接按标识配对（两张图顺序颠倒也不会错领）。
 - 依赖被删 API 的 4 个测试重写：`download_many` 并发 → 直接驱动 `_download_all`；「`get_image` 重取新链接」那条被 `get_msg` 覆盖后删掉；fetcher 本地回退测试不再传 `refresher`。
 
 ## v1.9.9

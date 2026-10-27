@@ -466,14 +466,52 @@ class MediaWardenStar(Star):
         buckets: dict[str, list[dict]] = defaultdict(list)
         for r in refs:
             buckets[r["kind"]].append(r)
-        cursor: dict[str, int] = defaultdict(int)
+        # v1.10: 先按「标识」配对,配不上再按顺序取。
+        # 只按顺序时,raw_message 与组件列表只要有一边多/少一段(表情被转成别的类型、
+        # 某段没有 url),后面所有图都会领到别人的 url —— 那比不恢复更糟。
+        def _ref_keys(ref: dict) -> set:
+            keys: set = set()
+            for k in ("file", "name"):
+                v = ref.get(k)
+                if isinstance(v, str) and v.strip():
+                    keys.add(v.strip())
+                    keys.add(os.path.basename(v.strip()))
+            return keys
+
+        def _comp_keys(comp: Component) -> set:
+            keys: set = set()
+            for v in ((comp.meta or {}).get("raw_file"), (comp.meta or {}).get("path"),
+                      comp.file_id, comp.name):
+                if isinstance(v, str) and v.strip():
+                    keys.add(v.strip())
+                    keys.add(os.path.basename(v.strip()))
+            url = (comp.url or "").strip()
+            if url and "://" in url:
+                keys.add(url.rsplit("/", 1)[-1])
+            return keys
+
+        used: set = set()
         for comp in media:
             lst = buckets.get(comp.kind) or []
-            i = cursor[comp.kind]
-            if i >= len(lst):
+            want = _comp_keys(comp)
+            ref = None
+            if want:
+                for j, cand in enumerate(lst):
+                    if j in used:
+                        continue
+                    if want & _ref_keys(cand):
+                        ref = cand
+                        used.add(j)
+                        break
+            if ref is None:
+                for j, cand in enumerate(lst):
+                    if j in used:
+                        continue
+                    ref = cand
+                    used.add(j)
+                    break
+            if ref is None:
                 continue
-            cursor[comp.kind] = i + 1
-            ref = lst[i]
             url = ref.get("url")
             if url:
                 comp.url = url
@@ -528,18 +566,29 @@ class MediaWardenStar(Star):
         v1.10: 未命中的候选随返回值一起给出(调用方写进失败回执),不再挂到
         self._local_cache_misses —— 并发下载时那是跨组件的共享状态。
         """
-        if not self.cfg.get_media_fallback:
-            return None, []
-        cands = _local_cache_candidates(comp)
-        if not cands:
-            return None, []
+        data, path, misses = await self._local_cache_read(_local_cache_candidates(comp))
+        if data is None:
+            return None, misses
+        data.origin = f"localcache:{path}"
+        self._log(f"used QQ local cache for {comp.kind}: {path}")
+        return data, misses
+
+    async def _local_cache_read(self, names: list) -> tuple:
+        """按候选名查 QQ 本地缓存并读出字节。返回 (Downloaded|None, 命中的 path, misses)。
+
+        媒体(候选来自消息段)与转发节点图(候选来自节点 image 段的 "file" 字段)共用
+        这一份查找/读取/失败记录 —— v1.10.0 之前是两套写法,「命中但读不出来」与
+        「查找抛错」各处理一遍,改一处漏一处。
+        """
+        if not self.cfg.get_media_fallback or not names:
+            return None, None, []
         try:
             from .warden.localcache import find_cached_image as _find  # 局部导入便于测试打桩
         except Exception as e:  # noqa: BLE001
             self._log(f"localcache module unavailable: {e!r}")
-            return None, []
+            return None, None, []
         misses: list[str] = []
-        for cand in cands:
+        for cand in names:
             try:
                 path = await asyncio.to_thread(_find, cand)
             except Exception as e:  # noqa: BLE001  本地查找失败不该影响下载
@@ -557,10 +606,8 @@ class MediaWardenStar(Star):
                 self._log(f"local cache hit but unreadable ({path}): {e}")
                 misses.append(f"{cand}: unreadable")
                 continue
-            data.origin = f"localcache:{path}"
-            self._log(f"used QQ local cache for {comp.kind}: {path}")
-            return data, misses
-        return None, misses
+            return data, path, misses
+        return None, None, misses
 
     async def _download_one(self, comp: Component, event=None):
         """单个组件的下载回退链;全失败时抛首个(最对症的)下载错误。
@@ -907,31 +954,15 @@ class MediaWardenStar(Star):
         image 段其实同样带 `file=<md5>.<ext>`，所以这里复用同一条本地缓存查找。
         没命中/没开补救/没有 file 字段时返回 None，调用方照旧走网络。
         """
-        if not self.cfg.get_media_fallback or not isinstance(ref, dict):
+        if not isinstance(ref, dict):
             return None
         name = ref.get("file")
         if not isinstance(name, str) or not name.strip():
             return None
-        try:
-            from .warden.localcache import find_cached_image as _find
-        except Exception as e:  # noqa: BLE001
-            self._log(f"localcache module unavailable: {e!r}")
-            return None
-        try:
-            path = await asyncio.to_thread(_find, name.strip())
-        except Exception as e:  # noqa: BLE001
-            self._log(f"forward local cache lookup failed for {name!r}: {e!r}")
-            return None
-        if not path:
+        data, path, _ = await self._local_cache_read([name.strip()])
+        if data is None:
             # 这是**正常**结果：NapCat 不下载转发节点里的图，所以本地没有副本。
             # 见 HANDOVER §1.-4「转发节点图为什么救不回来」。
-            return None
-        try:
-            data = await asyncio.to_thread(
-                _read_local_file, path, self.cfg.max_file_size_bytes
-            )
-        except DownloadError as e:
-            self._log(f"forward local cache hit but unreadable ({path}): {e}")
             return None
         self._log(f"used QQ local cache for forward node image: {path}")
         return data.data
