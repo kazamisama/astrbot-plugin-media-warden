@@ -21,8 +21,9 @@
 - v1.9.5：**首选 QQ 本地图片缓存** —— 按消息段 MD5（`<md5>.<ext>`）在 `Tencent Files/<QQ号>/Image/C2C/Image2/` 与 `nt_qq/nt_data/Emoji/emoji-recv/*/Ori/` 找图片本体，命中即用、**不走网络**；rkey 过期（http 400）的图因此能正常保存
 - v1.9.6：**合并转发的节点图接同一条本地缓存** —— `ForwardNode` 新增 `image_refs` 保留节点 image 段的 `file`(MD5)，`_save_forward` 拉节点图前先查本地缓存
 - v1.9.8：确认**转发节点图里的老图救不回来**（NapCat 从不下载转发节点的图片字节，`get_image` 的内存 uuid 表里也没有它们）—— 详见「已知边界」
-- v1.9.9：**迟到缓存重查** —— 三级补救全败后隔 `4s`/`12s` 再查一次 QQ 本地缓存（接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）
-- v1.10.0：**重构 + 补齐** —— 删掉空转配置与死代码（`download(fallback=)` / `download_many` / `from_raw` …），把重复实现合成一份（转发渲染双实现、组件双归一、失败文案三处），补上索引 schema 迁移、空转发记为失败、`reply_to_original` 真正生效（默认改为关闭）、`/warden lookup <sha16>` 与「反复失败」统计；冒烟 110 项
+- v1.9.9：**迟到缓存重查** —— 三级补救全败后隔 `5s`/`20s` 再查一次 QQ 本地缓存（`_LATE_CACHE_DELAYS_S`，合计 25s；接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）
+- v1.10.0：**重构 + 补齐** —— 删掉空转配置与死代码（`download(fallback=)` / `download_many` / `from_raw` …），把重复实现合成一份（转发渲染双实现、组件双归一、失败文案三处），补上索引 schema 迁移、空转发记为失败、`reply_to_original` 真正生效（默认改为关闭）、`/warden lookup <sha16>` 与「反复失败」统计；冒烟 111 项
+- v1.11.0：**第二轮审计修复** —— Windows 回执路径行（`reporter.py` 里的反斜杠字面量多转义了一层，Windows 路径永远算不出公共目录）、转发渲染失败入库、`/warden list` 显示 sha16、16-hex msg_id 可回退查询、file 段 http 链接兜底、落盘原子写入；冒烟 115 项
 
 ## 目录
 
@@ -145,7 +146,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 | 命令 | 说明 |
 |---|---|
-| `/warden list [N]` | 列最近 N 条索引记录（默认 10，上限 50） |
+| `/warden list [N]` | 列最近 N 条索引记录（默认 10，上限 50），时间可读，带 msg_id 与 sha16（v1.11.0 起与 lookup 共用同一行格式） |
 | `/warden stats` | 资产统计：总数 / 类型分布 / 总字节数 / db 路径 |
 | `/warden export [path]` | 导出索引为 JSON；path 必须落在 `storage_root` 内，默认 `_export.json` |
 | `/warden lookup <msg_id> [#idx]` / `<sha16>` | 反向查询该消息保存了哪些资产，可选按 idx 过滤；传 16 位 hex 则按内容指纹查它出现过几次（v1.10.0） |
@@ -160,7 +161,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **111 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **115 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
@@ -174,6 +175,7 @@ python -m pytest -q _smoke.py
 - 索引：写入 / recent / sha 查复用 / stats / export / lookup / prune / failure_stats
 - 预览回传与命令权限注册
 - v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离、raw_message 恢复链接按标识配对（顺序错位也不错领）
+- v1.11.0 补齐（Phase 6）：Windows 反斜杠路径算出公共目录且不切出半截目录、file 段把 http 链接放在 `file` 上仍可下载、转发渲染失败在 failures 表留下 `forward_render` 行、落盘后没有 `.part-` 残骸
 
 ## 已知边界
 

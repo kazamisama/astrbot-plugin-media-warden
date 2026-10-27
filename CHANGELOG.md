@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.11.0
+
+第二轮审计：修掉三处「只在特定平台/特定路径才触发」的实伤与「失败不入库」的不一致，补 4 个新用例。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4, total=115)`。
+
+### Fixed
+- **Windows 上回执永远不显示「路径:」行**：`warden/reporter.py` 里两处本该是 `"\\"` 的字面量写成了 `"\\\\"`（四个反斜杠 → Python 字符串是两个），`_lcp_dir()` 的 `rfind("/")` 在 `C:\data\...` 上返回 -1 → `storage_root` 恒为 `None`，只有 posix 路径的测试因此一直没红。现在归一用单个反斜杠，并且 `_lcp_dir()` 改成**按目录段**比较：按字符比较会把 `C:/a/x.jpg` 与 `C:/ab/y.jpg` 的公共前缀切成 `C:/a`（那是另一个文件名的前缀，不是目录）。
+- **转发渲染失败不进 failures 表**：节点图下载失败与 PIL 渲染抛错这两条路以前直接构造 `AssetResult`，绕过 `_failed()` —— 没有 subject / attempts，`/warden fail` 查不到，与 README 的「失败分类入库」自相矛盾。现在两条路都走 `_failed()`（`kind="forward_render"`、`idx=ctx.idx+100`、`subject=forward_render:<msg>#<idx>`）。`_failed()` 相应新增 `kind` / `row_idx` 两个可选参数（同一条消息的第二个产物要按自己的 kind 与 idx 入库）。
+- **`/warden list` 看不到 sha16**：list 自己拼一行，而 `/warden lookup <sha16>` 正需要这个值。现在 list 与 lookup 共用 `_format_asset_row()`（时间可读 + msg_id + sha16）。
+- **16 位十六进制的 msg_id 查不到**：lookup 一见到 16 hex 就当内容指纹查，查不到直接报「未找到 sha16」。现在 sha16 未命中时继续按 msg_id 查。
+- **file 段的 http 链接丢在 `file` 字段上**：image / video / voice 都走 `_media_url()` 兜底，只有 file 例外（`component.url` 为空 → 下载环节直接判失败）。
+- **转发内联内容放在 `message` 键上时降级去网络重取**：归一化只读 `content` / `nodes`，而 `_forward_seg_inline_nodes` 早就认 `message`，两边不一致。
+
+### Changed
+- **落盘改为原子写入**：`Storage.save()` 与 `_write_pointer()` 走同目录临时文件 + `os.replace()`，崩在半路不会留下「看起来完整」的半截素材。
+- 转发 JSON / 渲染图写索引时的 `except Exception: pass` 改为记日志（与 `_store_dl` 一致，失败不再无声）。
+- `warden/index.py` 三个读资产的方法共用 `_asset_rows()`（`forward_meta` 一律解成对象），`recent()` 补 `id DESC` 兜底排序（与 `recent_failures` 一致，同一秒的记录顺序不再随缘）。
+- `_conf_schema.json`：`match_mode` / `forward_render_mode` / `forward_image_engine` 补 WebUI 下拉 `options`，省得用户手敲字符串拼错。
+
+### Removed
+- `warden/config.py:EXPORT_FORMAT_VERSION = "1.0"`（0 引用，且与导出文件里写死的整数 `version: 1` 是两回事，只会误导）；导出格式版本改为在 `index.export_json()` 处注明。
+
+### Docs
+- 迟到缓存窗口的文档数字（4s/12s）与代码 `(5, 20)` 不符 —— `41bca31` 实测后就已扩到合计 25s；README / HANDOVER / schema hint 一并更正。
+
+### Tests
+- 新增 4 项（新 Phase 6）：Windows 反斜杠路径的公共目录、file 段 http 链接兜底、转发渲染失败入 failures 表、落盘无 `.part-` 残骸。
+- 扩展 list / lookup / conf-schema 三项断言（sha16 可见、16-hex msg_id 可回退、枚举 options 与默认值可被 config 接受）。
+
 ## 2026-10-11 环境：NapCat 4.18.4 -> 4.18.37（**插件代码未改**）
 
 **这一版不改插件。**它记录的是「转发节点图 100% 失败」的最终根因与修法：坏的是环境，不是代码。
@@ -91,7 +120,7 @@ rkey url 本身已经失效，不是本插件请求姿势不对。
 9-20~10-06 为 0%~4.8%，10-11 当天 `5 fetched / 5 aborted = 100%`。
 
 ### Added
-- **迟到缓存重查**（`_LATE_CACHE_DELAYS_S = (4, 12)`）：三级补救全败后，隔 4s / 12s 再查一次
+- **迟到缓存重查**（`_LATE_CACHE_DELAYS_S = (5, 20)`）：三级补救全败后，隔 5s / 20s 再查一次（最初是 4s/12s，`41bca31` 复测后扩到合计 25s）
   QQ 本地缓存，命中即用（`late local cache hit after Ns`）。普通图片与转发节点图都接。
   只在前面的路全败时才走，代价 = `sum(_LATE_CACHE_DELAYS_S)`。
   测试里用 `_sleep_scale`/`_LATE_CACHE_DELAYS_S` 关掉真实等待。

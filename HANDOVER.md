@@ -1,17 +1,38 @@
-# 交接文档 · astrbot-plugin-media-warden v1.10.0
+# 交接文档 · astrbot-plugin-media-warden v1.11.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.10.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.10.0 是重构/补齐版，**外部行为只有下面 §1.0 列的几处变化**）
+- 版本：v1.11.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.11.0 是第二轮审计修复，**变化见下面 §1.-0**；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
-- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27, total=111)`
+- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 各单独一次提交（显式路径，未用 `git add -A`）
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4, total=115)`
 
 
-## 1.0 v1.10.0（重构 + 补齐，当前版本）
+## 1.-0 v1.11.0（第二轮审计修复，当前版本）
+
+这一轮没有重构，只修「看起来能用、实际在特定平台/特定路径上永不生效」的地方，外加三处一致性。
+
+### 外部行为变化
+- **Windows 上回执终于有「路径:」行**：`warden/reporter.py` 的反斜杠字面量多转义了一层（`"\\\\"`），Windows 路径永远归一不成 posix → `storage_root` 恒 `None`。顺带把 `_lcp_dir()` 改成按目录段比较（按字符比较会在 `C:/a/x.jpg` 与 `C:/ab/y.jpg` 之间切出 `C:/a`）。
+- **转发渲染失败会进 failures 表**：以前绕过 `_failed()`，`/warden fail` 里看不到；现在 `kind=forward_render`、`idx=ctx.idx+100`、`subject=forward_render:<msg>#<idx>`。
+- **`/warden list` 每行带 sha16**（与 lookup 共用 `_format_asset_row()`），可以直接拿去做 `/warden lookup <sha16>`。
+- **16 位十六进制的 msg_id 能查到了**：sha16 没命中时回退按 msg_id 查（以前直接判「未找到」）。
+- **file 段的 http 链接**（放在 `file` 字段上）现在能被下载，与 image/video/voice 一致。
+- 落盘改**原子写入**（临时文件 + `os.replace`），崩在半路不会留下半截素材。
+
+### 签名变化
+- `_failed(comp, ctx, stage, err, err_obj=None, *, url=None, subject=None, failure_kind=None, kind=None, row_idx=None)` —— 新增 `kind` / `row_idx`（同一条消息的第二个产物按自己的 kind 与 idx 入库）。
+- `warden/config.py:EXPORT_FORMAT_VERSION` **已删除**（0 引用）；导出格式版本写在 `index.export_json()` 的注释里（整数 1）。
+- `warden/index.py`：三个读资产方法共用 `_asset_rows()`；`recent()` 补 `id DESC` 兜底排序。
+- `_format_asset_row(r)` 增加 `msg=<msg_id>#<idx>` 字段。
+
+### 测试
+- 新增 Phase 6 四项：Windows 路径公共目录、file 段 http 兜底、转发渲染失败入库、落盘无 `.part-` 残骸；并扩展 list / lookup / conf-schema 断言。
+
+## 1.0 v1.10.0（重构 + 补齐，上一个版本）
 
 审出来的问题分三类，一次处理完：**看起来有其实没有**的配置、**只有测试在用**的索引能力、**两份走散的重复实现**。
 
@@ -121,7 +142,7 @@ NapCat **4.18.37 自己的包有缺陷**，与本插件无关，但会盖掉「�
 | 20:26:57 | 转发节点图 `D867CE1671D3457B1A0534D240D4885E.jpg` 失败（`http 400`，节点 url 已失效） |
 | 20:33:39 | 同一个 MD5 出现在 `…\3683351360\nt_qq\nt_data\Emoji\emoji-recv\2026-10\Ori\` |
 
-所以 **v1.9.9 加了「迟到缓存重查」**：三级补救全败后隔 `4s`、`12s` 再查一次 QQ 本地缓存
+所以 **v1.9.9 加了「迟到缓存重查」**：三级补救全败后隔 `5s`、`20s` 再查一次 QQ 本地缓存
 （`_LATE_CACHE_DELAYS_S`，普通图片与转发节点图都接），命中就用。日志里看到
 `late local cache hit after Ns` 就是这条路生效了。
 
@@ -405,11 +426,25 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `_conf_schema.json` | 第 6 组「日志」（`log_to_stdout`）；`max_file_size_mb` / 引擎 / `reply_to_original` 的 hint 诚实化 |
 | `_smoke.py`（111 项） | 9 个新测试 + 1 个恢复配对测试 + 4 个依赖被删 API 的测试重写 |
 
+### 3.2 v1.11.0 主要修改文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `warden/reporter.py` | `_lcp_dir()` 改为按目录段比较；`storage_root` 的反斜杠归一改用单个转义（Windows 上「路径:」行因此恢复） |
+| `main.py`（1578 行） | `_failed()` 新增 `kind` / `row_idx`；转发渲染失败入 failures 表；list 与 lookup 共用 `_format_asset_row()`（带 msg_id + sha16）；sha16 未命中回退按 msg_id 查；两处 `except Exception: pass` 改为记日志 |
+| `warden/storage.py` | `_write_atomic()`（临时文件 + `os.replace`），`save()` / `_write_pointer()` 复用 |
+| `warden/index.py` | `_asset_rows()` 统一解 `forward_meta`；`recent()` 补 `id DESC`；`find_by_sha()` 也返回 `forward_meta` |
+| `warden/components.py` | file 段用 `_media_url()` 兜底；forward 的 nodes 也认 `message` 键 |
+| `warden/config.py` | 删 `EXPORT_FORMAT_VERSION`；`VERSION=1.11.0` |
+| `_conf_schema.json` | 三个枚举补 `options`；迟到缓存 hint 改 5s/20s |
+| `_smoke.py`（115 项） | 新 Phase 6 四项；扩展 list / lookup / conf-schema 断言 |
+
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27, total=111)`（v1.10.0）
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4, total=115)`（v1.11.0）
+- v1.11.0 的 Windows 路径修复用临时脚本实测过：`BatchResult.storage_root` 从 `None` 变为 `C:/data/warden/g1/`，且 `format_batch()` 输出 `  路径: C:/data/warden/g1/`
 - `_conf_schema.json` JSON 解析通过
 - **v1.9.5 的本机实测**：8 张线上失败图逐个在 `C:\Users\chiriu\Documents\Tencent Files\` 下按 MD5 命中，单次查找 <1ms；`deadbeef…` / 短名 / 空串 / `None` 均正确返回 `None`（不误报）
 - **v1.9.5 的线上实测（20:02:19）**：`used QQ local cache for image: …\Image\C2C\Image2\74760010d20c862b46a660054f601ead.jpg` → `✅ 已保存 …20261011_200219_image_9dbbb5a0.jpg 18749B [链接已重取: localcache:…]` —— 同一张图 19:59 还是 `http 400`
@@ -426,6 +461,8 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 - 转发链布局、字体、emoji 渲染逻辑
 - blake2b 去重算法与 `assets` 表 schema
 - `_save_forward` 的降级策略：仍按 v1.5.0 设计「任一节点图最终失败即整体失败、不落盘」（**v1.9.6 起节点图会先查本地缓存**，但没有 `file` 字段时仍只有 `[is_origin=1, 原 url]` 两个候选）
+- `AvatarCache._locks` 按 (`platform`, `sender_id`) 增长、没有回收（每把 `asyncio.Lock` 约百字节，规模受群成员数约束）；不回收是为避免与正在抓取的任务竞态 —— 回收时若另一协程刚取到同一把锁，会变成两把锁各自抓同一张图。真要回收，应改成「引用计数 + 空闲超时」而不是遍历删除
+- `localcache` / `aiohttp_fetcher` 的每次调用都重新 listdir / 新建 `ClientSession`（无 memoisation）—— 命中路径的 listdir 在本机是 <1ms（v1.9.5 实测），暂不优化
 
 ## 6. 回滚与备份
 
