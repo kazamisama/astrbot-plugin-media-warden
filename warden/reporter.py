@@ -26,31 +26,37 @@ class AssetResult:
     note: Optional[str] = None
 
 
+def _as_segments(p: str) -> List[str]:
+    """路径切段: 兼容 / 与反斜杠;前导空段表示绝对路径."""
+    return p.replace("\\", "/").split("/")
+
+
 def _lcp_dir(paths: List[str]) -> Optional[str]:
     """所有路径的最长公共目录前缀(posix 视角).
 
     - 返回 None 表示没有有意义的公共目录(分歧 / 仅根 / 仅盘符)
     - 例子: ['/a/b/x.jpg', '/a/b/y.jpg'] -> '/a/b/'
+    - v1.11.0: 按「段」比较而非按字符比较 —— 按字符会在 'C:/a/x.jpg' 与
+      'C:/ab/y.jpg' 之间切出 'C:/a'(它是另一个文件名的前缀,不是目录);
+      以前还会先把 '\\' 换成 '/' 再比较,所以 Windows 路径从未显示出「路径:」行。
     """
     if not paths:
         return None
-    s = paths[0]
-    for p in paths[1:]:
-        i = 0
-        while i < len(s) and i < len(p) and s[i] == p[i]:
-            i += 1
-        s = s[:i]
-        if not s:
+    seg_list = [_as_segments(p) for p in paths]
+    common = seg_list[0][:-1]  # 去掉文件名,只留目录段
+    for segs in seg_list[1:]:
+        n = 0
+        while n < len(common) and n < len(segs) - 1 and common[n] == segs[n]:
+            n += 1
+        common = common[:n]
+        if not common:
             return None
-    if not s or s == "/":
+    if not common or common == [""]:
         return None
-    if s.endswith(":") or s.endswith(":/") or s.endswith(":\\\\"):
+    # 只剩盘符(C: / D:)没有意义
+    if len(common) == 1 and common[0].endswith(":"):
         return None
-    # 把 s 截到最近的目录分隔符
-    cut = s.rfind("/")
-    if cut <= 0:
-        return None
-    return s[: cut + 1]
+    return "/".join(common) + "/"
 
 
 @dataclass
@@ -73,8 +79,8 @@ class BatchResult:
     @property
     def storage_root(self) -> Optional[str]:
         ok_paths = [x.path for x in self.items if x.ok and x.path]
-        # 统一到 posix 视角做前缀比较
-        norm = [p.replace("\\\\", "/") for p in ok_paths]
+        # 统一到 posix 视角做前缀比较(单个反斜杠: 以前写成了两个,Windows 路径从未被归一)
+        norm = [p.replace("\\", "/") for p in ok_paths]
         return _lcp_dir(norm)
 
     @property

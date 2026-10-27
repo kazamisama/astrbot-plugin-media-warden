@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -246,12 +247,28 @@ class Storage:
         # 旧版 symlink/拷贝文件（.bin），向后兼容读取
         return os.path.join(self.root, "_blake", digest[:2], digest[2:4], digest + ".bin")
 
+    def _write_atomic(self, full: str, data: bytes) -> None:
+        """同目录临时文件 + os.replace —— 崩在半路也不会留下"看起来完整"的半截素材."""
+        d = os.path.dirname(full) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".part-", dir=d)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, full)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
     def _write_pointer(self, digest: str, full: str) -> None:
         bp = self._blake_path(digest)
         os.makedirs(os.path.dirname(bp), exist_ok=True)
         rel = os.path.relpath(full, start=self.root).replace("\\", "/")
-        with open(bp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(rel)
+        self._write_atomic(bp, rel.encode("utf-8"))
 
     def _existing_for_digest(self, digest: str, size: int) -> Optional[str]:
         """返回内容仍匹配指纹的首存真实文件路径(而非 _blake 指纹路径)."""
@@ -328,8 +345,7 @@ class Storage:
                 raise RuntimeError("too many collisions on " + full)
         # 写入后再校验一次,防止 TOCTOU
         self._assert_within_root(full)
-        with open(full, "wb") as f:
-            f.write(data)
+        self._write_atomic(full, data)
 
         if digest and self.dedupe:
             # 记录/修复指针：digest -> 首存真实文件相对路径（跨平台，不依赖 symlink）

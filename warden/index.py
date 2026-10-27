@@ -77,6 +77,26 @@ _COLUMN_SPECS: dict = {
 SCHEMA_VERSION = 1
 
 
+def _asset_rows(cur) -> list[dict]:
+    """游标 -> dict 行,顺带把 forward_meta 的 JSON 文本解回对象.
+
+    三个读资产的方法(recent / find_by_msg / find_by_sha)共用,免得
+    只有某一个方法返回的 forward_meta 是字符串。
+    """
+    cols = [d[0] for d in cur.description]
+    out = []
+    for row in cur.fetchall():
+        d = dict(zip(cols, row))
+        fm = d.get("forward_meta")
+        if isinstance(fm, str) and fm:
+            try:
+                d["forward_meta"] = json.loads(fm)
+            except (TypeError, ValueError):
+                pass
+        out.append(d)
+    return out
+
+
 def failure_subject(url: Optional[str], *, file_id: Optional[str] = None,
                     fallback: Optional[str] = None) -> str:
     """把一次失败归一成稳定去重键.
@@ -221,12 +241,13 @@ class AssetIndex:
         c = self._require()
         cur = c.execute(
             "SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
-            "kind, path, size, sha16 FROM assets "
-            "ORDER BY ts DESC LIMIT ?",
+            "kind, path, size, sha16, forward_meta FROM assets "
+            # 同一秒内落盘的资产按自增 id 兜底排序 —— 只按 ts 时顺序不确定,
+            # 与 recent_failures 的 ORDER BY ts DESC, id DESC 保持一致
+            "ORDER BY ts DESC, id DESC LIMIT ?",
             (int(limit),),
         )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return _asset_rows(cur)
 
     def find_by_msg(self, msg_id: str, *,
                     platform: Optional[str] = None,
@@ -253,28 +274,16 @@ class AssetIndex:
             "kind, path, size, sha16, forward_meta FROM assets WHERE "
             + " AND ".join(where) + " ORDER BY idx ASC, id ASC"
         )
-        cur = c.execute(sql, params)
-        cols = [d[0] for d in cur.description]
-        out = []
-        for row in cur.fetchall():
-            d = dict(zip(cols, row))
-            if d.get("forward_meta"):
-                try:
-                    d["forward_meta"] = json.loads(d["forward_meta"])
-                except (TypeError, ValueError):
-                    pass
-            out.append(d)
-        return out
+        return _asset_rows(c.execute(sql, params))
 
     def find_by_sha(self, sha16: str) -> list[dict]:
         c = self._require()
         cur = c.execute(
             "SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
-            "kind, path, size, sha16 FROM assets WHERE sha16 = ?",
+            "kind, path, size, sha16, forward_meta FROM assets WHERE sha16 = ?",
             (sha16,),
         )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return _asset_rows(cur)
 
     def count(self) -> int:
         c = self._require()
@@ -336,6 +345,7 @@ class AssetIndex:
                     pass
             out.append(d)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        # 导出格式版本就是这里的整数 1(与插件版本 VERSION 无关).
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "items": out}, f,
                       ensure_ascii=False, indent=2)

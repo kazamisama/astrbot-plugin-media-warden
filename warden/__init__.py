@@ -2,7 +2,7 @@
 
 公开符号遵循最小集,具体实现分散到子模块.
 """
-from .config import MediaWardenConfig, VERSION, EXPORT_FORMAT_VERSION
+from .config import MediaWardenConfig, VERSION
 from .policy import (
     MatchDecision, evaluate,
     event_platform, event_group_id, event_sender_id, event_sender_name,
@@ -35,5 +35,4 @@ __all__ = [
     "qq_avatar_url",
     "fetch_many_avatars",
     "__version__",
-    "EXPORT_FORMAT_VERSION",
 ]

@@ -145,9 +145,10 @@ def _coerce(t: Optional[str], f: _Fields, raw: Any) -> Component:
             raw=raw,
         )
     if t == "file":
+        # v1.11.0: 与图片/视频/语音一致 —— 有的客户端把 http 链接放在 file 字段上
         return Component(
             kind="file",
-            url=_str_or_none(f.first("url")),
+            url=_media_url(f),
             file_id=_str_or_none(f.first("file")),
             name=_str_or_none(f.first("name")),
             size=_int_or_none(f.first("size", "file_size")),
@@ -167,7 +168,9 @@ def _coerce(t: Optional[str], f: _Fields, raw: Any) -> Component:
         return Component(
             kind="forward",
             meta={
-                "nodes": f.first("content", "nodes"),
+                # v1.11.0: 合并转发外层把内联节点放在 message 上也见过,
+                # main._forward_seg_inline_nodes 早就认这个键,归一化这里补上。
+                "nodes": f.first("content", "nodes", "message"),
                 "forward_id": f.first("id", "resid", "res_id"),
             },
             raw=raw,

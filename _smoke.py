@@ -1770,6 +1770,9 @@ def test_plugin_warden_list_command():
         out = asyncio.run(_drive())
         text = out.text
         assert "最近 2" in text
+        # v1.11.0: list 与 lookup 共用 _format_asset_row —— 带上 sha16(msg_id 也在)
+        assert "sha16=" in text, text
+        assert "msg=m2#0" in text, text
         _close_index_safely(inst)
         print("  OK")
 
@@ -2502,6 +2505,21 @@ def test_plugin_warden_lookup_command():
     assert "(2 条)" in text
     assert "m99" not in text
     print(f"  OK -> {text.splitlines()[0]}")
+
+    # v1.11.0: 16 位十六进制的 msg_id 不该被当成 sha16 直接判"未找到"
+    hexmsg = "0123456789abcdef"
+    _seed_index(pl, msg_id=hexmsg, n=1)
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_lookup(e, hexmsg))
+    assert f"lookup msg_id={hexmsg}" in out[0].text, out[0].text
+
+    # sha16 命中路径
+    pl._index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                     msg_id="m-sha", idx=0, kind="image", path="/x/sha.png",
+                     size=1, sha16="a" * 16)
+    out = _drive_command(pl, ev, lambda e: pl.cmd_warden_lookup(e, "a" * 16))
+    assert "出现 1 次" in out[0].text, out[0].text
+    assert "sha16=" + "a" * 16 in out[0].text, out[0].text
+    print("  OK -> sha16 命中 + 16-hex msg_id 回退到按 msg_id 查")
 
     pl._index.close()
 
@@ -3698,7 +3716,7 @@ def test_main_late_local_cache_retry():
 
 
 # =========================================================
-# Phase 6 (v1.10.0): 审计补齐的覆盖
+# v1.10.0: 审计补齐的覆盖(归在 PHASE5 里跑)
 # =========================================================
 
 
@@ -3720,6 +3738,20 @@ def test_conf_schema_covers_all_config_fields():
     assert not extra, f"schema 多出字段: {sorted(extra)}"
     # v1.10.0: log_to_stdout 以前只存在于代码里,WebUI 里根本配不到
     assert schema["logging"]["items"]["log_to_stdout"]["type"] == "bool"
+    # v1.11.0: 枚举项给 WebUI 下拉选项,省得手敲字符串拼错
+    for grp, key, want in (
+        ("filter", "match_mode", ["whitelist", "blacklist"]),
+        ("forward", "forward_render_mode", ["image", "json", "both"]),
+        ("forward", "forward_image_engine", ["pil", "playwright", "wkhtml"]),
+    ):
+        got = schema[grp]["items"][key].get("options")
+        assert got == want, (key, got)
+    # schema 的默认值必须被 config 原样接受(拼错/类型不符会被整项静默丢弃)
+    defaults = {k: spec.get("default")
+                for grp in schema.values() for k, spec in grp["items"].items()}
+    cfg, errs = MediaWardenConfig.from_raw_lenient(defaults)
+    assert errs == [], errs
+    assert cfg.match_mode == "whitelist" and cfg.download_retries == 2
     print(f"  OK -> {len(expected)} 个可配字段全覆盖,{len(schema)} 个分组")
 
 
@@ -3943,6 +3975,105 @@ def test_main_index_reuse_is_scoped_to_platform_and_group():
     print("  OK -> g1 查不到 g2 的 m77")
 
 
+# =========================================================
+# Phase 6 (v1.11.0): 第二轮审计补齐的覆盖
+# 这些用例单独成组 —— 它们查的是「真实平台行为」(Windows 路径、索引里的
+# 失败行、临时文件残骸),与 v1.10 的功能补齐不是一回事。
+# =========================================================
+
+
+def test_reporter_windows_paths_show_common_dir():
+    banner("reporter: Windows 反斜杠路径也能算出公共目录(以前 '路径:' 行永不出现)")
+    br = BatchResult(items=[
+        AssetResult(kind="image", ok=True,
+                    path=r"C:\data\warden\g1\u1\a.jpg", size=1),
+        AssetResult(kind="image", ok=True,
+                    path=r"C:\data\warden\g1\u2\b.jpg", size=1),
+    ])
+    assert br.storage_root == "C:/data/warden/g1/", br.storage_root
+    assert "路径: C:/data/warden/g1/" in format_batch(br)
+    # 按字符比较会把 "C:/a/x.jpg" 与 "C:/ab/y.jpg" 切成 "C:/a";按目录段比较必须拒绝
+    near = BatchResult(items=[
+        AssetResult(kind="image", ok=True, path="C:/a/x.jpg"),
+        AssetResult(kind="image", ok=True, path="C:/ab/y.jpg"),
+    ])
+    assert near.storage_root is None, near.storage_root
+    print("  OK -> 反斜杠归一 + 按目录段比较,不再切出半截目录")
+
+
+def test_components_file_kind_keeps_http_url_in_file():
+    banner("components: file 段把 http 链接放在 file 上时仍能当下载源")
+    comp = extract_components(_fake_event(message=[{
+        "type": "file",
+        "data": {"file": "https://x/a.pdf", "name": "a.pdf", "size": 12},
+    }]))[0]
+    assert comp.kind == "file" and comp.url == "https://x/a.pdf", comp
+    assert comp.file_id == "https://x/a.pdf", comp.file_id
+    assert comp.size == 12, comp.size
+    print("  OK -> file.url 从 file 字段兜底(与 image/video/voice 一致)")
+
+
+def test_plugin_forward_render_failure_is_indexed():
+    banner("plugin: 转发渲染失败也入 failures 表(kind=forward_render, idx+100)")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_fwdfail_")
+    pl = _build_plugin_for_command(
+        tmp, enable_index=True, log_to_stdout=False,
+        extra={"forward_render_mode": "image", "enable_user_avatar": False},
+    )
+    asyncio.run(pl.initialize())
+    comp = Component(kind="forward", meta={"nodes": [
+        {"type": "node", "data": {
+            "nickname": "alice", "user_id": "u1",
+            "content": [
+                {"type": "text", "data": {"text": "see"}},
+                {"type": "image",
+                 "data": {"url": "https://x/dead.png", "file": "dead.md5"}},
+            ],
+        }},
+    ]})
+    ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                      sender_name="u", msg_id="m-ff", idx=3, ts=0)
+
+    async def boom(*a, **kw):
+        raise DownloadError("http 500 boom")
+
+    orig = plugin_main.download
+    plugin_main.download = boom
+    try:
+        results = asyncio.run(pl._save_forward(comp, ctx, None))
+    finally:
+        plugin_main.download = orig
+
+    fails = [r for r in results if not r.ok]
+    assert fails and fails[0].kind == "forward_render", results
+    assert fails[0].failure_kind == "fetch", fails[0].failure_kind
+    rows = pl._index.recent_failures(5)
+    assert rows and rows[0]["kind"] == "forward_render", rows
+    assert rows[0]["idx"] == 103, rows[0]
+    assert rows[0]["subject"] == "forward_render:m-ff#103", rows[0]
+    pngs = [f for _r, _d, fs in os.walk(tmp) for f in fs if f.endswith(".png")]
+    assert not pngs, pngs
+    pl._index.close()
+    print("  OK -> failures 行 kind=forward_render idx=103 subject=forward_render:m-ff#103")
+
+
+def test_storage_write_leaves_no_partial_files():
+    banner("storage: 落盘走临时文件 + os.replace,不留 .part- 残骸")
+    with tempfile.TemporaryDirectory() as td:
+        st = Storage(td, dedupe=False)
+        comp = Component(kind="image", url="https://x/a.bin", name="a.bin")
+        ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                          sender_name="u", msg_id="m-atomic", idx=0, ts=0)
+        res = st.save(b"hello", comp, ctx, mime="application/octet-stream")
+        with open(res.path, "rb") as fh:
+            assert fh.read() == b"hello"
+        leftovers = [f for _r, _d, fs in os.walk(td)
+                     for f in fs if f.startswith(".part-")]
+        assert not leftovers, leftovers
+    print("  OK -> 写入落定且无临时残骸")
+
+
 PHASE5 = [
     test_url_fileid_extraction,
     test_reporter_classify_fetch_vs_save,
@@ -3974,13 +4105,22 @@ PHASE5 = [
     test_main_index_reuse_is_scoped_to_platform_and_group,
 ]
 
+PHASE6 = [
+    # v1.11.0: 第二轮审计补齐的覆盖
+    test_reporter_windows_paths_show_common_dir,
+    test_components_file_kind_keeps_http_url_in_file,
+    test_plugin_forward_render_failure_is_indexed,
+    test_storage_write_leaves_no_partial_files,
+]
+
 
 if __name__ == "__main__":
     # 离线冒烟不真等「迟到缓存重查」的 sleep,否则下载失败类用例每个多等 16s。
     # (需要验证等待逻辑本身的用例自己在内部把这一项恢复成真值)
     plugin_main._LATE_CACHE_DELAYS_S = ()
-    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5:
+    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5 + PHASE6:
         t()
-    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d, total=%d)"
+    print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d phase6=%d, total=%d)"
           % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4), len(PHASE5),
-             len(PHASE1) + len(PHASE2) + len(PHASE3) + len(PHASE4) + len(PHASE5)))
+             len(PHASE6), len(PHASE1) + len(PHASE2) + len(PHASE3) + len(PHASE4)
+             + len(PHASE5) + len(PHASE6)))

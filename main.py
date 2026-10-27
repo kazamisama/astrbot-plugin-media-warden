@@ -204,12 +204,15 @@ def _is_sha16(token: str) -> bool:
 
 
 def _format_asset_row(r: dict) -> str:
-    """/warden list 与 /warden lookup 共用的单行渲染(时间可读,不是裸 epoch)."""
+    """/warden list / lookup(按 msg_id) / lookup(按 sha16) 共用的单行渲染.
+
+    时间可读而不是裸 epoch,并带上 sha16 —— 那正是 /warden lookup <sha16> 的入参。
+    """
     ts = time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))
     fwd = f" | fwd={r['forward_meta']}" if r.get("forward_meta") else ""
     return (
         f"- id={r['id']} [{ts}] {r['platform']}:{r['group_id']} "
-        f"sender={r['sender_id']} idx={r['idx']} "
+        f"sender={r['sender_id']} msg={r.get('msg_id')}#{r['idx']} "
         f"kind={r['kind']} size={r['size']} "
         f"sha16={r.get('sha16')}{fwd} -> {r['path']}"
     )
@@ -251,7 +254,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.10.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail, 预览回传 + 可选引用原消息, 命令仅管理员可用",
+    "群聊素材守门人 v1.11.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail, 预览回传 + 可选引用原消息, 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -875,16 +878,24 @@ class MediaWardenStar(Star):
     def _failed(self, comp: Component, ctx: SaveContext, stage: str,
                 err: str, err_obj=None, *, url: Optional[str] = None,
                 subject: Optional[str] = None,
-                failure_kind: Optional[str] = None) -> AssetResult:
-        """统一构造失败结果:失败原因分类 + 入索引库 + 写日志。"""
+                failure_kind: Optional[str] = None,
+                kind: Optional[str] = None,
+                row_idx: Optional[int] = None) -> AssetResult:
+        """统一构造失败结果:失败原因分类 + 入索引库 + 写日志。
+
+        kind / row_idx: 同一条消息里的第二个产物(转发渲染图)要按自己的 kind
+        与 idx 入库(渲染图记 idx+100),不能借 comp.kind / ctx.idx。
+        """
+        out_kind = kind or comp.kind
+        out_idx = row_idx if row_idx is not None else ctx.idx
         note = getattr(err_obj, "fallback_error", None)
         if self._index is not None:
             try:
                 subj = subject or _failure_subject_for(comp)
                 _id, attempts, last_ts = self._index.record_failure(
                     platform=ctx.platform, group_id=ctx.group_id,
-                    sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=ctx.idx,
-                    kind=comp.kind, err=err, subject=subj, url=url,
+                    sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=out_idx,
+                    kind=out_kind, err=err, subject=subj, url=url,
                 )
                 if attempts > 1 and last_ts:
                     extra = (f"  [历史第 {attempts} 次,"
@@ -892,9 +903,9 @@ class MediaWardenStar(Star):
                     note = f"{note or ''}{extra}".strip()
             except Exception as e:
                 self._log(f"failure record failed: {e!r}")
-        self._log(f"{stage} failed for {comp.kind}: {err[:200]}")
+        self._log(f"{stage} failed for {out_kind}: {err[:200]}")
         return AssetResult(
-            kind=comp.kind, ok=False, err=err,
+            kind=out_kind, ok=False, err=err,
             failure_kind=failure_kind or classify_error(err),
             note=note,
         )
@@ -1218,8 +1229,8 @@ class MediaWardenStar(Star):
                             kind="forward", path=sr.path, size=sr.size,
                             sha16=sr.blake16, forward_meta={"node_count": len(nodes)},
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._log(f"index record failed: {e!r}")
                 results.append(AssetResult(kind="forward", ok=True,
                                            path=sr.path, size=len(payload),
                                            reused=sr.reused))
@@ -1298,9 +1309,14 @@ class MediaWardenStar(Star):
                     f"forward render aborted: {failed_urls}/{len(all_urls)} "
                     f"node image(s) failed to download"
                 )
-                results.append(AssetResult(
-                    kind="forward_render", ok=False,
-                    err=f"image download failed ({failed_urls}/{len(all_urls)})",
+                # v1.11.0: 这类失败以前绕过 _failed —— 不进 failures 表、没有 subject,
+                # 与 README 的"失败分类入库"自相矛盾,/warden fail 也查不到。
+                results.append(self._failed(
+                    comp, ctx, "forward_image",
+                    f"image download failed ({failed_urls}/{len(all_urls)})",
+                    subject=f"forward_render:{ctx.msg_id}#{ctx.idx + 100}",
+                    failure_kind="fetch", kind="forward_render",
+                    row_idx=ctx.idx + 100,
                 ))
             else:
                 try:
@@ -1322,15 +1338,18 @@ class MediaWardenStar(Star):
                                 kind="forward_render", path=sr.path, size=sr.size,
                                 sha16=sr.blake16,
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._log(f"index record failed: {e!r}")
                     results.append(AssetResult(
                         kind="forward_render", ok=True, path=sr.path, size=sr.size,
                         preview_path=sr.path, reused=sr.reused,
                     ))
                 except Exception as e:
-                    results.append(AssetResult(
-                        kind="forward_render", ok=False, err=f"render: {e}",
+                    results.append(self._failed(
+                        comp, ctx, "forward_image", f"render: {e}", e,
+                        subject=f"forward_render:{ctx.msg_id}#{ctx.idx + 100}",
+                        failure_kind="save", kind="forward_render",
+                        row_idx=ctx.idx + 100,
                     ))
 
         if not results:
@@ -1402,14 +1421,10 @@ class MediaWardenStar(Star):
         if not rows:
             yield event.plain_result("[Warden] (空索引)")
             return
+        # v1.11.0: list 以前自己拼一行,不带 sha16 —— 而 /warden lookup <sha16>
+        # 正需要这个值。现在与 lookup 共用 _format_asset_row。
         lines = [f"## 最近 {len(rows)} 条"]
-        for r in rows:
-            lines.append(
-                f"- [{time.strftime('%m-%d %H:%M', time.localtime(r['ts']))}] "
-                f"{r['platform']}:{r['group_id']} sender={r['sender_id']} "
-                f"msg={r['msg_id']}#{r['idx']} kind={r['kind']} "
-                f"size={r['size']} -> {r['path']}"
-            )
+        lines.extend(_format_asset_row(r) for r in rows)
         yield event.plain_result("\n".join(lines))
 
     @filter.command("warden stats")
@@ -1511,13 +1526,13 @@ class MediaWardenStar(Star):
         # v1.10: 16 位十六进制按内容 sha 反查(「这张图还在别处出现过吗」)
         if idx_filter is None and _is_sha16(msg_id):
             rows = self._index.find_by_sha(msg_id.lower())
-            if not rows:
-                yield event.plain_result(f"[Warden] 未找到 sha16={msg_id} 的资产")
+            if rows:
+                lines = [f"## sha16={msg_id} 出现 {len(rows)} 次"]
+                lines.extend(_format_asset_row(r) for r in rows)
+                yield event.plain_result("\n".join(lines))
                 return
-            lines = [f"## sha16={msg_id} 出现 {len(rows)} 次"]
-            lines.extend(_format_asset_row(r) for r in rows)
-            yield event.plain_result("\n".join(lines))
-            return
+            # v1.11.0: 没命中内容指纹时继续按 msg_id 查 —— 恰好是 16 位十六进制的
+            # msg_id 以前会被直接判"未找到",永远查不到。
         rows = self._index.find_by_msg(msg_id)
         if idx_filter is not None:
             rows = [r for r in rows if r["idx"] == idx_filter]

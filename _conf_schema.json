@@ -19,6 +19,7 @@
       "match_mode": {
         "type": "string",
         "default": "whitelist",
+        "options": ["whitelist", "blacklist"],
         "description": "匹配模式: whitelist(白名单) | blacklist(黑名单)",
         "hint": "白名单：群 + 用户两个维度都允许才落盘。黑名单：任一维度命中即跳过。"
       }
@@ -98,7 +99,7 @@
         "type": "bool",
         "default": true,
         "description": "下载失败后尝试 OneBot get_image / get_msg 重取链接与本地副本（v1.9.0+，v1.9.9 加迟到缓存重查）",
-        "hint": "默认开启。URL 是 http(s) 但下载失败（典型：QQ rkey 授权链接过期 -> 400）时的补救顺序：① 按消息段 MD5 找 QQ 客户端自己的图片缓存（Tencent Files/<QQ号>/Image/C2C/Image2 或 nt_qq/nt_data/Emoji，v1.9.5，命中即不走网络）；② 向 bot 发 get_image / get_msg 换新链接重下；③ 回退组件本地副本（napcat 的 .astrbot/data/temp 或 raw.convert_to_file_path）；④ 隔 4s/12s 再查一次 QQ 本地缓存（v1.9.9：接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）。全失败才判定失败；关闭后行为回到 v1.8.x。"
+        "hint": "默认开启。URL 是 http(s) 但下载失败（典型：QQ rkey 授权链接过期 -> 400）时的补救顺序：① 按消息段 MD5 找 QQ 客户端自己的图片缓存（Tencent Files/<QQ号>/Image/C2C/Image2 或 nt_qq/nt_data/Emoji，v1.9.5，命中即不走网络）；② 向 bot 发 get_image / get_msg 换新链接重下；③ 回退组件本地副本（napcat 的 .astrbot/data/temp 或 raw.convert_to_file_path）；④ 隔 5s/20s 再查一次 QQ 本地缓存（v1.9.9：接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）。全失败才判定失败；关闭后行为回到 v1.8.x。"
       }
     }
   },
@@ -123,12 +124,14 @@
       "forward_render_mode": {
         "type": "string",
         "default": "image",
+        "options": ["image", "json", "both"],
         "description": "转发链处理方式: image(渲染成图片) | json(保存为结构化JSON) | both(两者都生成)",
         "hint": "image / both 才会调用 PIL 渲染；json 总是会写 JSON 侧车。"
       },
       "forward_image_engine": {
         "type": "string",
         "default": "pil",
+        "options": ["pil", "playwright", "wkhtml"],
         "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)",
         "hint": "只有 pil 真正实现。选 playwright/wkhtml 也能启动：插件会打一条明确告警（'forward_image_engine=… 未实现 — 实际使用 PIL 渲染'）并继续用 PIL，不会静默切引擎，也不会降级成 JSON。"
       },
