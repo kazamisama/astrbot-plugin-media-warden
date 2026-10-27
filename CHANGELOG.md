@@ -35,7 +35,7 @@
 - `warden/index.py:prune_failures_older_than()`（并入 `prune_older_than()`）、`warden/components.is_text_only()`、`warden/reporter.py:failure_summary()`。
 
 ### Changed（重复实现合一）
-- **转发渲染**：`Forwarder.render()`（183 行）与 `_render_with_pil()`（153 行）有 134 行逐字相同（最长一段 34 行），`line_h` / `wrap_text` 各自定义两遍。现在两者只做「取字节 / 转 PIL」，然后调同一个 `_paint(nodes, node_pil)`；`line_h` / `wrap_text` 提升为模块级 `_line_h()` / `_wrap_text_simple()`。文件 606 行。
+- **转发渲染**：`Forwarder.render()`（183 行）与 `_render_with_pil()`（153 行）有 134 行逐字相同（最长一段 34 行），`line_h` / `wrap_text` 各自定义两遍。现在两者只做「取字节 / 转 PIL」，然后调同一个 `_paint(nodes, node_pil)`；`line_h` / `wrap_text` 提升为模块级 `_line_h()` / `_wrap_text_simple()`。文件 608 行。
 - **组件归一化**：`_coerce_obj` / `_coerce_one` 两份并行实现已经走散（`face` 只有 object 路径支持，image 的 meta 一边叫 `path` 一边叫 `summary`）。现在只有一条 `_coerce(t, _Fields, raw)`，`_Fields.of_obj()` / `_Fields.of_dict()` 只负责取字段。
 - **失败文案**：`failure_summary()` / `failure_phrase()` / `format_batch()` 各自重算 fetch/save 分布。现在统一走 `BatchResult._split_fetch_save()` + `_reason_line()`；回执字符串一字未改（有测试锁着）。
 - **迟到缓存重查**：媒体路径与转发节点图路径各自那一份 `for delay in _LATE_CACHE_DELAYS_S` 循环，合成 `_late_cache(probe, label)`。

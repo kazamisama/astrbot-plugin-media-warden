@@ -36,7 +36,7 @@
 - `prune_older_than(cutoff_ts) -> {"assets": n, "failures": m}`
 
 ### 结构
-- `main.py` 1534 行；`warden/forwarder.py` 606 行（两份渲染器合成 `render()` / `render_with_images()` → `_paint(nodes, node_pil)`）
+- `main.py` 1532 行；`warden/forwarder.py` 608 行（两份渲染器合成 `render()` / `render_with_images()` → `_paint(nodes, node_pil)`）
 - `warden/components.py` 只有一条归一化路径 `_coerce(t, _Fields, raw)`
 - `warden/reporter.py` 的 fetch/save 分布只算一次（`_split_fetch_save()` + `_reason_line()`）
 
@@ -391,8 +391,8 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 
 | 文件 | 改动 |
 | --- | --- |
-| `main.py`（1534 行） | 删 `_get_media_url_candidates`；`_cached_copy` / `_refetch_media` 改返回元组；抽 `_late_cache` / `_reply_prefix` / `_is_sha16` / `_format_asset_row`；空转发记失败；JSON 分支 `json.dumps` 进 try；`_failed` 用 `classify_error`；`_find_saved_asset` 带 platform/group；`/warden lookup <sha16>` + `/warden fail` 反复失败 top + prune 双计数 + list 可读时间；启动时告警未实现引擎并真探 Pillow |
-| `warden/forwarder.py`（606 行） | 两份渲染器合一 → `_paint(nodes, node_pil)`；`_line_h` / `_wrap_text_simple` 提升到模块级 |
+| `main.py`（1532 行） | 删 `_get_media_url_candidates`；`_cached_copy` / `_refetch_media` 改返回元组；抽 `_late_cache` / `_reply_prefix` / `_is_sha16` / `_format_asset_row`；空转发记失败；JSON 分支 `json.dumps` 进 try；`_failed` 用 `classify_error`；`_find_saved_asset` 带 platform/group；`/warden lookup <sha16>` + `/warden fail` 反复失败 top + prune 双计数 + list 可读时间；启动时告警未实现引擎并真探 Pillow |
+| `warden/forwarder.py`（608 行） | 两份渲染器合一 → `_paint(nodes, node_pil)`；`_line_h` / `_wrap_text_simple` 提升到模块级 |
 | `warden/components.py` | 单一 `_coerce(t, _Fields, raw)`；`_Fields.of_obj/of_dict`；face/image 两条路径统一 |
 | `warden/reporter.py` | 删 `failure_summary`；`_split_fetch_save()` + `_reason_line()` |
 | `warden/index.py` | `SCHEMA_TABLES`/`SCHEMA_INDEXES` 分离 + `_ensure_columns()` + `PRAGMA user_version=1` + `index.migrated`；`prune_older_than` 返回 dict；删 `prune_failures_older_than`；`find_by_msg(platform=, group_id=)` |
