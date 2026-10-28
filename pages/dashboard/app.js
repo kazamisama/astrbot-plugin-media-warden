@@ -94,7 +94,9 @@
 
   function hydrateThumbs(item, root) {
     var scope = root || document;
-    var imgs = scope.querySelectorAll(".thumb[data-asset]");
+    // 任何带 data-asset 的 <img> 都要走鉴权接口取图:Tauri 里 <img src="/api/...#">
+    // 带不上 Authorization,直连恒 401。渲染图(.render-img)以前选不到,于是只剩破图标。
+    var imgs = scope.querySelectorAll("img[data-asset]");
     Array.prototype.forEach.call(imgs, function (img) {
       var rel = img.getAttribute("data-asset");
       img.removeAttribute("data-asset");
@@ -497,7 +499,9 @@
     });
     document.addEventListener("click", function (e) {
       var img = e.target;
-      if (img && img.classList && img.classList.contains("thumb") && img.src) {
+      // 缩略图与整张渲染图都能点开看原尺寸(渲染图是 data URL,lightbox 直接复用)
+      if (img && img.classList && (img.classList.contains("thumb") ||
+          img.classList.contains("render-img")) && img.src) {
         openLightbox(img.src);
       }
     });

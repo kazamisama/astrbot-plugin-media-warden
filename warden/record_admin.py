@@ -61,6 +61,45 @@ def _node_text(node: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _forward_preview(rec: dict) -> str:
+    """列表预览:优先整条记录的文字(以前只取第一个节点,纯图片节点就成了「[图片]」)。
+
+    整条里一个字的文本都没有时,退回「图片 N · 表情 M」这种计数 —— 比六个节点
+    只显示一个「[图片]」有用。
+    """
+    texts = []
+    counts = {"图片": 0, "表情": 0, "@": 0}
+    for node in rec.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        for seg in node.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            kind = seg.get("type")
+            data = seg.get("data") or {}
+            if kind == "text":
+                chunk = str(data.get("text") or "").strip()
+                if chunk:
+                    texts.append(chunk)
+            elif kind == "image":
+                counts["图片"] += 1
+            elif kind == "face":
+                counts["表情"] += 1
+            elif kind == "at":
+                counts["@"] += 1
+    if texts:
+        return " ".join(texts)
+    parts = ["%s %d" % (k, v) for k, v in counts.items() if v]
+    return " · ".join(parts)
+
+
+def _entry_bytes(root: str, name: str, rec: dict) -> int:
+    """条目占用的总字节:资产 + render.png + 结构化 json。"""
+    render = rec.get("render") if isinstance(rec.get("render"), str) else None
+    files = [render or RENDER_FILENAME]
+    return _asset_bytes(rec) + _dir_file_bytes(root, name, files)
+
+
 def _all_text(rec: dict) -> str:
     chunks = [str(rec.get("record_id") or ""), str(rec.get("group_id") or "")]
     for node in rec.get("nodes") or []:
@@ -104,7 +143,7 @@ def entry_item(root: str, name: str, entry: dict) -> dict:
         "node_count": 1,
         "asset_count": 0,
         "missing_count": 0,
-        "bytes": 0,
+        "bytes": _entry_bytes(root, name, entry),
         "preview": _entry_text(entry)[:80],
         "can_native": False,
         "has_render": bool(render) and meta is not None,
@@ -173,7 +212,7 @@ def scan_items(root: str, *, q: str = "", group: str = "", kind: str = "",
                     continue
                 if want_group and str(rec.get("group_id") or "") != want_group:
                     continue
-                row = _forward_item(rec, name)
+                row = _forward_item(root, rec, name)
             else:
                 entry = load_entry(root, name)
                 if not entry:
@@ -214,9 +253,9 @@ def scan_items(root: str, *, q: str = "", group: str = "", kind: str = "",
             "kinds": list(KINDS), "labels": dict(KIND_LABELS)}
 
 
-def _forward_item(rec: dict, name: str) -> dict:
+def _forward_item(root: str, rec: dict, name: str) -> dict:
     nodes = [n for n in rec.get("nodes") or [] if isinstance(n, dict)]
-    preview = _node_text(nodes[0]) if nodes else ""
+    preview = _forward_preview(rec) or ("%d 节点" % len(nodes) if nodes else "")
     return {
         "source": "entry",
         "kind": "forward",
@@ -229,7 +268,7 @@ def _forward_item(rec: dict, name: str) -> dict:
         "node_count": int(rec.get("node_count") or len(nodes)),
         "asset_count": len(rec.get("assets") or []),
         "missing_count": len(rec.get("missing") or []),
-        "bytes": _asset_bytes(rec),
+        "bytes": _entry_bytes(root, name, rec),
         "preview": preview[:80],
         "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
         "has_render": bool(rec.get("render")),
@@ -255,7 +294,7 @@ def scan_records(root: str, *, q: str = "", group: str = "",
         if needle and needle not in _all_text(rec).lower():
             continue
         nodes = [n for n in rec.get("nodes") or [] if isinstance(n, dict)]
-        preview = _node_text(nodes[0]) if nodes else ""
+        preview = _forward_preview(rec) or ("%d 节点" % len(nodes) if nodes else "")
         items.append({
             "record_id": rec.get("record_id", name),
             "captured_ts": int(rec.get("captured_ts") or 0),
@@ -264,7 +303,7 @@ def scan_records(root: str, *, q: str = "", group: str = "",
             "node_count": int(rec.get("node_count") or len(nodes)),
             "asset_count": len(rec.get("assets") or []),
             "missing_count": len(rec.get("missing") or []),
-            "bytes": _asset_bytes(rec),
+            "bytes": _entry_bytes(root, name, rec),
             "preview": preview[:80],
             "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
         })
