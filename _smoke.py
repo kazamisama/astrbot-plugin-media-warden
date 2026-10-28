@@ -5427,6 +5427,53 @@ def test_plugin_persist_config_writes_schema_group():
     assert inst._forwarder is None or inst._forwarder.cfg.width == 800
     print("  OK -> 写进 render_style 分组并落盘")
 
+def test_record_admin_forward_returns_new_message_id():
+    banner("record_admin: 转发结果带回新消息 id（页面/回执可以拿它去撤回或核对）")
+    import asyncio
+    calls = []
+
+    class _Bot:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def call_action(self, action, **kw):
+            calls.append((action, kw))
+            if action == "get_msg":
+                return {"message": [{"type": "forward", "data": {"id": "1"}}]}
+            if action == "forward_group_single_msg":
+                return self.payload
+            if action == "send_group_forward_msg":
+                return self.payload
+            return None
+
+    ok = asyncio.run(record_admin.native_forward(_Bot({"data": {"message_id": 900001}}),
+                                                "961583271", "1481691615"))
+    assert ok["ok"] and ok["new_message_id"] == "900001", ok
+    assert ok["origin_message_id"] == "1481691615", ok
+
+    tmp = tempfile.mkdtemp(prefix="warden_fwd_id_")
+    rec = asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "text", "data": {"text": "hi"}}]}],
+        platform="aiocqhttp", group_id="961583271", msg_id="1481691615",
+        storage_root=tmp, fetch_image=lambda d: None, ts=1720000600,
+    ))
+    base = record_store.record_dir(tmp, rec["record_id"])
+    rb = asyncio.run(record_admin.rebuild_forward(
+        _Bot({"status": "ok", "data": {"message_id": 900002}}),
+        "256678737", rec, base))
+    assert rb["ok"] and rb["new_message_id"] == "900002", rb
+    assert rb["group_id"] == "256678737" and rb["node_count"] == 1, rb
+
+    # 取不到 id 不算失败，只是回执里没得报
+    quiet = asyncio.run(record_admin.rebuild_forward(_Bot(None), "1", rec, base))
+    assert quiet["ok"] and quiet["new_message_id"] == "", quiet
+    # 动作返回 failed 视为失败（不再静默当成功）
+    bad = asyncio.run(record_admin.rebuild_forward(
+        _Bot({"status": "failed", "message": "没权限"}), "1", rec, base))
+    assert not bad["ok"] and "没权限" in bad["error"], bad
+    print("  OK -> native/rebuild 都带回 new_message_id，failed 不再静默")
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5441,6 +5488,7 @@ PHASE9 = [
     test_plugin_style_update_and_page,
     test_config_reads_nested_schema_groups,
     test_plugin_persist_config_writes_schema_group,
+    test_record_admin_forward_returns_new_message_id,
 ]
 
 

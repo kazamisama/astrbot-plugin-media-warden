@@ -515,6 +515,21 @@ def node_payloads(rec: dict, base_dir: str) -> list:
     return out
 
 
+def _result_message_id(res: Any) -> str:
+    """从 OneBot 动作返回值里取「新消息 id」—— 各家实现放的位置不一样，
+    取不到不算失败（只影响回执里能不能报出 id）。"""
+    if isinstance(res, dict):
+        data = res.get("data")
+        if isinstance(data, dict):
+            for key in ("message_id", "id"):
+                if data.get(key) not in (None, ""):
+                    return str(data[key])
+        for key in ("message_id", "id"):
+            if res.get(key) not in (None, ""):
+                return str(res[key])
+    return ""
+
+
 async def native_forward(bot: Any, group_id: str, message_id: str) -> dict:
     """让 QQ 把原消息再转发一遍（保气泡/挂件/头像）。bot 是 aiocqhttp 的 CQHttp。"""
     if bot is None:
@@ -549,6 +564,7 @@ async def native_forward(bot: Any, group_id: str, message_id: str) -> dict:
     if isinstance(res, dict) and str(res.get("status") or "").lower() == "failed":
         return {"ok": False, "error": str(res.get("message") or res)}
     return {"ok": True, "mode": "native", "message_id": target,
+            "origin_message_id": target, "new_message_id": _result_message_id(res),
             "group_id": str(group_id)}
 
 
@@ -562,9 +578,12 @@ async def rebuild_forward(bot: Any, group_id: str, rec: dict,
         return {"ok": False, "error": "存档里没有可发送的节点"}
     call = getattr(bot, "call_action", None)
     try:
-        await call("send_group_forward_msg", group_id=str(group_id),
-                   messages=nodes)
+        res = await call("send_group_forward_msg", group_id=str(group_id),
+                         messages=nodes)
     except Exception as e:
         return {"ok": False, "error": f"重建转发失败: {e!r}"}
+    if isinstance(res, dict) and str(res.get("status") or "").lower() == "failed":
+        return {"ok": False, "error": str(res.get("message") or res)}
     return {"ok": True, "mode": "rebuild", "node_count": len(nodes),
+            "new_message_id": _result_message_id(res),
             "group_id": str(group_id)}
