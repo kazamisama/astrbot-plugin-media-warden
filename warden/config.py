@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
@@ -40,9 +40,11 @@ class MediaWardenConfig:
     ])
     # ---- v1.14.0 聊天记录自动转发（可选，默认关） ----
     auto_forward_enabled: bool = False
-    # rebuild = 用存档重建合并转发（无装扮，永远可用）
-    # native  = 把源群那条原消息原地转发到目标群（保装扮，跨群需 QQ 允许）
-    auto_forward_mode: str = "rebuild"
+    # native  = 转发原消息（保气泡/挂件，但只对**原群**可靠；跨群基本必失败并
+    #           自动回退 rebuild，所以每个跨群目标会白试一次 —— 2026-10-28 实测）
+    # rebuild = 用存档重拼合并转发（无装扮，永远可用）
+    # v1.15.0: 默认从 rebuild 改成 native（用户要求优先保装扮，失败自动回退）
+    auto_forward_mode: str = "native"
     forward_target_groups: List[str] = field(default_factory=list)
     # ---- v1.14.0 Pillow 渲染样式（样式页可改） ----
     style_width: int = 720
@@ -63,8 +65,9 @@ class MediaWardenConfig:
     # 取值保留 pil/playwright/wkhtml 三个历史槽位,但只有 pil 落地:
     # main.initialize() 会对非 pil 打一条明确的告警并继续用 pil(不静默生效)。
     forward_image_engine: str = "pil"
-    forward_image_width: int = 720
-    # v1.10.0: 以前这个开关是空壳(代码里从没读过),实际行为 = 不引用。
+    # 画布宽度只有一个真源:style_width(样式页/样式组)。旧的 forward_image_width
+    # 在 v1.15.0 删除 —— 它总是被 apply_style() 覆盖,留在 schema 里只会让人以为
+    # 是两个不同的旋钮。    # v1.10.0: 以前这个开关是空壳(代码里从没读过),实际行为 = 不引用。
     # 现在接上了 Reply 组件,默认值保持 false 以免升级后突然给每条回执加引用。
     reply_to_original: bool = False
     reply_preview: bool = True
@@ -126,10 +129,6 @@ class MediaWardenConfig:
         if self.max_file_size_mb < 1:
             raise ValueError(
                 f"max_file_size_mb must be >= 1, got {self.max_file_size_mb!r}"
-            )
-        if self.forward_image_width < 1:
-            raise ValueError(
-                f"forward_image_width must be >= 1, got {self.forward_image_width!r}"
             )
         if self.forward_render_max_nodes < 1:
             raise ValueError(

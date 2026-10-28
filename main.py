@@ -260,7 +260,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.14.0: 按群/按人 + 按类型(图片/动图/视频/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染/JSON 保存, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览), 命令仅管理员可用",
+    "群聊素材守门人 v1.15.0: 按群/按人 + 按类型(图片/动图/视频/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染/JSON 保存, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -286,7 +286,43 @@ class MediaWardenStar(Star):
             f"| concurrent={self.cfg.max_concurrent}"
         )
 
+    def _migrate_config_groups(self) -> None:
+        """schema 重组后的一次性迁移：旧的 `forward` 组并进 `render`（v1.15.0）。
+
+        AstrBot 按 `_conf_schema.json` 顶层键分组存配置，组改名后老值会留在没人
+        再读的组里（读端 `_flatten_raw` 还能捞到，但 WebUI 一保存就丢）。页面写
+        配置是「找键所在组」，所以这里把老组整组并过去，再保存一次。
+        幂等：迁移完 `forward` 组就没了，下次启动直接返回。
+        """
+        obj = getattr(self, "_config_obj", None)
+        if not isinstance(obj, dict):
+            return
+        old = obj.get("forward")
+        if not isinstance(old, dict) or not old:
+            return
+        target = obj.get("render")
+        if not isinstance(target, dict):
+            target = obj["render"] = {}
+        moved = 0
+        for key, value in list(old.items()):
+            if key == "forward_image_width":
+                continue  # 与 style_width 重复，v1.15.0 删除
+            target.setdefault(key, value)
+            moved += 1
+        try:
+            obj.pop("forward", None)
+        except Exception:
+            pass
+        saver = getattr(obj, "save_config", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception as e:
+                self._log(f"config save failed after group migration: {e!r}")
+        self._log(f"config groups migrated: forward -> render ({moved} key(s))")
+
     async def initialize(self) -> None:
+        self._migrate_config_groups()
         self._storage = Storage(
             root=self.cfg.storage_root,
             dedupe=self.cfg.dedupe,
@@ -315,7 +351,7 @@ class MediaWardenStar(Star):
             import PIL  # noqa: F401
             from .warden.forwarder import Forwarder
             self._forwarder = Forwarder(
-                width=self.cfg.forward_image_width,
+                width=self.cfg.style_width,  # 宽度只有这一个真源(旧 forward_image_width 已删)
                 max_nodes=self.cfg.forward_render_max_nodes,
             )
             self._apply_render_style()
@@ -422,9 +458,7 @@ class MediaWardenStar(Star):
             self._log(f"apply render style failed: {e!r}")
 
     def style_snapshot(self) -> dict:
-        out = {k: getattr(self.cfg, k) for k in self._STYLE_FIELDS}
-        out["forward_image_width"] = self.cfg.forward_image_width
-        return out
+        return {k: getattr(self.cfg, k) for k in self._STYLE_FIELDS}
 
     def update_style(self, values: dict) -> tuple[dict, list[str], list[str]]:
         """样式页保存:校验 -> 应用到 cfg -> 灌进渲染器 -> 写回插件配置文件.

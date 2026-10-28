@@ -1,21 +1,9 @@
 {
   "filter": {
-    "description": "监听范围",
+    "description": "① 监听范围（存谁的消息）",
     "type": "object",
-    "hint": "监听范围。**空 = 不保存**（安全默认）：群列表空则什么都不存；用户列表空同样什么都不存，写 `*` 表示该群所有人。黑名单模式下空 = 不限。",
+    "hint": "先决定「谁来都存、谁不存」。白名单是安全默认：列表为空时什么都不存。",
     "items": {
-      "target_groups": {
-        "type": "list",
-        "default": [],
-        "description": "要保存的群 ID（`platform:group_id` 或裸 group_id）。空 = 不保存任何群。",
-        "hint": "v1.14.0 起语义反转：以前空 = 不限，现在空 = 关闭。"
-      },
-      "target_users": {
-        "type": "list",
-        "default": [],
-        "description": "要保存的发送人 user_id 列表。空 = 不保存任何人；写 `*` = 该群所有人。",
-        "hint": "示例：[\"*\"] 全部人、[\"2510536451\", \"206216334\"] 只存这两人。"
-      },
       "match_mode": {
         "type": "string",
         "default": "whitelist",
@@ -23,246 +11,51 @@
           "whitelist",
           "blacklist"
         ],
-        "description": "匹配模式: whitelist(白名单) | blacklist(黑名单)",
-        "hint": "白名单：群 + 用户都命中才保存（空 = 不保存）。黑名单：任一维度命中即跳过（空 = 不限，想全存用这个）。"
-      }
-    }
-  },
-  "storage": {
-    "description": "保存与索引",
-    "type": "object",
-    "hint": "落盘路径、文件命名规则、去重、SQLite 索引。",
-    "items": {
-      "storage_root": {
-        "type": "string",
-        "default": "data/warden",
-        "description": "存储根目录，相对 AstrBot 工作目录",
-        "hint": "落盘的根路径。PluginInitializer 会 mkdir(root, exist_ok=True)。子目录 _blake/<aa>/<bb>/<hex>.ptr 是去重指针，_warden.db 是索引（可独立删除重建），_avatars/ 是头像缓存。"
+        "description": "匹配模式：白名单 / 黑名单",
+        "hint": "白名单：群和人都命中才保存（两个列表都空 = 什么都不存）。黑名单：任一维度命中就跳过（列表空 = 不限，想全存用这个）。"
       },
-      "filename_pattern": {
-        "type": "string",
-        "default": "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}",
-        "description": "文件相对路径模板",
-        "hint": "可用变量: {platform} {group_id} {sender_id} {sender_name} {date} {time} {msg_id} {idx} {kind} {safe_name} {ext} {short_id}。{ext} 以 . 开头(如 .jpg)，直接接在模板末尾，勿再写额外的 . 号。模板里的 '..' 段会被压平防越权。"
-      },
-      "max_file_size_mb": {
-        "type": "int",
-        "default": 100,
-        "min": 1,
-        "description": "单文件大小上限（MB），超过则跳过",
-        "hint": "对单个媒体 / 转发图生效，超限直接丢弃对应项。头像另有固定 5MB 上限（avatar_cache_size_mb 只管缓存总量），不受本项影响。"
-      },
-      "dedupe": {
-        "type": "bool",
-        "default": true,
-        "description": "对相同内容做去重（基于 blake2b 头 1MB 哈希）",
-        "hint": "命中已有文件则不重复落盘，用 .ptr 指针文件记录首存路径。索引里 size 字段是首次大小。"
-      },
-      "enable_index_db": {
-        "type": "bool",
-        "default": true,
-        "description": "是否启用 SQLite 索引",
-        "hint": "关闭后 /warden list/stats/export/lookup/prune 全部失效。索引文件 <storage_root>/_warden.db。"
-      },
-      "index_reuse_saved": {
-        "type": "bool",
-        "default": false,
-        "description": "同一消息同一下标的媒体已落盘过时，直接复用索引里的文件（v1.9.0+）",
-        "hint": "默认关闭。开启后：命中 (msg_id, idx) 且文件仍在磁盘时跳过下载与落盘，回执里标 '索引复用'；文件已被删除则明确报 'reuse: stored file missing' 并计为落盘失败，不会伪装成功。"
-      }
-    }
-  },
-  "download": {
-    "description": "下载与并发",
-    "type": "object",
-    "hint": "媒体 / 节点图下载的重试、并发、超时。",
-    "items": {
-      "download_retries": {
-        "type": "int",
-        "default": 2,
-        "min": 0,
-        "description": "单个媒体下载失败后的最大重试次数",
-        "hint": "仅对 transient 错误重试：超时 / 连接错 / 5xx / 429。4xx 立即抛。"
-      },
-      "max_concurrent": {
-        "type": "int",
-        "default": 4,
-        "min": 1,
-        "description": "同一条消息内媒体的最大并发下载数",
-        "hint": "对节点图并发抓取、头像并发抓取都生效。值越大占用网络越多。"
-      },
-      "download_timeout_s": {
-        "type": "int",
-        "default": 30,
-        "min": 1,
-        "description": "单次媒体/转发图下载的超时秒数（必须 > 0）",
-        "hint": "超过该秒数视作下载失败。"
-      },
-      "get_media_fallback": {
-        "type": "bool",
-        "default": true,
-        "description": "下载失败后尝试 OneBot get_image / get_msg 重取链接与本地副本（v1.9.0+，v1.9.9 加迟到缓存重查）",
-        "hint": "默认开启。URL 是 http(s) 但下载失败（典型：QQ rkey 授权链接过期 -> 400）时的补救顺序：① 按消息段 MD5 找 QQ 客户端自己的图片缓存（Tencent Files/<QQ号>/Image/C2C/Image2 或 nt_qq/nt_data/Emoji，v1.9.5，命中即不走网络）；② 向 bot 发 get_image / get_msg 换新链接重下；③ 回退组件本地副本（napcat 的 .astrbot/data/temp 或 raw.convert_to_file_path）；④ 隔 5s/20s 再查一次 QQ 本地缓存（v1.9.9：接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）。全失败才判定失败；关闭后行为回到 v1.8.x。"
-      }
-    }
-  },
-  "logging": {
-    "description": "日志",
-    "type": "object",
-    "hint": "插件自身日志开关（v1.10.0 起可在 WebUI 配置，之前只存在于代码与 README）。",
-    "items": {
-      "log_to_stdout": {
-        "type": "bool",
-        "default": true,
-        "description": "把插件日志打到 AstrBot 标准输出",
-        "hint": "命中的消息、每一级补救、失败原因都会打印。排查问题时打开，长期运行想清静可关闭（失败仍会进索引库，可用 /warden fail 查）。"
-      }
-    }
-  },
-  "forward": {
-    "description": "转发渲染",
-    "type": "object",
-    "hint": "合并转发消息渲染为图片的参数。render_mode=json 时本节大部分项无效。",
-    "items": {
-      "forward_render_mode": {
-        "type": "string",
-        "default": "image",
-        "options": [
-          "image",
-          "json",
-          "both"
-        ],
-        "description": "转发链处理方式: image(渲染成图片) | json(保存为结构化JSON) | both(两者都生成)",
-        "hint": "image / both 才会调用 PIL 渲染；json 总是会写 JSON 侧车。"
-      },
-      "forward_image_engine": {
-        "type": "string",
-        "default": "pil",
-        "options": [
-          "pil",
-          "playwright",
-          "wkhtml"
-        ],
-        "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)",
-        "hint": "只有 pil 真正实现。选 playwright/wkhtml 也能启动：插件会打一条明确告警（'forward_image_engine=… 未实现 — 实际使用 PIL 渲染'）并继续用 PIL，不会静默切引擎，也不会降级成 JSON。"
-      },
-      "forward_image_width": {
-        "type": "int",
-        "default": 720,
-        "min": 1,
-        "description": "转发渲染图宽度（像素）",
-        "hint": "节点气泡最大宽度受此限制。太大 PNG 体积爆炸。"
-      },
-      "forward_render_max_nodes": {
-        "type": "int",
-        "default": 30,
-        "min": 1,
-        "description": "单条转发渲染的最大节点数（v1.7.1+）",
-        "hint": "超过此值的转发自动降级为 JSON-only（不渲染图片）。日志会打 'forward too large (N nodes) — JSON only'。61 节点的群聊转发用默认 30 不会出图，调到 60+ 可以强制渲染。"
-      },
-      "enable_user_avatar": {
-        "type": "bool",
-        "default": true,
-        "description": "启用转发节点用户头像",
-        "hint": "开启后，转发渲染时会在每条节点头部左侧画圆形头像（QQ qlogo.cn 抓取）。抓取失败静默跳过，不影响其他内容渲染。"
-      },
-      "avatar_size": {
-        "type": "int",
-        "default": 36,
-        "min": 1,
-        "description": "头像直径（像素）",
-        "hint": "圆形头像的直径，建议 24-48。"
-      },
-      "avatar_timeout_s": {
-        "type": "int",
-        "default": 10,
-        "min": 1,
-        "description": "单头像抓取超时（秒）（v1.7.1: 5 → 10）",
-        "hint": "q.qlogo.cn 冷启动可能 5s+ 才回，调到 10s 减少首抓超时。"
-      },
-      "avatar_cache_size_mb": {
-        "type": "int",
-        "default": 50,
-        "min": 0,
-        "description": "头像缓存容量上限（MB）",
-        "hint": "头像缓存总大小超过该值时按 mtime LRU 删旧文件。"
-      },
-      "avatar_platforms": {
+      "target_groups": {
         "type": "list",
-        "default": [
-          "aiocqhttp",
-          "qq_official"
-        ],
-        "description": "允许抓取头像的平台白名单（v1.8.0+）",
-        "hint": "仅对名单内平台抓取转发节点头像（QQ qlogo.cn）。napcat/lagrange 等 OneBot 实现平台名为 aiocqhttp，已被默认覆盖。"
-      }
-    }
-  },
-  "reply": {
-    "description": "回复行为",
-    "type": "object",
-    "hint": "保存后是否回复原文 / 附预览图 / 失败时 @提醒。",
-    "items": {
-      "reply_to_original": {
-        "type": "bool",
-        "default": false,
-        "description": "回执是否引用原消息（v1.10.0 起真正生效）",
-        "hint": "开启后回执会带一个 Reply 组件引用被保存的那条消息；适配器不支持 Reply 或 message_id 不可用时自动退化为普通文本。默认关闭（= v1.9.x 的实际行为）。"
+        "default": [],
+        "description": "要保存的群",
+        "hint": "填群号（123456 或 aiocqhttp:123456）。白名单模式下留空 = 一个群都不存。"
       },
-      "reply_preview": {
-        "type": "bool",
-        "default": true,
-        "description": "回复时是否附带第一张图片作为预览缩略图",
-        "hint": "优先选 forward_render 渲染图；否则用第一张 image。无 image_result 实现时降级为 '预览: <path>' 文本。"
-      },
-      "at_on_save_failure": {
-        "type": "bool",
-        "default": true,
-        "description": "保存出现失败时，是否额外 @ 触发该消息的监听对象进行提醒",
-        "hint": "如果有失败项，会在 reply chain 末尾追加 @sender_id + ' 有 X/Y 个媒体保存失败'。"
+      "target_users": {
+        "type": "list",
+        "default": [],
+        "description": "要保存的发送人",
+        "hint": "填 user_id；写 * 表示该群所有人。白名单模式下留空 = 谁都不存。"
       }
     }
   },
   "save_types": {
+    "description": "② 保存哪些类型",
     "type": "object",
-    "description": "保存哪些类型",
-    "hint": "六类各自开关。纯文本是 v1.14.0 新增能力（以前纯文本不进保存流程），默认关。",
+    "hint": "六类各自开关，在下载之前就按类型丢弃（不开的类型不会产生下载与失败记录）。没有「默认自动保存」的类型。",
     "items": {
       "save_images": {
         "type": "bool",
         "default": true,
-        "description": "保存图片",
-        "hint": "不含动图（动图单独开关）"
+        "description": "图片",
+        "hint": "静态图片；动图由下一项单独控制。"
       },
       "save_gifs": {
         "type": "bool",
         "default": true,
-        "description": "保存动图",
-        "hint": "gif / apng；静态 webp 下载后会归回「图片」"
+        "description": "动图",
+        "hint": "GIF / APNG / 动态 WebP；静态 WebP 下载后会归回「图片」。"
       },
       "save_videos": {
         "type": "bool",
         "default": true,
-        "description": "保存视频",
-        "hint": ""
+        "description": "视频",
+        "hint": "视频文件。"
       },
       "save_files": {
         "type": "bool",
         "default": true,
-        "description": "保存文档文件",
-        "hint": "受下面的扩展名白名单约束"
-      },
-      "save_forwards": {
-        "type": "bool",
-        "default": true,
-        "description": "保存聊天记录（合并转发）",
-        "hint": "落结构化 JSON + Pillow 渲染图，共用一个条目"
-      },
-      "save_texts": {
-        "type": "bool",
-        "default": false,
-        "description": "保存纯文本消息",
-        "hint": "落 text.json（含元数据）+ render.png，共用一个条目"
+        "description": "文档（群文件）",
+        "hint": "扩展名受下一项白名单约束。"
       },
       "doc_ext_whitelist": {
         "type": "list",
@@ -282,50 +75,215 @@
           "rar",
           "epub"
         ],
-        "description": "文档扩展名白名单（不含点，大小写不敏感）",
-        "hint": "只保存这些扩展名的 file 段；留空 = 不限制。"
+        "description": "文档扩展名白名单",
+        "hint": "不带点、大小写不敏感；留空 = 不限扩展名。"
+      },
+      "save_texts": {
+        "type": "bool",
+        "default": false,
+        "description": "纯文本消息",
+        "hint": "存一条结构化记录 + 一张渲染图（共用一个条目）。默认关。"
+      },
+      "save_forwards": {
+        "type": "bool",
+        "default": true,
+        "description": "聊天记录（合并转发）",
+        "hint": "存结构化记录 + 渲染图，共用一个条目；同群同内容不会重复建目录。"
       }
     }
   },
-  "auto_forward": {
+  "storage": {
+    "description": "③ 存储与索引",
     "type": "object",
-    "description": "聊天记录自动转发",
-    "hint": "可选功能：把源群收到的聊天记录再发到另外的群。目标群为空时本功能不生效。",
+    "hint": "文件落在哪、怎么命名、要不要去重与索引。",
     "items": {
-      "auto_forward_enabled": {
+      "storage_root": {
+        "type": "string",
+        "default": "data/warden",
+        "description": "存储根目录",
+        "hint": "相对 AstrBot 工作目录。里面会有群/发送人子目录、_records 条目、_avatars 头像缓存、_warden.db 索引。"
+      },
+      "filename_pattern": {
+        "type": "string",
+        "default": "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}",
+        "description": "扁平文件命名模板",
+        "hint": "变量：{platform} {group_id} {sender_id} {sender_name} {date} {time} {msg_id} {idx} {kind} {safe_name} {short_id} {ext}；{ext} 自带点，别再加一个。"
+      },
+      "max_file_size_mb": {
+        "type": "int",
+        "default": 100,
+        "min": 1,
+        "description": "单文件大小上限（MB）",
+        "hint": "超过就跳过这一项。头像另有固定 5MB 上限，不受本项影响。"
+      },
+      "dedupe": {
+        "type": "bool",
+        "default": true,
+        "description": "相同内容只落盘一份",
+        "hint": "用 .ptr 指针文件记住首存路径。"
+      },
+      "enable_index_db": {
+        "type": "bool",
+        "default": true,
+        "description": "启用 SQLite 索引",
+        "hint": "关闭后 /warden list/stats/export/lookup/prune 与页面分类管理都不可用。"
+      },
+      "index_reuse_saved": {
         "type": "bool",
         "default": false,
-        "description": "启用自动转发",
-        "hint": "关闭时下面的设置都不生效"
+        "description": "同一条消息的媒体已存过就复用",
+        "hint": "命中 (msg_id, idx) 且文件还在就跳过下载；文件被删会明确报错，不伪装成功。"
+      }
+    }
+  },
+  "download": {
+    "description": "④ 下载与重试",
+    "type": "object",
+    "hint": "网络相关的超时、重试、并发，以及链路失效后的补救。",
+    "items": {
+      "download_timeout_s": {
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "description": "单次下载超时（秒）",
+        "hint": "媒体与节点图共用。"
       },
-      "auto_forward_mode": {
+      "download_retries": {
+        "type": "int",
+        "default": 2,
+        "min": 0,
+        "description": "失败重试次数",
+        "hint": "只重试超时 / 连接错 / 5xx / 429，4xx 直接失败。"
+      },
+      "max_concurrent": {
+        "type": "int",
+        "default": 4,
+        "min": 1,
+        "description": "同一条消息的并发下载数",
+        "hint": "对节点图与头像抓取同时生效，调大占更多网络。"
+      },
+      "get_media_fallback": {
+        "type": "bool",
+        "default": true,
+        "description": "下载失败后尝试补救",
+        "hint": "按 MD5 找 QQ 本地图片缓存 → get_image / get_msg 换新链接 → 组件本地副本 → 5s / 20s 后再查本地缓存。"
+      }
+    }
+  },
+  "render": {
+    "description": "⑤ 聊天记录渲染",
+    "type": "object",
+    "hint": "合并转发画成图片时的行为与头像；颜色字号等在「⑥ 渲染样式」或 dashboard 样式页里调。",
+    "items": {
+      "forward_render_mode": {
         "type": "string",
-        "default": "rebuild",
+        "default": "image",
         "options": [
-          "rebuild",
-          "native"
+          "image",
+          "json",
+          "both"
         ],
-        "description": "转发模式",
-        "hint": "rebuild = 用存档重建合并转发（无装扮，永远可用）；native = 把源群原消息原地转发（保气泡，跨群需 QQ 允许，失败自动回退 rebuild）"
+        "description": "聊天记录存成什么",
+        "hint": "image=渲染图；json=结构化 JSON；both=两者都留（推荐）。条目本身总会存结构化数据。"
       },
-      "forward_target_groups": {
+      "forward_render_max_nodes": {
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "description": "最多渲染多少节点",
+        "hint": "超过就只存结构化、不出图。想给大转发出图就调大（PNG 也会更大）。"
+      },
+      "forward_image_engine": {
+        "type": "string",
+        "default": "pil",
+        "options": [
+          "pil"
+        ],
+        "description": "渲染引擎",
+        "hint": "目前只有 PIL（纯 Python，无外部依赖）。旧配置里的 playwright / wkhtml 会打一条告警并继续用 PIL。"
+      },
+      "enable_user_avatar": {
+        "type": "bool",
+        "default": true,
+        "description": "渲染时画头像",
+        "hint": "从 qlogo.cn 抓；失败静默跳过，不影响其它内容。"
+      },
+      "avatar_size": {
+        "type": "int",
+        "default": 36,
+        "min": 1,
+        "description": "头像直径（像素）",
+        "hint": "建议 24–48。"
+      },
+      "avatar_timeout_s": {
+        "type": "int",
+        "default": 10,
+        "min": 1,
+        "description": "头像抓取超时（秒）",
+        "hint": "qlogo.cn 冷启动可能要 5s 以上，10s 比较稳。"
+      },
+      "avatar_cache_size_mb": {
+        "type": "int",
+        "default": 50,
+        "min": 0,
+        "description": "头像缓存上限（MB）",
+        "hint": "超过按 mtime LRU 删旧文件。"
+      },
+      "avatar_platforms": {
         "type": "list",
-        "default": [],
-        "description": "转发目标群（可多个）",
-        "hint": "填群号；留空 = 不转发。"
+        "default": [
+          "aiocqhttp",
+          "qq_official"
+        ],
+        "description": "允许抓头像的平台",
+        "hint": "napcat / lagrange 等 OneBot 实现的平台名是 aiocqhttp，默认已覆盖。"
       }
     }
   },
   "render_style": {
+    "description": "⑥ 渲染样式（颜色 / 字号）",
     "type": "object",
-    "description": "Pillow 渲染样式",
-    "hint": "纯文本与聊天记录的渲染图样式。dashboard 有独立的样式编辑页，支持实时预览；这里是最小配置入口。",
+    "hint": "dashboard 的「渲染样式」页有实时预览，建议在那里调；这里是同样的值，留作最小配置入口。",
     "items": {
       "style_width": {
         "type": "int",
         "default": 720,
-        "description": "画布宽度（像素）",
-        "hint": "200..3000"
+        "description": "画布宽度（像素，200–3000）",
+        "hint": "越大图越宽、体积越大。"
+      },
+      "style_font_size": {
+        "type": "int",
+        "default": 15,
+        "description": "正文字号（像素，8–48）",
+        "hint": ""
+      },
+      "style_radius": {
+        "type": "int",
+        "default": 12,
+        "description": "气泡圆角（像素，0–96）",
+        "hint": ""
+      },
+      "style_avatar_shape": {
+        "type": "string",
+        "default": "circle",
+        "options": [
+          "circle",
+          "square"
+        ],
+        "description": "头像形状",
+        "hint": "圆形 / 方形（方形的四角带小圆角）。"
+      },
+      "style_time_format": {
+        "type": "string",
+        "default": "%H:%M",
+        "description": "时间格式（strftime）",
+        "hint": "例：%H:%M / %m-%d %H:%M / %Y-%m-%d %H:%M。"
+      },
+      "style_dark": {
+        "type": "bool",
+        "default": false,
+        "description": "深色配色",
+        "hint": "只替换仍是默认值的颜色，显式设置的颜色优先。"
       },
       "style_bg_color": {
         "type": "string",
@@ -336,7 +294,7 @@
       "style_bubble_color": {
         "type": "string",
         "default": "#ffffff",
-        "description": "气泡颜色（#rrggbb）",
+        "description": "气泡色（#rrggbb）",
         "hint": ""
       },
       "style_text_color": {
@@ -348,42 +306,75 @@
       "style_dim_color": {
         "type": "string",
         "default": "#8a9099",
-        "description": "次要文字/时间颜色（#rrggbb）",
+        "description": "次要文字 / 时间颜色（#rrggbb）",
         "hint": ""
-      },
-      "style_radius": {
-        "type": "int",
-        "default": 12,
-        "description": "气泡圆角（像素）",
-        "hint": "0..96"
-      },
-      "style_font_size": {
-        "type": "int",
-        "default": 15,
-        "description": "正文字号（像素）",
-        "hint": "8..48"
-      },
-      "style_avatar_shape": {
-        "type": "string",
-        "default": "circle",
-        "options": [
-          "circle",
-          "square"
-        ],
-        "description": "头像形状",
-        "hint": ""
-      },
-      "style_time_format": {
-        "type": "string",
-        "default": "%H:%M",
-        "description": "时间格式（strftime）",
-        "hint": "例：%H:%M / %m-%d %H:%M"
-      },
-      "style_dark": {
+      }
+    }
+  },
+  "auto_forward": {
+    "description": "⑦ 自动转发（可选）",
+    "type": "object",
+    "hint": "把源群刚存下的聊天记录再发到其它群。目标群为空时整节不生效。",
+    "items": {
+      "auto_forward_enabled": {
         "type": "bool",
         "default": false,
-        "description": "深色配色",
-        "hint": "开启后气泡/文字颜色按深色主题反转（仍以显式颜色为准）"
+        "description": "启用自动转发",
+        "hint": "关掉时下面两项都不生效。"
+      },
+      "forward_target_groups": {
+        "type": "list",
+        "default": [],
+        "description": "转发到哪些群",
+        "hint": "填群号，可多个；留空 = 不转发。"
+      },
+      "auto_forward_mode": {
+        "type": "string",
+        "default": "native",
+        "options": [
+          "native",
+          "rebuild"
+        ],
+        "description": "转发方式",
+        "hint": "native=转发原消息（保气泡/挂件/头像，但只对原群可靠；跨群基本必失败并自动回退）。rebuild=按存档重拼（无装扮，永远可用）。"
+      }
+    }
+  },
+  "reply": {
+    "description": "⑧ 保存后的回执",
+    "type": "object",
+    "hint": "存完在群里回什么：引用原消息、附图预览、失败提醒。",
+    "items": {
+      "reply_preview": {
+        "type": "bool",
+        "default": true,
+        "description": "回执附图预览",
+        "hint": "优先用渲染图，没有就用第一张图片；不支持时退化为文本路径。"
+      },
+      "reply_to_original": {
+        "type": "bool",
+        "default": false,
+        "description": "回执引用原消息",
+        "hint": "适配器不支持 Reply 时自动退化为普通文本。"
+      },
+      "at_on_save_failure": {
+        "type": "bool",
+        "default": true,
+        "description": "失败时 @ 触发者",
+        "hint": "有失败项时在回执末尾 @ 发送者并给出 X/Y。"
+      }
+    }
+  },
+  "logging": {
+    "description": "⑨ 日志",
+    "type": "object",
+    "hint": "排查问题时打开标准输出；关掉后失败仍进索引，可用 /warden fail 查。",
+    "items": {
+      "log_to_stdout": {
+        "type": "bool",
+        "default": true,
+        "description": "把插件日志打到标准输出",
+        "hint": "命中、补救过程、失败原因都会打印。"
       }
     }
   }
