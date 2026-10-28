@@ -301,10 +301,17 @@
           (g.group_id === d.group_id ? " selected" : "") + ">" +
           esc(groupLabel(g)) + "</option>";
       });
-      actions += '<select id="target-group" class="target">' + opts + "</select>" +
+      // 文案:这两个按钮都发到上面选的群(可能是别的群),所以不是「发回」;
+      // 「转发原消息」= 转的是原消息本体,装扮/头像/原时间戳都在,但要求原消息还在;
+      // 「重建转发」= 按存档重拼,内容一致但没有装扮,随时可用。
+      actions += '<span class="lbl">发到</span>' +
+        '<select id="target-group" class="target">' + opts + "</select>" +
         '<button class="btn primary" id="btn-native"' + (d.can_native ? "" : " disabled") +
-        '>原地发回（保装扮）</button>' +
-        '<button class="btn" id="btn-rebuild">重建转发（丢装扮）</button>';
+        ' title="' + (d.can_native
+          ? "转发原消息本体:气泡、挂件、头像、原时间戳都保留;要求那条消息还在群里,过期会自动改用重建"
+          : "这条没有可用的原消息 id(不是真存档,或原消息已过期),只能用重建转发") + '">转发原消息</button>' +
+        '<button class="btn" id="btn-rebuild" title="按存档重新拼一条合并转发:内容一致,但没有气泡/挂件/原时间戳">重建转发</button>' +
+        '<p class="actions-note">「转发原消息」发的是原消息本体,气泡/挂件/头像/原时间戳都在 —— 要求那条消息还在群里,过期会失败并自动改用重建。「重建转发」按存档重拼,内容一致但没有装扮,随时可用。两者都发到左边选的群。</p>';
     }
     // 老存档(v1.14.0 之前)没有 render.png;改了样式之后旧图也还是旧样式 ——
     // 两者都靠这个按钮按**当前**样式重画(节点与图片字节都在条目目录里)。
