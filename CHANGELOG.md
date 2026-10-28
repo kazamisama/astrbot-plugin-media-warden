@@ -3,7 +3,7 @@
 ## v1.14.0
 
 「存什么 / 怎么存 / 怎么看」三件事一起做完：类型门控 + 六类开关，纯文本与聊天记录统一成「一个条目两种形态」，页面按类型分类管理并支持发到别的群，渲染样式搬进独立页面。
-冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=15, total=145)`。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=16, total=146)`。
 
 ### 升级前必读（语义变化）
 
@@ -21,6 +21,8 @@
 - **跨群转发 + 目标群下拉**：页面「发回」旁多一个带群名的目标群下拉（`page/groups` 读 `get_group_list`，默认这条记录的原群），可选「原地（保装扮）」或「重建（丢装扮）」；原地失败自动回退重建，并在回执里说明走了哪条路。
 - **自动转发**：`auto_forward_enabled` + `auto_forward_mode: rebuild|native` + `forward_target_groups`（多群，默认空 = 不转发）。存档成功后自动发到各目标群：`native` 先试原地（跨群同样保装扮），失败回退重建；目标等于源群时跳过。
 - **「加载更多」**：列表一页 200 条，底部按钮按页追加（`page/records` 本就支持 `offset`）；以前只写「显示前 N 条」，几千个老文件根本翻不到。
+- **「重渲染」**：条目详情多一个按钮，按**当前**渲染样式重画 `render.png`。两件事靠它：v1.14.0 之前存的条目本来就没有渲染图（页面上连标签都不出现），以及样式页改了颜色/字号之后旧图还是旧样式。节点与图片字节都在条目目录里，重画不碰网络（头像失败静默降级），路由 `page/render`。
+- **同内容标记**：同一条消息被转发两次会存成两个条目（record_id 含消息 id，各自都能用原地重发）—— 现在 `record.find_duplicate()` 按 `origin_sha256` 找出先来的那条，记 `duplicate_of`，列表与详情标「内容重复」。
 - **渲染样式页**（`pages/style/`）：宽度 / 字号 / 圆角 / 背景·气泡·正文·次要用色 / 头像形状（圆 / 方）/ 时间格式 / 深色，右侧**实时预览**（含合成头像，才看得出圆形与方形圆角的差别）；保存写回插件配置并立刻 `Forwarder.apply_style()` 生效，不用重载。
 
 ### Changed
@@ -28,7 +30,7 @@
 - `_conf_schema.json` 6 组 → 9 组：新增 `save_types` / `auto_forward` / `render_style`。
 - `Forwarder` 的渲染参数从写死常量变成 `_RenderCfg` 字段，新增 `apply_style()`；`_avatar_mask(size, shape)` 支持方形圆角头像；时间格式可配（默认 `%Y-%m-%d %H:%M`）；`dark` 只替换**仍是默认值**的颜色，用户自己挑过的色不会被深色模式改掉。
 - `record.list_records()` 现在混排 `forward` 与 `text` 两类条目，返回项统一带 `kind`。
-- 页面后端路由 8 → 12：新增 `reveal` / `style` / `style_save` / `style_preview`。
+- 页面后端路由 8 → 13：新增 `reveal` / `style` / `style_save` / `style_preview` / `render`。
 - `record_admin.native_forward()` / `rebuild_forward()` 的结果带回 `new_message_id`（native 另有 `origin_message_id`），页面「发回」能拿到新消息的 id 去核对或撤回；重建路径以前把动作返回值整个丢掉，现在动作返回 `failed` 也按失败处理，不再静默当成功。
 - `main.on_group_message` 的类型判定提前到下载之前，日志会写 `dropped: image=1 gif=0 …`，全丢时写 `skip: nothing to save`（以前是「下完了才发现不该存」）。
 
@@ -52,7 +54,7 @@
 ### Tests
 
 - 新增 Phase 9 共 10 项：类型门控与动图判定、纯文本条目往返、纯文本消息端到端落盘、禁用类型与坏扩展名被丢弃、聊天记录「一个条目两种形态」、分类扫描（含扁平文件）、自动转发到多群、`native` 模式失败回退 `rebuild`、`apply_style` 生效与头像形状、`update_style` 三元组与样式页路由。
-- 冒烟 130 → **145** 项（Phase 9: 15；多出的五项是「宿主分组嵌套配置能被读到」「样式保存写进 schema 分组、不在顶层留重复键」「转发结果带回新消息 id」「详情带 has_render / uin_reliable」「统计与类型筛选用真实总数（700 图 + 60 个扁平 JSON，超出旧的 500 行窗口也能数对）」）。
+- 冒烟 130 → **146** 项（Phase 9: 16；多出的六项是「宿主分组嵌套配置能被读到」「样式保存写进 schema 分组、不在顶层留重复键」「转发结果带回新消息 id」「详情带 has_render / uin_reliable」「统计与类型筛选用真实总数（700 图 + 60 个扁平 JSON，超出旧的 500 行窗口也能数对）」「同内容条目记 duplicate_of + 插件按当前样式重画渲染图」）。
 - 本机实测（2026-10-28）：跨群「原地」转发一条 2026-10-27 的存档回 `消息不存在`（原消息已过期，`get_msg` 先拦下并说明原因），回退「重建」到另一个群成功（`send_group_forward_msg` 3 个节点）—— 这正是「原消息还在就用原地，没了就重建」的设计预期。
 
 ## v1.13.0
