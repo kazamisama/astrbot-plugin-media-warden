@@ -262,7 +262,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.15.0: 按群/按人 + 按类型(图片/动图/视频/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染/JSON 保存, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
+    "群聊素材守门人 v1.16.0: 按群/按人 + 按类型(图片/动图/视频/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -1641,8 +1641,9 @@ class MediaWardenStar(Star):
                 failure_kind="fetch",
             )]
 
-        want_image = self.cfg.forward_render_mode in ("image", "both")
-        want_json = self.cfg.forward_render_mode in ("json", "both")
+        # v1.16.0: 三态 forward_render_mode 收成一个开关 —— 条目里总有 record.json,
+        # 所以「存不存结构化」不再需要配置;这里只决定「画不画渲染图」。
+        want_image = bool(getattr(self.cfg, "forward_render_image", True))
 
         if want_image and (self._forwarder is None or not self._forwarder.can_handle(nodes)):
             if self._forwarder is None:
@@ -1775,42 +1776,6 @@ class MediaWardenStar(Star):
                         )
                     rid = str(archived.get("record_id") or rid)
 
-        if want_json or not want_image:
-            comp_json = Component(
-                kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
-                raw=comp.raw,
-            )
-            try:
-                payload = json.dumps(
-                    {"forward": True, "node_count": len(nodes),
-                     "nodes": (comp.meta or {}).get("nodes")},
-                    ensure_ascii=False, indent=2,
-                )
-                sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
-                                         mime="application/json")
-            except (TypeError, ValueError, OSError, RuntimeError) as e:
-                # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
-                # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
-                results.append(self._failed(
-                    comp, ctx, "json",
-                    f"json save: {type(e).__name__}: {e}", e,
-                    subject=f"forward_json:{ctx.msg_id}#{ctx.idx}",
-                    failure_kind="save",
-                ))
-            else:
-                if self._index is not None:
-                    try:
-                        self._index.record(
-                            platform=ctx.platform, group_id=ctx.group_id,
-                            sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=ctx.idx,
-                            kind="forward", path=sr.path, size=sr.size,
-                            sha16=sr.blake16, forward_meta={"node_count": len(nodes)},
-                        )
-                    except Exception as e:
-                        self._log(f"index record failed: {e!r}")
-                results.append(AssetResult(kind="forward", ok=True,
-                                           path=sr.path, size=len(payload),
-                                           reused=sr.reused))
 
         if want_image and nodes:
             if failed_urls:
@@ -1879,6 +1844,57 @@ class MediaWardenStar(Star):
                         row_idx=ctx.idx + 100,
                     ))
 
+        if not want_image:
+            if archived is not None:
+                # 不画图:结构化数据已经在条目里,回执只需要说「存了」。
+                rec_path = os.path.join(
+                    record_store.record_dir(self.cfg.storage_root, rid),
+                    record_store.RECORD_FILENAME)
+                try:
+                    rec_size = os.path.getsize(rec_path)
+                except OSError:
+                    rec_size = 0
+                results.append(AssetResult(kind="forward", ok=True,
+                                           path=rec_path, size=rec_size,
+                                           reused=bool((archived or {}).get("reused"))))
+            else:
+                # 存档也失败了(PIL 缺失 / 目录不可写):退回扁平 JSON 兜底,至少留住内容。
+                comp_json = Component(
+                    kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
+                    raw=comp.raw,
+                )
+                try:
+                    payload = json.dumps(
+                        {"forward": True, "node_count": len(nodes),
+                         "nodes": (comp.meta or {}).get("nodes")},
+                        ensure_ascii=False, indent=2,
+                    )
+                    sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
+                                             mime="application/json")
+                except (TypeError, ValueError, OSError, RuntimeError) as e:
+                    # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
+                    # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
+                    results.append(self._failed(
+                        comp, ctx, "json",
+                        f"json save: {type(e).__name__}: {e}", e,
+                        subject=f"forward_json:{ctx.msg_id}#{ctx.idx}",
+                        failure_kind="save",
+                    ))
+                else:
+                    if self._index is not None:
+                        try:
+                            self._index.record(
+                                platform=ctx.platform, group_id=ctx.group_id,
+                                sender_id=ctx.sender_id, msg_id=ctx.msg_id,
+                                idx=ctx.idx, kind="forward", path=sr.path,
+                                size=sr.size, sha16=sr.blake16,
+                                forward_meta={"node_count": len(nodes)},
+                            )
+                        except Exception as e:
+                            self._log(f"index record failed: {e!r}")
+                    results.append(AssetResult(kind="forward", ok=True,
+                                               path=sr.path, size=len(payload),
+                                               reused=sr.reused))
         # v1.14.0: 可选的自动转发（目标群为空/开关关掉时什么都不做）
         if archived is not None and results:
             try:

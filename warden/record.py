@@ -59,18 +59,36 @@ def record_dir(storage_root: str, record_id: str) -> str:
     return os.path.join(records_root(storage_root), _safe_token(record_id))
 
 
+def _payload(node: dict) -> dict:
+    """取节点真正的数据体。
+
+    合并转发节点有两种形态:get_forward_msg 给的**裸节点**(sender/message 在顶层),
+    以及消息段里的**包装段** `{"type": "node", "data": {sender, message}}`。
+    后者以前会被当成「没有 sender、没有 message」的空节点 —— 内联节点(客户端把内容
+    直接塞进段里、没有可取 id 的那种)因此在存档里变成空壳。这里统一剥一层。
+    """
+    data = node.get("data") if isinstance(node.get("data"), dict) else None
+    if data and any(k in data for k in ("message", "content", "sender")):
+        return data
+    return node
+
+
 def _segments(node: dict) -> list:
-    segs = node.get("message")
+    body = _payload(node)
+    segs = body.get("message")
     if not isinstance(segs, list):
-        segs = node.get("content")
+        segs = body.get("content")
     return [s for s in segs if isinstance(s, dict)] if isinstance(segs, list) else []
 
 
 def node_identity(node: dict) -> tuple[str, str]:
-    """(uin, 显示名) —— 合并转发节点的发送者。"""
-    sender = node.get("sender") if isinstance(node.get("sender"), dict) else {}
-    uin = sender.get("user_id", node.get("user_id", 0))
-    name = sender.get("card") or sender.get("nickname") or _safe_token(uin)
+    """(uin, 显示名) —— 合并转发节点的发送者(包装段会先剥一层)。"""
+    body = _payload(node)
+    sender = body.get("sender") if isinstance(body.get("sender"), dict) else {}
+    uin = sender.get("user_id", body.get("user_id", 0))
+    name = (sender.get("card") or sender.get("nickname")
+            or body.get("card") or body.get("nickname")
+            or _safe_token(uin))
     return str(uin), str(name)
 
 
@@ -141,7 +159,7 @@ def dry_nodes(nodes: list) -> list:
             data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
             segments.append({"type": kind, "data": dict(data)})
         out.append({"index": ni, "uin": uin, "name": name,
-                    "time": int(node.get("time") or 0),
+                    "time": int(_payload(node).get("time") or 0),
                     "segments": segments})
     return out
 
@@ -218,7 +236,7 @@ async def capture(
             assets.append({"node": ni, "seg": si, "path": rel,
                            "sha16": sha16, "bytes": len(blob)})
         out_nodes.append({"index": ni, "uin": uin, "name": name,
-                          "time": int(node.get("time") or 0),
+                          "time": int(_payload(node).get("time") or 0),
                           "segments": segments})
 
     record = {

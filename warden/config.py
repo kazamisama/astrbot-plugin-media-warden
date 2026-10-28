@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
@@ -61,7 +61,9 @@ class MediaWardenConfig:
     filename_pattern: str = (
         "{group_id}/{sender_id}/{date}_{time}_{kind}_{short_id}{ext}"
     )
-    forward_render_mode: str = "image"
+    # v1.16.0: 原来的三态 forward_render_mode(image/json/both)收成一个开关 ——
+    # 条目里总会写 record.json,「存不存结构化」不再需要配置;只剩「画不画图」。
+    forward_render_image: bool = True
     # 取值保留 pil/playwright/wkhtml 三个历史槽位,但只有 pil 落地:
     # main.initialize() 会对非 pil 打一条明确的告警并继续用 pil(不静默生效)。
     forward_image_engine: str = "pil"
@@ -110,10 +112,7 @@ class MediaWardenConfig:
             )
         if self.match_mode not in ("whitelist", "blacklist"):
             raise ValueError(f"invalid match_mode: {self.match_mode!r}")
-        if self.forward_render_mode not in ("image", "json", "both"):
-            raise ValueError(
-                f"invalid forward_render_mode: {self.forward_render_mode!r}"
-            )
+
         if self.forward_image_engine not in ("pil", "playwright", "wkhtml"):
             raise ValueError(
                 f"invalid forward_image_engine: {self.forward_image_engine!r}"
@@ -239,6 +238,11 @@ class MediaWardenConfig:
     def from_raw_lenient(cls, raw: dict | None) -> tuple["MediaWardenConfig", List[str]]:
         """按字段容错构造:合法字段保留,非法字段跳过并记录错误."""
         raw = cls._flatten_raw(raw or {})
+        # v1.16.0 兼容:老配置里的三态 forward_render_mode 派生出新开关。
+        # json =「不要图」-> False;image / both 都是「要图」-> True。
+        legacy_mode = raw.pop("forward_render_mode", None)
+        if legacy_mode is not None and "forward_render_image" not in raw:
+            raw["forward_render_image"] = str(legacy_mode).strip().lower() != "json"
         known = {f.name for f in cls.__dataclass_fields__.values() if f.init}
         errors: List[str] = []
         kwargs: dict = {}

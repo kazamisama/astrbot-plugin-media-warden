@@ -173,18 +173,13 @@
   "forward": {
     "description": "⑤ 聊天记录渲染",
     "type": "object",
-    "hint": "合并转发画成图片时的行为与头像；颜色字号等在「⑥ 渲染样式」或 dashboard 样式页里调。",
+    "hint": "聊天记录「画不画图」、最多画多少节点、以及渲染时的头像；颜色字号等在「⑥ 渲染样式」或 dashboard 样式页里调。结构化的 record.json 总是会存。",
     "items": {
-      "forward_render_mode": {
-        "type": "string",
-        "default": "image",
-        "options": [
-          "image",
-          "json",
-          "both"
-        ],
-        "description": "聊天记录存成什么",
-        "hint": "image=只出渲染图；json=不出图、额外存一份扁平 JSON；both=两者都留。条目里的 record.json 总是有的，json/both 那份扁平 JSON 是额外副本。"
+      "forward_render_image": {
+        "type": "bool",
+        "default": true,
+        "description": "把聊天记录渲染成图片",
+        "hint": "开：条目里存结构化记录 + 一张 render.png；关：只存结构化记录（record.json），不画图。旧配置的 forward_render_mode=json 会自动映射成关闭。"
       },
       "forward_render_max_nodes": {
         "type": "int",

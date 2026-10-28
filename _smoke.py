@@ -294,6 +294,21 @@ def test_policy_key_format():
     print("  OK")
 
 
+def _archived_records(root):
+    """读 _records/ 下所有条目的 record.json(聊天记录的结构化存档)。"""
+    import json as _json
+    out = []
+    base = os.path.join(root, "_records")
+    if not os.path.isdir(base):
+        return out
+    for name in sorted(os.listdir(base)):
+        path = os.path.join(base, name, "record.json")
+        if not os.path.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8") as fh:
+            out.append(_json.load(fh))
+    return out
+
 def _fake_event(*, platform="aiocqhttp", group_id="g1", user_id="u1",
                 message=None, message_str="", is_group=True,
                 nickname=None, message_id="m42", timestamp=None,
@@ -966,7 +981,7 @@ def test_plugin_e2e_forward_image_all_fail_not_saved_and_at():
             "storage_root": td,
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
-            "forward_render_mode": "image",
+            "forward_render_image": True,
             "download_retries": 0,
             "enable_index_db": False,
             "reply_preview": False,
@@ -1037,7 +1052,7 @@ def test_plugin_e2e_forward_saved_as_json_sidecar():
             "storage_root": td,
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
-            "forward_render_mode": "json",
+            "forward_render_image": False,
             "enable_index_db": True,
         })
         asyncio.run(inst.initialize())
@@ -1063,32 +1078,16 @@ def test_plugin_e2e_forward_saved_as_json_sidecar():
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
         assert "forward×1" in text, text
-        # 验证: 文件确实是 JSON
-        import json as _json
-        found = []
-        for root, _, fs in os.walk(td):
-            for f in fs:
-                p = os.path.join(root, f)
-                if p.endswith(".json"):
-                    with open(p, "r", encoding="utf-8") as fh:
-                        d = _json.load(fh)
-                        if d.get("forward"):
-                            found.append((p, d))
-        assert found, "no forward sidecar"
+        # v1.16.0: 关掉渲染后不再落扁平 JSON —— 结构化数据就在条目 record.json 里
+        recs = _archived_records(td)
+        assert len(recs) == 1 and recs[0]["node_count"] == 1, recs
+        assert recs[0]["nodes"][0]["segments"][0]["data"]["text"] == "merged", recs[0]
+        flat = [f for _r, _d, fs in os.walk(td) for f in fs
+                if f.endswith(".json") and "forward" in f]
+        assert not flat, flat
         if inst._index is not None:
             inst._index.close()
             inst._index = None
-        import json as _json
-        found = []
-        for root, _, fs in os.walk(td):
-            for f in fs:
-                p = os.path.join(root, f)
-                if p.endswith(".json"):
-                    with open(p, "r", encoding="utf-8") as fh:
-                        d = _json.load(fh)
-                        if d.get("forward"):
-                            found.append((p, d))
-        assert found, "no forward sidecar"
         print("  OK ->", text.replace(chr(10), " | "))
 
 
@@ -1493,8 +1492,8 @@ def test_index_export_json():
         print("  OK")
 
 
-def test_plugin_e2e_forward_both_modes():
-    """端到端: forward_render_mode=both -> PNG + JSON 都落盘."""
+def test_plugin_e2e_forward_entry_render_and_record():
+    """端到端: 渲染开关默认开 -> 条目里同时有 record.json 与 render.png,无扁平副本。"""
     import asyncio
     ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
     with tempfile.TemporaryDirectory() as td:
@@ -1502,7 +1501,6 @@ def test_plugin_e2e_forward_both_modes():
             "storage_root": td,
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
-            "forward_render_mode": "both",
             "enable_index_db": True,
         })
         asyncio.run(inst.initialize())
@@ -1524,23 +1522,21 @@ def test_plugin_e2e_forward_both_modes():
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
         assert "forward" in text.lower() or "✅" in text, text
-        # 应该有 PNG + JSON 都在
-        pngs, jsons = 0, 0
-        for root, _, fs in os.walk(td):
-            for f in fs:
-                if f.endswith(".png"):
-                    pngs += 1
-                if f.endswith(".json") and "forward" in f:
-                    jsons += 1
-        assert pngs >= 1, "no PNG rendered"
-        assert jsons >= 1, "no JSON sidecar"
+        # 条目里应该同时有 render.png 与 record.json;扁平目录里一份都不该有
+        recs = _archived_records(td)
+        assert len(recs) == 1 and recs[0]["render"] == "render.png", recs
+        rdir = record_store.record_dir(td, recs[0]["record_id"])
+        assert os.path.isfile(os.path.join(rdir, "render.png")), rdir
+        base_records = os.path.join(td, "_records")
+        flat_files = [os.path.join(r, f) for r, _d, fs in os.walk(td) for f in fs
+                      if f.endswith((".png", ".json"))
+                      and not os.path.abspath(r).startswith(os.path.abspath(base_records))]
+        assert not flat_files, flat_files
         # v1.14.1: 渲染图住在条目目录里,不再多落一份扁平 forward_image_*.png ——
         # 所以索引里只有 JSON 那一行(以前是 forward + forward_render 两行)。
-        assert not [f for _r, _d, fs in os.walk(td) for f in fs
-                    if "forward_image" in f], "不该再有扁平渲染图副本"
+        # 聊天记录不再产生扁平索引行(结构化在条目里,渲染图也在条目里)
         s = inst._index.stats()
-        assert s["total"] >= 1, s
-        assert "forward_render" not in (s.get("by_kind") or {}), s
+        assert s["total"] == 0, s
         entry = record_store.list_records(td)
         assert len(entry) == 1 and entry[0]["kind"] == "forward", entry
         assert entry[0].get("has_render") or record_store.has_render(
@@ -1548,12 +1544,11 @@ def test_plugin_e2e_forward_both_modes():
         if inst._index is not None:
             inst._index.close()
             inst._index = None
-        print("  OK -> PNG=%d JSON=%d, index=%d(仅 JSON), 渲染图在条目里"
-              % (pngs, jsons, s["total"]))
+        print("  OK -> 条目内 render.png + record.json, 索引 0 行, 无扁平副本")
 
 
-def test_plugin_e2e_forward_too_large_falls_back_to_json():
-    """转发节点超过上限 -> 只生成 JSON 不渲染."""
+def test_plugin_e2e_forward_too_large_falls_back_to_entry():
+    """转发节点超过上限 -> 不渲染,但条目里照样有结构化记录."""
     import asyncio
     ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
     with tempfile.TemporaryDirectory() as td:
@@ -1561,7 +1556,7 @@ def test_plugin_e2e_forward_too_large_falls_back_to_json():
             "storage_root": td,
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
-            "forward_render_mode": "image",  # 强制 image 但节点超限
+            # 渲染开关默认开,但节点超过 forward_render_max_nodes=30
             "enable_index_db": True,
         })
         asyncio.run(inst.initialize())
@@ -1583,20 +1578,16 @@ def test_plugin_e2e_forward_too_large_falls_back_to_json():
             return await anext(gen)
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
-        # 只应 JSON,没有 PNG
-        pngs, jsons = 0, 0
-        for root, _, fs in os.walk(td):
-            for f in fs:
-                if f.endswith(".png"):
-                    pngs += 1
-                if f.endswith(".json") and "forward" in f:
-                    jsons += 1
-        assert pngs == 0, "should not render when over limit"
-        assert jsons >= 1, "should fall back to JSON"
+        # 不出图,但结构化记录在条目里(50 个节点都在)
+        assert not [f for _r, _d, fs in os.walk(td) for f in fs if f.endswith(".png")], \
+            "超限时不该出图"
+        recs = _archived_records(td)
+        assert len(recs) == 1 and recs[0]["node_count"] == 50, recs
+        assert not recs[0].get("render"), recs[0]
         if inst._index is not None:
             inst._index.close()
             inst._index = None
-        print("  OK -> JSON only (over limit), jsons=%d" % jsons)
+        print("  OK -> 超限只存结构化(条目), 不出图")
 
 
 def test_plugin_e2e_forward_expands_nested_two_levels():
@@ -1609,7 +1600,7 @@ def test_plugin_e2e_forward_expands_nested_two_levels():
             "storage_root": td,
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
-            "forward_render_mode": "json",
+            "forward_render_image": False,
             "enable_index_db": True,
         })
         asyncio.run(inst.initialize())
@@ -1669,23 +1660,15 @@ def test_plugin_e2e_forward_expands_nested_two_levels():
         assert "forward×1" in text, text
         assert calls == ["inner1", "inner2"], calls
 
-        found = []
-        for root, _, fs in os.walk(td):
-            for f in fs:
-                p = os.path.join(root, f)
-                if p.endswith(".json") and "forward" in f:
-                    with open(p, "r", encoding="utf-8") as fh:
-                        found.append(json.load(fh))
-        assert found, "no forward sidecar"
-        payload = found[0]
-        assert payload["node_count"] == 3, payload
-        assert [n.get("__warden_nested_depth") for n in payload["nodes"]] == [0, 1, 2]
-        dumped = json.dumps(payload, ensure_ascii=False)
+        # v1.16.0: 结构化数据住在条目 record.json 里(不再落扁平 sidecar)
+        recs = _archived_records(td)
+        assert len(recs) == 1 and recs[0]["node_count"] == 3, recs
+        dumped = json.dumps(recs[0], ensure_ascii=False)
         assert "outer" in dumped and "inner one" in dumped and "inner two" in dumped
         if inst._index is not None:
             inst._index.close()
             inst._index = None
-        print("  OK -> nested calls=%s node_count=%s" % (calls, payload["node_count"]))
+        print("  OK -> nested calls=%s node_count=%s" % (calls, recs[0]["node_count"]))
 
 
 def test_plugin_e2e_forward_prefers_fetched_sender_names():
@@ -1698,7 +1681,7 @@ def test_plugin_e2e_forward_prefers_fetched_sender_names():
             "storage_root": td,
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
-            "forward_render_mode": "json",
+            "forward_render_image": False,
             "enable_index_db": True,
         })
         asyncio.run(inst.initialize())
@@ -1747,17 +1730,12 @@ def test_plugin_e2e_forward_prefers_fetched_sender_names():
         assert "forward×1" in text, text
         assert calls == ["outer-full"], calls
 
-        found = []
-        for root, _, fs in os.walk(td):
-            for f in fs:
-                p = os.path.join(root, f)
-                if p.endswith(".json") and "forward" in f:
-                    with open(p, "r", encoding="utf-8") as fh:
-                        found.append(json.load(fh))
-        assert found, "no forward sidecar"
-        dumped = json.dumps(found[0], ensure_ascii=False)
-        assert "真实昵称" in dumped, dumped
-        assert "QQ用户" not in dumped, dumped
+        recs = _archived_records(td)
+        assert len(recs) == 1, recs
+        names = [n.get("name") for n in recs[0]["nodes"]]
+        assert "真实昵称" in names, names
+        assert "QQ用户" not in names, names
+        dumped = json.dumps(recs[0], ensure_ascii=False)
         assert "fetched" in dumped and "inline" not in dumped, dumped
         if inst._index is not None:
             inst._index.close()
@@ -2162,7 +2140,7 @@ def test_plugin_forward_render_takes_precedence_over_image():
             "target_groups": ["aiocqhttp:g1"],
             "target_users": ["u1"],
             "reply_preview": True,
-            "forward_render_mode": "both",  # 同时有 PNG 和 JSON
+            "forward_render_image": True,  # 同时有 PNG 和 JSON
         })
         asyncio.run(inst.initialize())
 
@@ -2220,8 +2198,8 @@ PHASE3 = [
     test_index_find_by_sha,
     test_index_stats,
     test_index_export_json,
-    test_plugin_e2e_forward_both_modes,
-    test_plugin_e2e_forward_too_large_falls_back_to_json,
+    test_plugin_e2e_forward_entry_render_and_record,
+    test_plugin_e2e_forward_too_large_falls_back_to_entry,
     test_plugin_e2e_forward_expands_nested_two_levels,
     test_plugin_e2e_forward_prefers_fetched_sender_names,
     test_plugin_warden_stats_command,
@@ -2441,7 +2419,7 @@ def test_forward_avatar_platform_whitelist():
         pl = plugin_main.MediaWardenStar(ctx, config={
             "storage_root": td, "enable_index_db": True,
             "log_to_stdout": False,
-            "forward_render_mode": "image",
+            "forward_render_image": True,
             "enable_user_avatar": True,
         })
         asyncio.run(pl.initialize())
@@ -2476,7 +2454,7 @@ def test_forward_avatar_platform_whitelist():
             assert len(calls) == 1 and ("aiocqhttp", "u1") in calls[0], calls
 
             # json-only 模式不需要头像,不应再触发抓取
-            pl.cfg.forward_render_mode = "json"
+            pl.cfg.forward_render_image = False
             asyncio.run(pl._save_forward(comp, _ctx("aiocqhttp", "m-qq-json"), None))
             assert len(calls) == 1, calls
         finally:
@@ -2876,7 +2854,7 @@ def test_save_forward_falls_back_when_forwarder_missing():
     with tempfile.TemporaryDirectory() as td:
         inst = plugin_main.MediaWardenStar(context, config={
             "storage_root": td,
-            "forward_render_mode": "image",
+            "forward_render_image": True,
             "enable_index_db": False,
             "enable_user_avatar": False,
         })
@@ -3710,7 +3688,7 @@ def test_forward_local_cached_uses_node_file_md5():
         inst = plugin_main.MediaWardenStar(
             plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
             {"storage_root": tempfile.mkdtemp(prefix="warden_lcf8_"),
-             "forward_render_mode": "both",
+             "forward_render_image": True,
              "enable_index_db": False,
              "enable_user_avatar": False})
         asyncio.run(inst.initialize())
@@ -3839,7 +3817,6 @@ def test_conf_schema_covers_all_config_fields():
     # v1.11.0: 枚举项给 WebUI 下拉选项,省得手敲字符串拼错
     for grp, key, want in (
         ("filter", "match_mode", ["whitelist", "blacklist"]),
-        ("forward", "forward_render_mode", ["image", "json", "both"]),
         # v1.15.0: 引擎只剩 pil 一个实现，下拉不再假装有三个选项
         ("forward", "forward_image_engine", ["pil"]),
         ("auto_forward", "auto_forward_mode", ["native", "rebuild"]),
@@ -3859,6 +3836,10 @@ def test_conf_schema_covers_all_config_fields():
     # 画布宽度只有一个旋钮(旧的 forward_image_width 已删,它总被 style_width 覆盖)
     assert "forward_image_width" not in fields, "重复的宽度旋钮应已删除"
     assert cfg.auto_forward_mode == "native", cfg.auto_forward_mode
+    # v1.16.0: 三态 forward_render_mode -> 布尔 forward_render_image(json 映射为关)
+    assert cfg.forward_render_image is True, cfg.forward_render_image
+    _legacy_json, _e = MediaWardenConfig.from_raw_lenient({"forward_render_mode": "json"})
+    assert _legacy_json.forward_render_image is False and not _e, (_legacy_json, _e)
     assert cfg.style_width == 720
     print(f"  OK -> {len(expected)} 个可配字段全覆盖,{len(schema)} 个分组")
 
@@ -4127,7 +4108,7 @@ def test_plugin_forward_render_failure_is_indexed():
     tmp = tempfile.mkdtemp(prefix="warden_fwdfail_")
     pl = _build_plugin_for_command(
         tmp, enable_index=True, log_to_stdout=False,
-        extra={"forward_render_mode": "image", "enable_user_avatar": False},
+        extra={"forward_render_image": True, "enable_user_avatar": False},
     )
     asyncio.run(pl.initialize())
     comp = Component(kind="forward", meta={"nodes": [
@@ -5109,7 +5090,7 @@ def test_plugin_forward_saved_as_single_entry():
             config={
                 "storage_root": td,
                 "match_mode": "blacklist",
-                "forward_render_mode": "both",
+                "forward_render_image": True,
                 "enable_user_avatar": False,
                 "enable_index_db": False,
                 "reply_preview": False,
@@ -5143,8 +5124,10 @@ def test_plugin_forward_saved_as_single_entry():
         finally:
             plugin_main.download = orig_download
 
+        # v1.16.0: 条目里 record.json 与 render.png 是同一件事的两种形态,
+        # 一条转发只产生一个结果(以前还会多出一条 forward 的扁平 JSON)。
         kinds = sorted(r.kind for r in results if r.ok)
-        assert kinds == ["forward", "forward_render"], results
+        assert kinds == ["forward_render"], results
 
         rows = record_store.list_records(td)
         assert len(rows) == 1 and rows[0]["kind"] == "forward", rows
@@ -5256,7 +5239,7 @@ def test_plugin_forward_auto_forward_to_target_groups():
             config={
                 "storage_root": td,
                 "match_mode": "blacklist",
-                "forward_render_mode": "json",
+                "forward_render_image": False,
                 "enable_index_db": False,
                 "reply_preview": False,
                 "auto_forward_enabled": True,
@@ -5302,7 +5285,7 @@ def test_plugin_auto_forward_native_falls_back_to_rebuild():
             plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
             config={
                 "storage_root": td, "match_mode": "blacklist",
-                "forward_render_mode": "json", "enable_index_db": False,
+                "forward_render_image": False, "enable_index_db": False,
                 "reply_preview": False, "auto_forward_enabled": True,
                 "auto_forward_mode": "native",
                 "forward_target_groups": ["961583271"],
@@ -5933,7 +5916,7 @@ def test_plugin_forward_dedupe_reuses_entry():
         inst = plugin_main.MediaWardenStar(
             plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
             config={"storage_root": td, "match_mode": "blacklist",
-                    "forward_render_mode": "both", "enable_user_avatar": False,
+                    "forward_render_image": True, "enable_user_avatar": False,
                     "enable_index_db": False, "reply_preview": False},
         )
         asyncio.run(inst.initialize())
@@ -5961,8 +5944,8 @@ def test_plugin_forward_dedupe_reuses_entry():
         finally:
             plugin_main.download = orig_download
 
-        assert sorted(r.kind for r in first if r.ok) == ["forward", "forward_render"]
-        assert sorted(r.kind for r in second if r.ok) == ["forward", "forward_render"]
+        assert sorted(r.kind for r in first if r.ok) == ["forward_render"]
+        assert sorted(r.kind for r in second if r.ok) == ["forward_render"]
         rows = record_store.list_records(td)
         assert len(rows) == 1, [r["record_id"] for r in rows]
         rid = rows[0]["record_id"]
