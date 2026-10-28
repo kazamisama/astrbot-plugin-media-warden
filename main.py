@@ -357,7 +357,8 @@ class MediaWardenStar(Star):
                 from .warden import record_admin as _radmin2
                 mig = await _radmin2.migrate_flat_forwards(
                     self.cfg.storage_root, self._index)
-                if mig["converted"] or mig["reused"] or mig["skipped"] or mig["failed"]:
+                # skipped 基本只意味着「那个 0 节点的旧坏文件还在」,每次启动都报一遍是噪音
+                if mig["converted"] or mig["reused"] or mig["failed"]:
                     self._log(
                         "flat forwards migrated into entries: "
                         f"{mig['converted']} converted, {mig['reused']} reused, "
