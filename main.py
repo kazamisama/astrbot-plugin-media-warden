@@ -350,6 +350,20 @@ class MediaWardenStar(Star):
                     )
             except Exception as e:
                 self._log(f"flat render cleanup failed: {e!r}")
+        if self._index is not None:
+            try:
+                # v1.12 之前聊天记录存成扁平 *_forward_json_*.json:页面只看到
+                # 文件卡片。迁成条目后才能浏览节点、重渲染、重建转发。
+                from .warden import record_admin as _radmin2
+                mig = await _radmin2.migrate_flat_forwards(
+                    self.cfg.storage_root, self._index)
+                if mig["converted"] or mig["reused"] or mig["skipped"] or mig["failed"]:
+                    self._log(
+                        "flat forwards migrated into entries: "
+                        f"{mig['converted']} converted, {mig['reused']} reused, "
+                        f"{mig['skipped']} skipped, {mig['failed']} failed")
+            except Exception as e:
+                self._log(f"flat forward migration failed: {e!r}")
         try:
             # v1.14.0 之前存的条目没有 duplicate_of,这里补一次(只写需要变的文件)
             n = record_store.backfill_duplicates(self.cfg.storage_root)

@@ -294,6 +294,8 @@
       '<span class="pill">群 ' + esc(d.group_id || "-") + "</span>" +
       (d.sender_name ? '<span class="pill">' + esc(d.sender_name) + "</span>" : "") +
       (isForward ? '<span class="pill">' + esc(d.node_count) + " 节点</span>" : "") +
+      (d.legacy_file ? '<span class="pill" title="迁移自老的扁平存档 ' +
+        esc(d.legacy_source || d.legacy_file) + '">迁移自老存档</span>' : "") +
       (isForward && d.root_msg_id ? (d.can_native
         ? '<span class="pill">原消息 ' + esc(d.root_msg_id) + "</span>"
         : '<span class="pill warn" title="QQ 那边已经取不到这条原消息(过期/撤回),只能用重建转发">原消息已失效</span>') : "") +

@@ -33,6 +33,8 @@ RECORDS_DIRNAME = "_records"
 ENTRY_FILENAME = "entry.json"
 RECORD_FILENAME = "record.json"
 RENDER_FILENAME = "render.png"
+# 迁移自「扁平 forward JSON」的条目会在自己目录里留一份原始文件(取证/回滚用)
+LEGACY_FILENAME = "legacy_forward.json"
 
 
 def _safe_token(value: Any) -> str:

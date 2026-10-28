@@ -6,13 +6,15 @@ dashboard 页面与页面 API 都只做 IO 转接，真正的扫描/搜索/删�
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 from typing import Any, Optional
 
+from . import record as record_store
 from .record import (
-    RENDER_FILENAME, load_entry, load_record, meta_filename, record_dir,
-    records_root, save_render, uin_reliable,
+    LEGACY_FILENAME, RENDER_FILENAME, load_entry, load_record, meta_filename,
+    record_dir, records_root, save_render, uin_reliable,
 )
 
 # v1.14.0 分类管理:一条「保存物」要么是条目(_records/ 下的聊天记录/纯文本),
@@ -483,6 +485,10 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "render": str(rec.get("render") or ""),
         "has_render": bool(rec.get("render")),
         "duplicate_of": str(rec.get("duplicate_of") or ""),
+        # 从老的扁平 *_forward_json_*.json 迁移来的条目:页面上标一下出处,
+        # 免得用户以为这些 2026-06 的记录是「新存的」。
+        "legacy_file": str(rec.get("legacy_file") or ""),
+        "legacy_source": str(rec.get("legacy_source") or ""),
         # 页面用它把「转发原消息」标成「原消息已失效」，而不是留一个点了必敗的主按钮
         "native_unavailable": bool(rec.get("native_unavailable")),
         "uin_reliable": uin_reliable(nodes_out),
@@ -825,3 +831,103 @@ async def rebuild_forward(bot: Any, group_id: str, rec: dict,
     return {"ok": True, "mode": "rebuild", "node_count": len(nodes),
             "new_message_id": _result_message_id(res),
             "group_id": str(group_id)}
+
+
+# ---------------- 扁平 forward JSON → 条目（v1.14.0） ----------------
+
+async def _no_images(_data: dict) -> Optional[bytes]:
+    """迁移时不下去下载：老 JSON 里的 url 早过期，直接记成 missing 更诚实。"""
+    return None
+
+
+def legacy_nodes(payload: Any) -> list:
+    """从老的 `*_forward_json_*.json` 里取节点列表（结构就是 OneBot 节点）。"""
+    if not isinstance(payload, dict):
+        return []
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [n for n in nodes if isinstance(n, dict)]
+
+
+async def migrate_flat_forwards(root: str, index) -> dict:
+    """把 v1.12 之前的扁平聊天记录 JSON 迁移成 `_records/` 条目。
+
+    那批文件（`20260622_154108_forward_json_3590c155.json`，本机 56 个）在页面上
+    只能当「文件卡片」看：读不到节点、也不能重建转发。内容其实都在 JSON 里，
+    所以迁成条目后它们和 v1.12 之后存的聊天记录一样能浏览 / 重渲染 / 转发。
+
+    迁移不下载图片（url 早已过期）：图片段原样留在 `segments` 里，同时进
+    `missing`（reason=download_failed），页面上会显示「缺 N 图」。原始 JSON 复制
+    成条目目录里的 `legacy_forward.json` 留底，然后删索引行与原文件。
+
+    幂等：迁移过的行已经不在索引里，再跑一次是 0。
+    """
+    out = {"converted": 0, "reused": 0, "skipped": 0, "failed": 0}
+    if index is None:
+        return out
+    try:
+        # 生产库里这批文件的 kind 是 `forward`(不是 forward_json,那是更早的写法),
+        # 所以两种都收,再用 .json 扩展名把真正的记录文件挑出来。
+        rows = index.list_assets(kinds=["forward", "forward_json"],
+                                 limit=100000).get("items") or []
+    except Exception:
+        return out
+    for row in rows:
+        path = str(row.get("path") or "")
+        if not path.lower().endswith(".json"):
+            continue  # 不是老聊天记录 JSON(比如另一个 kind 混进来的行)
+        if not os.path.isfile(path):
+            out["skipped"] += 1
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            # 空文件/坏 JSON 留着不动，下次人工处理；不要静默删证据
+            out["failed"] += 1
+            continue
+        nodes = legacy_nodes(payload)
+        if not nodes:
+            out["skipped"] += 1
+            continue
+        group_id = str(row.get("group_id") or "")
+        msg_id = str(row.get("msg_id") or "")
+        ts = int(row.get("ts") or 0) or None
+        rid = record_store.make_record_id(group_id, msg_id, ts)
+        try:
+            rec = await record_store.capture(
+                nodes, platform=str(row.get("platform") or "aiocqhttp"),
+                group_id=group_id, msg_id=msg_id, storage_root=root,
+                fetch_image=_no_images, ts=ts, record_id=rid)
+        except Exception:
+            out["failed"] += 1
+            continue
+        target = str(rec.get("record_id") or rid)
+        rdir = record_dir(root, target)
+        try:
+            os.makedirs(rdir, exist_ok=True)
+            # 同内容的第二个文件会命中 capture 的去重、复用同一条目，所以留底
+            # 文件名带上原文件指纹，避免互相覆盖。
+            rel = os.path.relpath(path, root) if os.path.isabs(path) else path
+            sha8 = str(row.get("sha16") or "")[:8] or "legacy"
+            legacy_name = LEGACY_FILENAME
+            if os.path.exists(os.path.join(rdir, legacy_name)):
+                legacy_name = f"legacy_forward_{sha8}.json"
+            with open(os.path.join(rdir, legacy_name), "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            record_store.set_meta(root, target, legacy_source=str(rel),
+                                  legacy_file=legacy_name, legacy_migrated=1)
+        except OSError:
+            out["failed"] += 1
+            continue
+        try:
+            index.delete_row(row.get("id"))
+        except Exception:
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        out["reused" if rec.get("reused") else "converted"] += 1
+    return out

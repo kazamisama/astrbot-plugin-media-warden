@@ -5678,6 +5678,73 @@ def test_page_native_failure_marks_stale():
             sys.modules["astrbot.api.web"] = saved
     print("  OK -> 失效记 stale(can_native 变 False) / 超时不记")
 
+def test_record_admin_migrates_flat_forwards():
+    """v1.12 之前的扁平 *_forward_json_*.json 迁成条目：能浏览、缺图有痕、留底。"""
+    import asyncio
+    import json
+    from warden.index import AssetIndex
+    banner("record_admin: 老的扁平聊天记录 JSON 迁成条目")
+    tmp = tempfile.mkdtemp(prefix="warden_mig_")
+    logdir = os.path.join(tmp, "961583271", "2510536451")
+    os.makedirs(logdir, exist_ok=True)
+    payload = {"forward": True, "node_count": 2, "nodes": [
+        {"user_id": 1094950020, "time": 1759915385,
+         "sender": {"user_id": 1094950020, "nickname": "武靴箭羽", "card": ""},
+         "message": [{"type": "text", "data": {"text": "老存档第一句"}},
+                     {"type": "image", "data": {"url": "https://expired.example/a.jpg"}}]},
+        {"user_id": 7, "time": 1759915400,
+         "sender": {"user_id": 7, "nickname": "阿七"},
+         "message": [{"type": "text", "data": {"text": "第二句"}}]}]}
+    path = os.path.join(logdir, "20260622_154108_forward_json_3590c155.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+    try:
+        index.record(platform="aiocqhttp", group_id="961583271",
+                     sender_id="2510536451", msg_id="1586152977", idx=0,
+                     kind="forward", path=path,
+                     size=os.path.getsize(path), sha16="c" * 16)
+        out = asyncio.run(record_admin.migrate_flat_forwards(tmp, index))
+        assert out == {"converted": 1, "reused": 0, "skipped": 0, "failed": 0}, out
+        recs = record_store.list_records(tmp)
+        assert len(recs) == 1 and recs[0]["kind"] == "forward", recs
+        rid = recs[0]["record_id"]
+        rec = record_store.load_record(tmp, rid)
+        assert rec["node_count"] == 2, rec["node_count"]
+        assert rec["nodes"][1]["segments"][0]["data"]["text"] == "第二句"
+        # 图片 url 早过期:不下载、进 missing,页面上会显示「缺 N 图」
+        assert rec["missing"] and rec["missing"][0]["reason"] == "download_failed", rec["missing"]
+        assert rec["legacy_migrated"] == 1, rec
+        assert rec["legacy_file"] == "legacy_forward.json", rec
+        assert not os.path.exists(path), "原文件应已删除(条目里留了副本)"
+        assert os.path.isfile(os.path.join(record_store.record_dir(tmp, rid),
+                                         "legacy_forward.json"))
+        assert index.list_assets(kinds=["forward"])["total"] == 0
+        detail = record_admin.record_detail(tmp, rid)
+        # 老文件里存的就是短 msg id,所以「转发原消息」理论上可用(原消息过期的话
+        # 第一次会失败并被打上 native_unavailable,之后按钮自动置灰)
+        assert detail["can_native"] is True, detail
+        # 列表预览要能读出正文(以前只能看到 .json 文件名)
+        items = record_admin.scan_items(tmp)["items"]
+        assert "老存档第一句" in items[0]["preview"], items[0]["preview"]
+
+        # 幂等:迁过的行已经不在索引里
+        again = asyncio.run(record_admin.migrate_flat_forwards(tmp, index))
+        assert again == {"converted": 0, "reused": 0, "skipped": 0, "failed": 0}, again
+
+        # 坏的(空)JSON:不迁、不删、计入 failed —— 不要静默删证据
+        bad = os.path.join(logdir, "20260622_160000_forward_json_deadbeef.json")
+        open(bad, "wb").close()
+        index.record(platform="aiocqhttp", group_id="961583271",
+                     sender_id="2510536451", msg_id="1", idx=0,
+                     kind="forward", path=bad, size=0, sha16="d" * 16)
+        out2 = asyncio.run(record_admin.migrate_flat_forwards(tmp, index))
+        assert out2["failed"] == 1 and os.path.isfile(bad), out2
+    finally:
+        index.close()
+    print("  OK -> 迁移 1 条(2 节点/1 缺图/留底), 幂等, 坏文件保留")
+
 def test_record_duplicate_dedupe_and_rerender():
     """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
     import asyncio
@@ -5908,6 +5975,7 @@ PHASE9 = [
     test_record_detail_render_and_uin_reliability,
     test_page_stats_and_kind_filter_use_real_counts,
     test_page_native_failure_marks_stale,
+    test_record_admin_migrates_flat_forwards,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
     test_record_admin_reconcile_flat_renders,
