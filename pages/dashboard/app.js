@@ -190,6 +190,11 @@
         badges.push('<span class="pill">' + esc(it.node_count) + " 节点</span>");
         if (it.asset_count) badges.push('<span class="pill">' + esc(it.asset_count) + " 图</span>");
         if (it.has_render) badges.push('<span class="pill ok">有渲染图</span>');
+        // 同内容被转发两次:保留两条(各自的原消息 id 不同,重发要各用各的),但要标出来
+        if (it.duplicate_of) {
+          badges.push('<span class="pill warn" title="与 ' + esc(it.duplicate_of) +
+            ' 内容相同">内容重复</span>');
+        }
         if (it.kind === "forward" && !it.can_native) badges.push('<span class="pill warn">无原消息</span>');
         if (it.missing_count) badges.push('<span class="pill warn">缺 ' + esc(it.missing_count) + " 图</span>");
       }
@@ -272,6 +277,8 @@
     var head = '<div class="detail-head">' +
       '<span class="id">' + esc(rid) + "</span>" +
       kindPill(d) +
+      (d.duplicate_of ? '<span class="pill warn" title="与 ' + esc(d.duplicate_of) +
+        ' 内容相同">内容重复</span>' : "") +
       '<span class="pill">群 ' + esc(d.group_id || "-") + "</span>" +
       (d.sender_name ? '<span class="pill">' + esc(d.sender_name) + "</span>" : "") +
       (isForward ? '<span class="pill">' + esc(d.node_count) + " 节点</span>" : "") +
@@ -299,7 +306,10 @@
         '>原地发回（保装扮）</button>' +
         '<button class="btn" id="btn-rebuild">重建转发（丢装扮）</button>';
     }
-    actions += '<button class="btn" id="btn-open">打开目录</button>' +
+    // 老存档(v1.14.0 之前)没有 render.png;改了样式之后旧图也还是旧样式 ——
+    // 两者都靠这个按钮按**当前**样式重画(节点与图片字节都在条目目录里)。
+    actions += '<button class="btn" id="btn-rerender">重渲染</button>' +
+      '<button class="btn" id="btn-open">打开目录</button>' +
       '<button class="btn danger" id="btn-delete">删除</button></div>';
 
     var body;
@@ -338,6 +348,8 @@
     }
     if (bn) bn.addEventListener("click", function () { doResend(rid, "native", targetGroup()); });
     if (br) br.addEventListener("click", function () { doResend(rid, "rebuild", targetGroup()); });
+    var brr = $("btn-rerender");
+    if (brr) brr.addEventListener("click", function () { doRerender(rid); });
     $("btn-open").addEventListener("click", function () { doReveal({ id: rid }); });
     $("btn-delete").addEventListener("click", function () {
       doDelete({ id: rid }, "删除这个条目？（结构化数据 + 渲染图 + 图片资产一起删，不可恢复）");
@@ -415,6 +427,21 @@
       renderDetail(d);
     } catch (e) {
       $("detail").innerHTML = '<p class="hint">打开失败：' + esc(e.message) + "</p>";
+    }
+  }
+
+  async function doRerender(rid) {
+    var btn = $("btn-rerender");
+    if (btn) { btn.disabled = true; btn.textContent = "渲染中…"; }
+    try {
+      var r = unwrap(await post("render", { id: rid }));
+      toast("渲染图已更新" + (r && r.bytes ? "（" + fmtBytes(r.bytes) + "）" : ""));
+      state.mode = "render";
+      var d = unwrap(await api("record", { id: rid }));
+      renderDetail(d);
+    } catch (e) {
+      toast("重渲染失败：" + e.message, true);
+      if (btn) { btn.disabled = false; btn.textContent = "重渲染"; }
     }
   }
 

@@ -336,6 +336,13 @@ class MediaWardenStar(Star):
                 self._log(f"index init failed: {e!r} — runs without index")
                 self._index = None
         try:
+            # v1.14.0 之前存的条目没有 duplicate_of,这里补一次(只写需要变的文件)
+            n = record_store.backfill_duplicates(self.cfg.storage_root)
+            if n:
+                self._log(f"duplicate markers backfilled: {n} entry file(s)")
+        except Exception as e:
+            self._log(f"duplicate backfill failed: {e!r}")
+        try:
             # dashboard 插件页面(pages/dashboard)的后端:老版本 AstrBot 没有
             # register_web_api 时安静跳过,页面本身也就不会被发现。
             self._page_api = RecordPageApi(self)
@@ -652,6 +659,87 @@ class MediaWardenStar(Star):
                 nd.avatar_path = avatar_map.get((platform, nd.sender_id))
         except Exception as e:
             self._log(f"avatar fetch failed: {e!r} — proceed without")
+
+    async def rerender_record(self, rid: str) -> dict:
+        """按**当前**渲染样式重画一条存档(补渲染图 / 改样式后刷新)。
+
+        v1.14.0 之前存的条目没有 render.png,页面上连「渲染图」标签都不出现;
+        样式页改了颜色/字号之后,旧图也仍是旧样式。两者都靠这里重画:
+        节点与图片字节全在条目目录里(record.json + assets/),不碰网络。
+        """
+        root = self.cfg.storage_root
+        if self._forwarder is None:
+            return {"ok": False, "error": "渲染器不可用（Pillow 未安装？）"}
+        rec = record_store.load_record(root, rid)
+        if rec is None:
+            rec = record_store.load_entry(root, rid)
+        if rec is None:
+            return {"ok": False, "error": "存档不存在"}
+        from .warden.forwarder import _coerce_nodes
+
+        kind = str(rec.get("kind") or "forward")
+        node_imgs: dict = {}
+        if kind == "text":
+            raw = [{"sender": {"user_id": rec.get("sender_id"),
+                                "nickname": rec.get("sender_name")},
+                    "time": rec.get("captured_ts"),
+                    "message": rec.get("segments") or []}]
+        else:
+            # record.json 的节点是 {index, uin, name, time, segments}, _coerce_nodes
+            # 吃的是 OneBot 形状({sender, time, message}) —— 这里只做形状转换。
+            assets = {(a.get("node"), a.get("seg")): a
+                      for a in rec.get("assets") or [] if isinstance(a, dict)}
+            base = record_store.record_dir(root, rid)
+            raw = []
+            for pos, node in enumerate(rec.get("nodes") or []):
+                if not isinstance(node, dict):
+                    continue
+                msg = []
+                blobs = []
+                for si, seg in enumerate(node.get("segments") or []):
+                    if not isinstance(seg, dict):
+                        continue
+                    stype = str(seg.get("type") or "")
+                    data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+                    if stype == "image":
+                        msg.append({"type": "image", "data": dict(data)})
+                        # 资产登记的是 (节点 index, 段下标 si) —— 与 capture() 一致
+                        asset = assets.get((node.get("index"), si))
+                        if not asset:
+                            continue
+                        path = os.path.join(base, str(asset.get("path") or "")
+                                            .replace("/", os.sep))
+                        try:
+                            with open(path, "rb") as fh:
+                                blobs.append(fh.read())
+                        except OSError:
+                            continue
+                    elif stype == "text":
+                        msg.append({"type": "text",
+                                    "data": {"text": str(data.get("text") or "")}})
+                if blobs:
+                    node_imgs[pos] = blobs
+                raw.append({"sender": {"user_id": node.get("uin"),
+                                        "nickname": node.get("name")},
+                            "time": node.get("time"), "message": msg})
+        nodes = _coerce_nodes(raw)
+        if not nodes:
+            return {"ok": False, "error": "这条存档里没有可渲染的节点"}
+        platform = str(rec.get("platform") or "aiocqhttp")
+        # uin 不可信时别去拉别人的头像（NapCat 会把整条转发记成同一个 user_id）
+        if kind != "text" or rec.get("uin_reliable") is not False:
+            await self._fetch_node_avatars(nodes, platform)
+        try:
+            png = await self._forwarder.render_with_images(nodes, node_imgs=node_imgs)
+        except Exception as e:
+            self._log(f"rerender {rid} failed: {e!r}")
+            return {"ok": False, "error": f"渲染失败: {e}"}
+        name = record_store.save_render(root, rid, png)
+        if not name:
+            return {"ok": False, "error": "渲染图写入失败"}
+        self._log(f"rerender {rid}: {len(png)} bytes")
+        return {"ok": True, "render": name, "bytes": len(png),
+                "nodes": len(nodes), "has_render": True}
 
     async def _save_text(self, segments: list, *, platform: str, group_id: str,
                          sender_id: str, sender_name: str, msg_id: str,

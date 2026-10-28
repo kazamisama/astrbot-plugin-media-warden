@@ -56,6 +56,8 @@ class RecordPageApi:
                  "media-warden 机器人所在的群（带群名，给转发目标下拉）")
         register(f"{PAGE_PREFIX}/resend", self.resend, ["POST"],
                  "media-warden 重发存档")
+        register(f"{PAGE_PREFIX}/render", self.rerender, ["POST"],
+                 "media-warden 按当前样式重画渲染图（补老存档）")
         register(f"{PAGE_PREFIX}/delete", self.delete, ["POST"],
                  "media-warden 删除存档")
         register(f"{PAGE_PREFIX}/reveal", self.reveal, ["POST"],
@@ -243,6 +245,30 @@ class RecordPageApi:
                         base64.b64encode(blob).decode("ascii"),
             "bytes": len(blob),
         }}
+
+    async def rerender(self):
+        """按当前样式重画一条存档的渲染图（老存档没有、或改了样式要刷新）。
+
+        节点与图片字节都在条目目录里，重画不碰网络（头像除外，失败会静默降级）。
+        """
+        from astrbot.api.web import request
+        body = await request.json(default={}) or {}
+        if not isinstance(body, dict):
+            body = {}
+        rid = str(body.get("id") or "")
+        if not rid:
+            return {"status": "error", "message": "缺少 id", "data": {}}
+        fn = getattr(self.plugin, "rerender_record", None)
+        if not callable(fn):
+            return {"status": "error", "message": "插件未提供重渲染", "data": {}}
+        try:
+            out = await fn(rid)
+        except Exception as e:
+            return {"status": "error", "message": f"重渲染失败: {e!r}", "data": {}}
+        if not out.get("ok"):
+            return {"status": "error", "message": str(out.get("error") or "重渲染失败"),
+                    "data": {}}
+        return {"status": "ok", "data": out}
 
     async def resend(self):
         from astrbot.api.web import request

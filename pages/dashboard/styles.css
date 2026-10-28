@@ -154,6 +154,7 @@ main {
 .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .pill.kind-forward { color: var(--accent); border-color: var(--accent); }
 .pill.kind-text { color: var(--ok); border-color: var(--ok); }
+.pill.warn { color: #b26a00; border-color: #b26a00; }
 .detail-tabs { display: flex; gap: 6px; padding: 8px 16px 0; }
 .render-wrap { margin-top: 6px; }
 .render-img { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }

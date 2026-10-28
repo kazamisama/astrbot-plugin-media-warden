@@ -200,9 +200,82 @@ async def capture(
         "uin_reliable": uin_reliable(out_nodes),
         "origin_sha256": _canonical_sha256(out_nodes),
     }
+    # 同内容被转发两次 → 后来的记下先来的 id（不合并目录，重发要各用各的 msg_id）
+    record["duplicate_of"] = find_duplicate(
+        storage_root, record["origin_sha256"], exclude=rid)
     with open(os.path.join(root, "record.json"), "w", encoding="utf-8") as fh:
         json.dump(record, fh, ensure_ascii=False, indent=2)
     return record
+
+
+def find_duplicate(storage_root: str, origin_sha256: str, *,
+                   exclude: str = "") -> str:
+    """同内容条目先来的那条 id（没有则空串）。
+
+    扁平文件有 Storage 的 blake2b 去重、索引也有 sha 行，但 `_records/` 这一层
+    一直是「一个 record_id 一个目录」：同一条消息被转发两次就是两个目录、两份
+    图片字节。这里不做合并（两条的 root_msg_id 不同，重发要各用各的），只把
+    「内容相同」记下来，页面能标出重复、也方便以后按需清理。
+    """
+    if not origin_sha256:
+        return ""
+    base = records_root(storage_root)
+    if not os.path.isdir(base):
+        return ""
+    for name in sorted(os.listdir(base)):
+        if name == exclude:
+            continue
+        root = record_dir(storage_root, name)
+        for fname in (RECORD_FILENAME, ENTRY_FILENAME):
+            path = os.path.join(root, fname)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    other = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if str(other.get("origin_sha256") or "") == origin_sha256:
+                return str(other.get("record_id") or name)
+    return ""
+
+
+def backfill_duplicates(storage_root: str) -> int:
+    """给老条目补 `duplicate_of`（v1.14.0 之前存的没有这个字段）。返回改动条数。
+
+    按目录名排序 = 按 captured_ts 先后，先来的先见到，后来的指向它。只在这条
+    记录的字段确实要变时才写盘。
+    """
+    base = records_root(storage_root)
+    if not os.path.isdir(base):
+        return 0
+    changed = 0
+    seen: dict = {}
+    for name in sorted(os.listdir(base)):
+        for fname in (RECORD_FILENAME, ENTRY_FILENAME):
+            path = os.path.join(record_dir(storage_root, name), fname)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            sha = str(data.get("origin_sha256") or "")
+            dup = seen.get(sha, "") if sha else ""
+            if str(data.get("duplicate_of") or "") != dup:
+                data["duplicate_of"] = dup
+                try:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        json.dump(data, fh, ensure_ascii=False, indent=2)
+                except OSError:
+                    pass
+                else:
+                    changed += 1
+            if sha:
+                seen.setdefault(sha, str(data.get("record_id") or name))
+            break
+    return changed
 
 
 def _entry_path(storage_root: str, record_id: str) -> str:
@@ -270,6 +343,8 @@ async def capture_text(
         "render": None,
         "origin_sha256": _canonical_sha256(cleaned),
     }
+    entry["duplicate_of"] = find_duplicate(
+        storage_root, entry["origin_sha256"], exclude=rid)
     with open(_entry_path(storage_root, rid), "w", encoding="utf-8") as fh:
         json.dump(entry, fh, ensure_ascii=False, indent=2)
     return entry

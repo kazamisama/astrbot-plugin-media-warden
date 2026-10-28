@@ -4630,7 +4630,7 @@ def _install_web_stub(*, query=None, body=None):
 
 
 def test_record_page_routes_and_handlers():
-    banner("record_page: 路由注册 + 6 个处理函数")
+    banner("record_page: 路由注册 + 处理函数")
     import asyncio
     tmp = tempfile.mkdtemp(prefix="warden_page_")
     nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1,
@@ -4665,8 +4665,9 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 12, routes
+    assert len(routes) == 13, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
+    assert routes[record_page.PAGE_PREFIX + "/render"] == ("POST",), routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
     assert record_page.PAGE_PREFIX + "/groups" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
@@ -4790,7 +4791,7 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 12, seen
+    assert len(seen) == 13, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
@@ -5586,6 +5587,80 @@ def test_page_stats_and_kind_filter_use_real_counts():
         index.close()
     print("  OK -> stats 760 行 / forward 60 / image 700 / text 0")
 
+def test_record_duplicate_flag_and_rerender():
+    """同内容条目记下先来的 id；插件按当前样式补/重画渲染图（老存档也能有图）。"""
+    import asyncio
+    banner("record: 同内容记 duplicate_of；插件重画渲染图（补老存档）")
+    tmp = tempfile.mkdtemp(prefix="wd_rerender_")
+    png = b"\x89PNG\r\n\x1a\n" + b"9" * 8
+    nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1720000100,
+              "message": [{"type": "text", "data": {"text": "同一段内容"}},
+                          {"type": "image", "data": {"url": "https://x/a.png"}}]}]
+
+    async def fetch_png(_data):
+        return png
+
+    rid1 = record_store.make_record_id("g1", "m1", ts=1720000100)
+    rid2 = record_store.make_record_id("g1", "m2", ts=1720000200)
+    rec1 = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="m1",
+        storage_root=tmp, fetch_image=fetch_png, ts=1720000100, record_id=rid1))
+    rec2 = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="m2",
+        storage_root=tmp, fetch_image=fetch_png, ts=1720000200, record_id=rid2))
+    assert rec1.get("duplicate_of") == "", rec1
+    assert rec2.get("duplicate_of") == rid1, rec2
+
+    segs = [{"type": "text", "data": {"text": "一句话"}}]
+    e1 = asyncio.run(record_store.capture_text(
+        segs, platform="aiocqhttp", group_id="g1", msg_id="t1", sender_id="7",
+        sender_name="阿七", storage_root=tmp, ts=1720000300))
+    e2 = asyncio.run(record_store.capture_text(
+        segs, platform="aiocqhttp", group_id="g1", msg_id="t2", sender_id="7",
+        sender_name="阿七", storage_root=tmp, ts=1720000400))
+    assert e1.get("duplicate_of") == "", e1
+    assert e2.get("duplicate_of") == e1["record_id"], e2
+
+    data = record_admin.scan_items(tmp)
+    flagged = sorted(it["duplicate_of"] for it in data["items"] if it.get("duplicate_of"))
+    assert flagged == sorted([rid1, e1["record_id"]]), flagged
+    detail = record_admin.record_detail(tmp, rid2)
+    assert detail["duplicate_of"] == rid1, detail.get("duplicate_of")
+
+    # 老条目没有这个字段:backfill 补上(只读一遍目录,按时间先后定「先来的」)
+    import json as _json
+    rpath = os.path.join(record_store.record_dir(tmp, rid2), "record.json")
+    with open(rpath, "r", encoding="utf-8") as fh:
+        legacy = _json.load(fh)
+    legacy.pop("duplicate_of", None)
+    with open(rpath, "w", encoding="utf-8") as fh:
+        _json.dump(legacy, fh, ensure_ascii=False)
+    assert record_store.backfill_duplicates(tmp) >= 1
+    assert record_store.load_record(tmp, rid2)["duplicate_of"] == rid1
+
+    # 老存档没有 render.png —— 插件按当前样式补一张
+    inst = plugin_main.MediaWardenStar(
+        plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+        config={"storage_root": tmp, "match_mode": "blacklist",
+                "enable_user_avatar": False, "enable_index_db": False,
+                "reply_preview": False},
+    )
+    asyncio.run(inst.initialize())
+    if inst._forwarder is None:
+        print("  SKIP -> PIL unavailable")
+        return
+    assert record_store.has_render(tmp, rid2) is None
+    out = asyncio.run(inst.rerender_record(rid2))
+    assert out.get("ok") and out.get("has_render"), out
+    assert record_store.has_render(tmp, rid2) == "render.png"
+    assert record_admin.record_detail(tmp, rid2)["has_render"] is True
+    out_text = asyncio.run(inst.rerender_record(e2["record_id"]))
+    assert out_text.get("ok"), out_text
+    assert asyncio.run(inst.rerender_record("nope"))["ok"] is False
+    print("  OK -> duplicate_of", rid1[:16], "|", e1["record_id"][:16],
+          "| rerender", out.get("bytes"), "bytes")
+
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5603,6 +5678,7 @@ PHASE9 = [
     test_record_admin_forward_returns_new_message_id,
     test_record_detail_render_and_uin_reliability,
     test_page_stats_and_kind_filter_use_real_counts,
+    test_record_duplicate_flag_and_rerender,
 ]
 
 

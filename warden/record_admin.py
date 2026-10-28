@@ -147,6 +147,7 @@ def entry_item(root: str, name: str, entry: dict) -> dict:
         "preview": _entry_text(entry)[:80],
         "can_native": False,
         "has_render": bool(render) and meta is not None,
+        "duplicate_of": str(entry.get("duplicate_of") or ""),
         "meta_file": meta or "",
     }
 
@@ -272,6 +273,7 @@ def _forward_item(root: str, rec: dict, name: str) -> dict:
         "preview": preview[:80],
         "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
         "has_render": bool(rec.get("render")),
+        "duplicate_of": str(rec.get("duplicate_of") or ""),
         "meta_file": "record.json",
     }
 
@@ -388,6 +390,7 @@ def _entry_detail(root: str, record_id: str, entry: dict) -> dict:
         "sender_name": str(entry.get("sender_name") or ""),
         "render": render,
         "has_render": bool(render),
+        "duplicate_of": str(entry.get("duplicate_of") or ""),
         "uin_reliable": True,
         "nodes": [{
             "index": 0,
@@ -457,12 +460,13 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "node_count": int(rec.get("node_count") or len(nodes_out)),
         "asset_count": len(rec.get("assets") or []),
         "missing": rec.get("missing") or [],
-        "bytes": _asset_bytes(rec),
+        "bytes": _entry_bytes(root, record_id, rec),
         "origin_sha256": str(rec.get("origin_sha256") or ""),
         # 详情页要靠这两个决定「结构化 / 渲染图」两个标签显不显示（以前列表项有、
         # 详情没有，于是渲染图在页面上根本点不到）。
         "render": str(rec.get("render") or ""),
         "has_render": bool(rec.get("render")),
+        "duplicate_of": str(rec.get("duplicate_of") or ""),
         "uin_reliable": uin_reliable(nodes_out),
         "nodes": nodes_out,
     }
