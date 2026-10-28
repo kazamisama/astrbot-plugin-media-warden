@@ -38,6 +38,18 @@
     toastTimer = setTimeout(function () { el.className = "toast"; }, 3200);
   }
 
+  // 宿主的 bridge-sdk 是注入在 </body> 前的（排在 app.js 之后），所以这里必须
+  // 等它出现，不能假设脚本一执行桥就在。
+  function waitForBridge(timeoutMs, cb) {
+    var started = Date.now();
+    (function tick() {
+      bridge = bridge || window.AstrBotPluginPage || window.AstrBotPluginView;
+      if (bridge && bridge.apiGet) return cb(null);
+      if (Date.now() - started > timeoutMs) return cb(new Error("页面桥未加载"));
+      setTimeout(tick, 40);
+    })();
+  }
+
   function api(path, params) {
     if (!bridge || !bridge.apiGet) return Promise.reject(new Error("页面桥未就绪"));
     return bridge.apiGet("page/" + path, params || {});
@@ -257,11 +269,18 @@
 
   function boot() {
     bind();
-    if (bridge && typeof bridge.ready === "function") {
-      try { bridge.ready(); } catch (e) { /* 老版本桥没有 ready */ }
-    }
-    loadStats();
-    loadList();
+    waitForBridge(5000, function (err) {
+      if (err) {
+        $("list").innerHTML =
+          '<p class="hint">页面桥没有加载（宿主没注入 bridge-sdk），刷新一下试试。</p>';
+        return;
+      }
+      if (typeof bridge.ready === "function") {
+        try { bridge.ready(); } catch (e) { /* 老版本桥没有 ready */ }
+      }
+      loadStats();
+      loadList();
+    });
   }
 
   if (document.readyState === "loading") {
