@@ -4665,12 +4665,14 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 9, routes
+    assert len(routes) == 12, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
     assert record_page.PAGE_PREFIX + "/groups" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
     assert record_page.PAGE_PREFIX + "/reveal" in routes, routes
+    assert record_page.PAGE_PREFIX + "/style" in routes, routes
+    assert routes[record_page.PAGE_PREFIX + "/style_save"] == ("POST",), routes
 
     class _NoReg:
         pass
@@ -4775,7 +4777,7 @@ def test_record_page_routes_and_handlers():
         sys.modules.pop("astrbot.api.web", None)
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK ->", "9 条路由 + stats/records/record/asset/thumb/groups/resend/delete/reveal")
+    print("  OK ->", "12 条路由 + stats/records/record/asset/thumb/groups/resend/delete/reveal/style*")
 
 
 def test_plugin_initialize_registers_page_api():
@@ -4788,14 +4790,14 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 9, seen
+    assert len(seen) == 12, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
     pl2 = _build_plugin_for_command(tmp2, enable_index=False, log_to_stdout=False)
     asyncio.run(pl2.initialize())
     assert pl2._page_api is None, "宿主没有 register_web_api 时应安静跳过"
-    print("  OK ->", "9 条路由 / 无宿主支持时跳过")
+    print("  OK ->", "12 条路由 / 无宿主支持时跳过")
 
 
 PHASE7 = [
@@ -5258,6 +5260,106 @@ def test_plugin_auto_forward_native_falls_back_to_rebuild():
         print("  OK -> 原地失败后仍以重建送达")
 
 
+def test_forwarder_apply_style_and_avatar_shape():
+    import asyncio, io
+    banner("forwarder: apply_style(颜色/圆角/字号/时间格式/头像形状)")
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  SKIP -> PIL unavailable")
+        return
+    from warden.forwarder import Forwarder, _coerce_nodes
+
+    nodes = _coerce_nodes([
+        {"sender": {"user_id": 1, "nickname": "阿七"}, "time": 1718600000,
+         "message": [{"type": "text", "data": {"text": "样式预览"}}]},
+    ])
+    fw = Forwarder(width=720, max_nodes=5)
+    fw.apply_style(width=540, bg="#000000", bubble="#ffffff", text="#112233",
+                   dim="#445566", radius=24, font_size=22,
+                   avatar_shape="square", time_format="%m-%d %H:%M")
+    assert fw.cfg.width == 540 and fw.cfg.bg == (0, 0, 0), fw.cfg
+    assert fw.cfg.bubble_bg == (255, 255, 255)
+    assert fw.cfg.text_color == (17, 34, 51)
+    assert fw.cfg.time_color == (68, 85, 102)
+    assert fw.cfg.bubble_radius == 24 and fw.cfg.font_size == 22
+    assert fw.cfg.avatar_shape == "square"
+    assert fw.cfg.time_format == "%m-%d %H:%M"
+    png = asyncio.run(fw.render(nodes))
+    im = Image.open(io.BytesIO(png))
+    assert im.width == 540, im.size
+    assert im.convert("RGB").getpixel((5, 5)) == (0, 0, 0), "背景色没生效"
+
+    # 深色只替换「还是默认值」的颜色,用户显式挑的色不动
+    fw2 = Forwarder(width=720, max_nodes=5)
+    fw2.apply_style(bg="#f5f6f7", text="#ff0000", dark=True)
+    assert fw2.cfg.bg == (20, 22, 26), fw2.cfg.bg
+    assert fw2.cfg.text_color == (255, 0, 0), fw2.cfg.text_color
+
+    # 非法色值不炸,退回默认
+    fw3 = Forwarder(width=720, max_nodes=5)
+    fw3.apply_style(bg="not-a-color", radius="x", font_size=None)
+    assert fw3.cfg.bg == (245, 246, 247), fw3.cfg.bg  # "#f5f6f7" 兜底
+    print("  OK -> 宽度/颜色/圆角/字号/形状/时间格式 + 深色只动默认色")
+
+
+def test_plugin_style_update_and_page():
+    import asyncio
+    banner("plugin: 样式保存(校验/生效) + 页面 style 接口 + 预览渲染")
+    tmp = tempfile.mkdtemp(prefix="wd_style_")
+    inst = plugin_main.MediaWardenStar(
+        plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+        config={"storage_root": tmp, "match_mode": "blacklist",
+                "enable_index_db": False, "reply_preview": False},
+    )
+    asyncio.run(inst.initialize())
+    snap = inst.style_snapshot()
+    assert snap["style_width"] == 720 and snap["style_text_color"] == "#1c1f24", snap
+
+    updated, errors, persisted = inst.update_style({
+        "style_width": 640, "style_bg_color": "#101010",
+        "style_font_size": 20, "style_avatar_shape": "square",
+        "style_time_format": "%H:%M",
+    })
+    assert errors == [], errors
+    assert isinstance(persisted, list)
+    assert updated["style_width"] == 640 and updated["style_bg_color"] == "#101010"
+    assert inst.cfg.style_width == 640
+    if inst._forwarder is not None:
+        assert inst._forwarder.cfg.width == 640
+        assert inst._forwarder.cfg.bg == (16, 16, 16)
+        assert inst._forwarder.cfg.avatar_shape == "square"
+
+    # 非法值被拦住,且不污染当前配置
+    bad, bad_errors, bad_persisted = inst.update_style({"style_bg_color": "#zzzzzz"})
+    assert bad_errors and not bad and not bad_persisted, bad_errors
+    assert inst.cfg.style_bg_color == "#101010"
+
+    api = record_page.RecordPageApi(inst)
+    saved = sys.modules.pop("astrbot.api.web", None)
+    try:
+        _install_web_stub()
+        got = asyncio.run(api.get_style())
+        assert got["status"] == "ok" and got["data"]["style"]["style_width"] == 640, got
+        _install_web_stub(body={"values": {"style_radius": 30}})
+        res = asyncio.run(api.save_style())
+        assert res["status"] == "ok" and res["data"]["style"]["style_radius"] == 30, res
+        assert inst.cfg.style_radius == 30
+        _install_web_stub(body={"values": {"style_bg_color": "bogus"}})
+        assert asyncio.run(api.save_style())["status"] == "error"
+        if inst._forwarder is not None:
+            _install_web_stub(body={"values": {"style_width": 480}})
+            prev = asyncio.run(api.style_preview())
+            assert prev["status"] == "ok", prev
+            assert prev["data"]["data_url"].startswith("data:image/png;base64,"), prev
+        else:
+            print("  SKIP preview -> PIL unavailable")
+    finally:
+        if saved is not None:
+            sys.modules["astrbot.api.web"] = saved
+    print("  OK -> 保存生效 / 非法值拒绝 / 页面读取与预览均通")
+
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5268,6 +5370,8 @@ PHASE9 = [
     test_record_admin_categories_and_flat,
     test_plugin_forward_auto_forward_to_target_groups,
     test_plugin_auto_forward_native_falls_back_to_rebuild,
+    test_forwarder_apply_style_and_avatar_shape,
+    test_plugin_style_update_and_page,
 ]
 
 

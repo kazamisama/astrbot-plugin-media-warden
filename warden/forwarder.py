@@ -228,6 +228,19 @@ def _wrap_text_simple(text: str, font, max_w: int) -> List[str]:
 
 # ----------------- 头像圆形 mask -----------------
 
+def _avatar_mask(size: int, shape: str = "circle"):
+    """头像蒙版:circle 用圆,square 用圆角矩形(仍然裁掉直角)。"""
+    from PIL import Image, ImageDraw
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    if str(shape or "circle").lower() == "square":
+        draw.rounded_rectangle((0, 0, size - 1, size - 1),
+                               radius=max(2, size // 8), fill=255)
+    else:
+        draw.ellipse((0, 0, size, size), fill=255)
+    return mask
+
+
 def _circle_mask(size: int):
     """生成 size×size 'L' 模式圆形 mask(白圆黑底)。用于 img.paste(avatar, pos, mask=mask) 切圆。"""
     from PIL import Image, ImageDraw
@@ -357,6 +370,29 @@ class _RenderCfg:
     # v1.7.0: 头像(与 MediaWardenConfig 默认对齐,Forwarder 可独立使用)
     enable_user_avatar: bool = True
     avatar_size: int = 36
+    # v1.14.0: 样式可配(时间格式 / 头像形状),其余颜色字段本来就在这里
+    time_format: str = "%Y-%m-%d %H:%M"
+    avatar_shape: str = "circle"
+    dark: bool = False
+
+
+# 样式默认值 / 深色版本 —— 用户没改过某个默认色时,勾选「深色」才替换它
+_STYLE_DEFAULTS = {
+    "bg": ("#f5f6f7", (20, 22, 26)),
+    "bubble": ("#ffffff", (30, 34, 40)),
+    "text": ("#1c1f24", (232, 234, 238)),
+    "dim": ("#8a9099", (154, 163, 175)),
+}
+
+
+def _hex_rgb(value: str) -> Optional[tuple]:
+    text = str(value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return None
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    except ValueError:
+        return None
 
 
 def _node_depth(node: ForwardNode) -> int:
@@ -415,6 +451,55 @@ class Forwarder:
         w, ih = im.size
         scale = min(text_w / max(w, 1), self.cfg.max_image_width / max(w, 1))
         return max(1, int(w * scale)), max(1, int(ih * scale))
+
+    def apply_style(self, *, width=None, bg=None, bubble=None, text=None,
+                    dim=None, radius=None, font_size=None, avatar_shape=None,
+                    time_format=None, dark=False) -> None:
+        """把样式参数应用到渲染器(v1.14.0 样式页/配置共用这一条路径).
+
+        颜色传 None = 用默认;传了默认色 + dark=True 时换深色版本 —— 这样
+        「勾上深色」不会把用户自己挑的颜色也一起改掉。
+        """
+        cfg = self.cfg
+
+        def pick(key: str, value) -> tuple:
+            default_hex, dark_rgb = _STYLE_DEFAULTS[key]
+            text_hex = str(value or "").strip() or default_hex
+            if dark and text_hex.lower() == default_hex:
+                return dark_rgb
+            return _hex_rgb(text_hex) or _hex_rgb(default_hex)
+
+        if width:
+            try:
+                cfg.width = max(200, min(3000, int(width)))
+                cfg.max_image_width = cfg.width
+                cfg.max_image_height = cfg.width
+            except (TypeError, ValueError):
+                pass
+        cfg.dark = bool(dark)
+        cfg.bg = pick("bg", bg)
+        cfg.bubble_bg = pick("bubble", bubble)
+        cfg.text_color = pick("text", text)
+        cfg.time_color = pick("dim", dim)
+        cfg.header_color = cfg.time_color
+        if radius is not None:
+            try:
+                cfg.bubble_radius = max(0, min(96, int(radius)))
+            except (TypeError, ValueError):
+                pass
+        if font_size is not None:
+            try:
+                size = max(8, min(48, int(font_size)))
+                cfg.font_size = size
+                cfg.header_size = max(10, size - 2)
+            except (TypeError, ValueError):
+                pass
+        shape = str(avatar_shape or "circle").lower()
+        cfg.avatar_shape = shape if shape in ("circle", "square") else "circle"
+        if isinstance(time_format, str) and time_format.strip():
+            cfg.time_format = time_format
+        # 字体/尺寸变了要重新加载字号
+        self._fonts_loaded = False
 
     def can_handle(self, nodes: List[ForwardNode]) -> bool:
         return 1 <= len(nodes) <= self.max_nodes
@@ -496,7 +581,8 @@ class Forwarder:
                 else:
                     h += _line_h(self._font, ln, cfg.font_size) + 2
             if nd.time:
-                h += 6 + _line_h(self._font_time, _fmt_time(nd.time), cfg.header_size - 2)
+                h += 6 + _line_h(self._font_time, _fmt_time(nd.time, cfg.time_format),
+                                 cfg.header_size - 2)
             if imgs:
                 h += 8
             for im in imgs:
@@ -549,7 +635,7 @@ class Forwarder:
                 except Exception:
                     _avatar_im = None
             if _avatar_im is not None:
-                _mask = _circle_mask(self.cfg.avatar_size)
+                _mask = _avatar_mask(self.cfg.avatar_size, self.cfg.avatar_shape)
                 img.paste(_avatar_im, (tx, ty), mask=_mask)
                 tx += self.cfg.avatar_size + 6
             draw.text((tx, ty), nd.sender_name or "anon",
@@ -576,9 +662,10 @@ class Forwarder:
                     ty += _line_h(self._font, ln, cfg.font_size) + 2
             if nd.time:
                 ty += 6
-                draw.text((tx, ty), _fmt_time(nd.time), fill=cfg.time_color,
+                _tstr = _fmt_time(nd.time, cfg.time_format)
+                draw.text((tx, ty), _tstr, fill=cfg.time_color,
                           font=self._font_time)
-                ty += _line_h(self._font_time, _fmt_time(nd.time), cfg.header_size - 2)
+                ty += _line_h(self._font_time, _tstr, cfg.header_size - 2)
             if imgs:
                 ty += 8
             for im in imgs:
@@ -593,10 +680,10 @@ class Forwarder:
         return buf.getvalue()
 
 
-def _fmt_time(ts: int) -> str:
+def _fmt_time(ts: int, fmt: str = "%Y-%m-%d %H:%M") -> str:
     import datetime
     try:
-        return datetime.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M")
+        return datetime.datetime.fromtimestamp(int(ts)).strftime(fmt or "%Y-%m-%d %H:%M")
     except (TypeError, ValueError, OSError):
         return ""
 

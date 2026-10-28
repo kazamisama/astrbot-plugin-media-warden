@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>渲染样式 · media-warden</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">MW</span>
+        <span class="title">渲染样式</span>
+        <span class="sub">聊天记录 / 纯文本的 Pillow 渲染</span>
+      </div>
+      <div class="tools">
+        <button id="save" class="btn primary">保存到插件配置</button>
+        <button id="reset" class="btn">恢复当前值</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel controls">
+        <div class="field">
+          <label for="width">画布宽度 <b id="width-val">720</b></label>
+          <input id="width" type="range" min="200" max="3000" step="10" value="720" />
+        </div>
+        <div class="field">
+          <label for="font">正文字号 <b id="font-val">15</b></label>
+          <input id="font" type="range" min="8" max="48" step="1" value="15" />
+        </div>
+        <div class="field">
+          <label for="radius">气泡圆角 <b id="radius-val">12</b></label>
+          <input id="radius" type="range" min="0" max="96" step="1" value="12" />
+        </div>
+        <div class="field row">
+          <label for="bg">背景色</label>
+          <input id="bg" type="color" value="#f5f6f7" />
+          <input id="bg-text" type="text" class="mono" value="#f5f6f7" />
+        </div>
+        <div class="field row">
+          <label for="bubble">气泡色</label>
+          <input id="bubble" type="color" value="#ffffff" />
+          <input id="bubble-text" type="text" class="mono" value="#ffffff" />
+        </div>
+        <div class="field row">
+          <label for="text">正文色</label>
+          <input id="text" type="color" value="#1c1f24" />
+          <input id="text-text" type="text" class="mono" value="#1c1f24" />
+        </div>
+        <div class="field row">
+          <label for="dim">次要色</label>
+          <input id="dim" type="color" value="#8a9099" />
+          <input id="dim-text" type="text" class="mono" value="#8a9099" />
+        </div>
+        <div class="field" id="shape">
+          <label>头像形状</label>
+          <label class="opt"><input type="radio" name="shape" value="circle" checked /> 圆形</label>
+          <label class="opt"><input type="radio" name="shape" value="square" /> 方形</label>
+        </div>
+        <div class="field">
+          <label for="timefmt">时间格式（strftime）</label>
+          <input id="timefmt" type="text" class="mono" value="%H:%M" />
+        </div>
+        <div class="field">
+          <label class="opt"><input id="dark" type="checkbox" /> 深色配色（不改你自己挑的颜色）</label>
+        </div>
+        <p class="hint-inline" id="status"></p>
+      </section>
+
+      <section class="panel preview-pane">
+        <div class="preview-head">实时预览 <span class="sub" id="preview-meta"></span></div>
+        <div class="preview-body">
+          <img id="preview" alt="预览渲染中…" />
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -60,6 +60,12 @@ class RecordPageApi:
                  "media-warden 删除存档")
         register(f"{PAGE_PREFIX}/reveal", self.reveal, ["POST"],
                  "media-warden 在资源管理器里打开目录")
+        register(f"{PAGE_PREFIX}/style", self.get_style, ["GET"],
+                 "media-warden 渲染样式(读取)")
+        register(f"{PAGE_PREFIX}/style_save", self.save_style, ["POST"],
+                 "media-warden 渲染样式(保存)")
+        register(f"{PAGE_PREFIX}/style_preview", self.style_preview, ["POST"],
+                 "media-warden 渲染样式(实时预览)")
         return True
 
     # ---------------- 内部 ----------------
@@ -229,6 +235,91 @@ class RecordPageApi:
                     rb["note"] = f"原地转发不可用（{res.get('error')}），已回退重建"
                     res = rb
         return {"status": "ok", "data": res}
+
+    # ---------------- 样式页 ----------------
+
+    async def get_style(self):
+        snap = getattr(self.plugin, "style_snapshot", None)
+        if not callable(snap):
+            return {"status": "error", "message": "插件版本不支持样式页", "data": {}}
+        return {"status": "ok", "data": {"style": snap()}}
+
+    async def save_style(self):
+        from astrbot.api.web import request
+        body = await request.json(default={}) or {}
+        values = (body or {}).get("values") if isinstance(body, dict) else None
+        updater = getattr(self.plugin, "update_style", None)
+        if not callable(updater):
+            return {"status": "error", "message": "插件版本不支持样式保存", "data": {}}
+        snap, errors, persisted = updater(values if isinstance(values, dict) else {})
+        if errors:
+            return {"status": "error", "message": "；".join(errors), "data": {}}
+        return {"status": "ok", "data": {"style": snap,
+                                         "persisted": len(persisted)}}
+
+    async def style_preview(self):
+        """用当前(或请求里带的)样式渲染一张样例图,base64 回给页面。"""
+        from astrbot.api.web import request
+        body = await request.json(default={}) or {}
+        values = (body or {}).get("values") if isinstance(body, dict) else None
+        try:
+            blob = await self._render_preview(values if isinstance(values, dict) else {})
+        except Exception as e:
+            return {"status": "error", "message": f"预览渲染失败: {e!r}", "data": {}}
+        return {"status": "ok", "data": {
+            "data_url": "data:image/png;base64," + base64.b64encode(blob).decode("ascii"),
+            "bytes": len(blob),
+        }}
+
+    async def _render_preview(self, values: dict) -> bytes:
+        """样例对话渲染:颜色/圆角/字号/时间格式/头像形状都在这张图里体现。"""
+        import tempfile
+        from PIL import Image, ImageDraw
+        from .forwarder import Forwarder, _coerce_nodes
+
+        snap = {}
+        snap_fn = getattr(self.plugin, "style_snapshot", None)
+        if callable(snap_fn):
+            snap = snap_fn()
+        style = dict(snap)
+        for k, v in (values or {}).items():
+            if k in style:
+                style[k] = v
+
+        width = int(style.get("style_width") or 720)
+        fw = Forwarder(width=max(200, min(3000, width)), max_nodes=5)
+        fw.apply_style(
+            width=width,
+            bg=style.get("style_bg_color"),
+            bubble=style.get("style_bubble_color"),
+            text=style.get("style_text_color"),
+            dim=style.get("style_dim_color"),
+            radius=style.get("style_radius"),
+            font_size=style.get("style_font_size"),
+            avatar_shape=style.get("style_avatar_shape"),
+            time_format=style.get("style_time_format"),
+            dark=bool(style.get("style_dark")),
+        )
+        nodes = _coerce_nodes([
+            {"sender": {"user_id": 1, "nickname": "样例用户"},
+             "time": int(__import__("time").time()) - 120,
+             "message": [{"type": "text", "data": {
+                 "text": "这是一条预览消息：气泡颜色、圆角、字号、时间格式都在这里体现。"}}]},
+            {"sender": {"user_id": 2, "nickname": "第二位"},
+             "time": int(__import__("time").time()),
+             "message": [{"type": "text", "data": {
+                 "text": "第二条，用来看多节点间距。"}},
+                 {"type": "face", "data": {"id": "14"}}]},
+        ])
+        # 合成一个头像,否则看不出「圆形/方形」的差别
+        tmp = tempfile.mkdtemp(prefix="wd_style_")
+        avatar = os.path.join(tmp, "avatar.png")
+        im = Image.new("RGBA", (72, 72), (47, 125, 225, 255))
+        ImageDraw.Draw(im).ellipse((10, 10, 62, 62), fill=(255, 255, 255, 255))
+        im.save(avatar)
+        for nd in nodes:
+            nd.avatar_path = avatar
+        return await fw.render(nodes)
 
     async def reveal(self):
         """在运行 AstrBot 的这台机器上打开文件所在目录。

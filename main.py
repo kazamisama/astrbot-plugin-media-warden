@@ -266,6 +266,8 @@ def _upgrade_qq_image_url(url: str) -> str:
 class MediaWardenStar(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
+        # v1.14.0: 留着宿主的配置对象(dict 子类),样式页保存时要写回它
+        self._config_obj = config if isinstance(config, dict) else None
         self.cfg, self._config_errors = MediaWardenConfig.from_raw_lenient(config or {})
         if self._config_errors:
             print(f"[media-warden] config warnings: {self._config_errors}")
@@ -316,6 +318,7 @@ class MediaWardenStar(Star):
                 width=self.cfg.forward_image_width,
                 max_nodes=self.cfg.forward_render_max_nodes,
             )
+            self._apply_render_style()
         except ImportError as e:
             self._log(f"forwarder unavailable (Pillow 缺失?): {e!r} — JSON sidecar 兜底")
             self._forwarder = None
@@ -350,6 +353,80 @@ class MediaWardenStar(Star):
             f"page={'on' if self._page_api else 'off'}"
         )
         return None
+
+    # ----------------- 样式(v1.14.0) -----------------
+
+    _STYLE_FIELDS = (
+        "style_width", "style_bg_color", "style_bubble_color",
+        "style_text_color", "style_dim_color", "style_radius",
+        "style_font_size", "style_avatar_shape", "style_time_format",
+        "style_dark",
+    )
+
+    def _apply_render_style(self) -> None:
+        """把 cfg 里的样式参数灌进渲染器(初始化与样式页保存后都走这里)."""
+        if self._forwarder is None:
+            return
+        c = self.cfg
+        try:
+            self._forwarder.apply_style(
+                width=c.style_width,
+                bg=c.style_bg_color,
+                bubble=c.style_bubble_color,
+                text=c.style_text_color,
+                dim=c.style_dim_color,
+                radius=c.style_radius,
+                font_size=c.style_font_size,
+                avatar_shape=c.style_avatar_shape,
+                time_format=c.style_time_format,
+                dark=bool(c.style_dark),
+            )
+        except Exception as e:
+            self._log(f"apply render style failed: {e!r}")
+
+    def style_snapshot(self) -> dict:
+        out = {k: getattr(self.cfg, k) for k in self._STYLE_FIELDS}
+        out["forward_image_width"] = self.cfg.forward_image_width
+        return out
+
+    def update_style(self, values: dict) -> tuple[dict, list[str], list[str]]:
+        """样式页保存:校验 -> 应用到 cfg -> 灌进渲染器 -> 写回插件配置文件.
+
+        返回 (快照, 校验错误, 已持久化的键) —— 三者分开,调用方不用猜第二项是什么。
+        """
+        merged = {k: getattr(self.cfg, k) for k in self._STYLE_FIELDS}
+        for k, v in (values or {}).items():
+            if k in merged:
+                merged[k] = v
+        cand, errors = MediaWardenConfig.from_raw_lenient({**merged})
+        if errors:
+            return {}, errors, []
+        for k in self._STYLE_FIELDS:
+            setattr(self.cfg, k, getattr(cand, k))
+        self._apply_render_style()
+        persisted = self._persist_config({k: getattr(self.cfg, k)
+                                         for k in self._STYLE_FIELDS})
+        return self.style_snapshot(), [], persisted
+
+    def _persist_config(self, updates: dict) -> list[str]:
+        """写回宿主的插件配置文件(失败只记日志 —— 本次运行仍然生效)."""
+        obj = getattr(self, "_config_obj", None)
+        if not isinstance(obj, dict):
+            return []
+        written: list[str] = []
+        for k, v in (updates or {}).items():
+            try:
+                obj[k] = v
+                written.append(k)
+            except Exception as e:
+                self._log(f"config set {k} failed: {e!r}")
+        saver = getattr(obj, "save_config", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception as e:
+                self._log(f"config save failed: {e!r} (本次运行仍生效)")
+        return written
 
     async def terminate(self) -> None:
         if self._index is not None:
