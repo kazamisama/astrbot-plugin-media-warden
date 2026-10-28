@@ -29,6 +29,8 @@
 - **分类管理**：`index.list_assets(kinds / group_id / q)` 查扁平文件，`record_admin.scan_items()` 把 `_records/` 条目与扁平行合成一页；类型标签同时覆盖两者。`page/thumb` 支持 `source=flat` 与 `render.png`；`page/reveal` → `os.startfile`（仅 Windows，且只对 `storage_root` 下的目录生效）。
 - **统计/筛选必须走 SQL，不能先取一页再过滤**（v1.14.0 页面审计修的就是这个）：`record_page._FLAT_KIND_MAP` 把页面类型翻成索引 `kind`（image → `['image','forward_render']`、forward → `['forward','forward_json']`），`_flat_kinds()` 在 SQL 层过滤；总数用 `index.summary(...)` 的 `COUNT(*)` / `SUM(size)`，`scan_items(flat_total=...)` 只负责把「条目 + 扁平真实总数」拼成 `total`。占用口径含 `render.png` 与 `entry.json`（`_dir_file_bytes`）。
 - **uin 只在可信时显示**：`record.uin_reliable(nodes)` —— NapCat 的 `get_forward_msg` 会给整条转发的每个节点**同一个** `sender.user_id`（昵称却各不相同），这种记录写 `uin_reliable: false`，页面只显示昵称、不显示那个假号。
+- **取图一律走 `page/thumb`**（返回 `data:image/…;base64,…`）：页面脚本里任何要显示的 `<img>` 都带 `data-asset`，`hydrateThumbs()` 按 `img[data-asset]` 选——**不要**只按 `.thumb` 选，否则渲染图（`.render-img`）会静默变成破图标（v1.14.0 页面审计里踩过）。桌面版（Tauri）没有 dashboard cookie，`<img src="/api/plug/…">` 恒 401。
+- **列表预览**：`_forward_preview(rec)` 拼整条记录的文字，纯图片记录退回「图片 N · 表情 M」；`entry_item` / `_forward_item` 的 `bytes` 都用 `_entry_bytes()`（资产 + render.png + json）。
 - **详情字段**：`record_detail()` / `_entry_detail()` 都返回 `has_render` 与 `render`（文件名），页面靠它决定是否出「结构化 / 渲染图」标签；缺了标签就不出现（这正是审计里「render.png 点不开」的原因）。
 - **转发**：`record_admin.native_forward`（跨群原地同样保装扮）/ `rebuild_forward`（丢装扮），原地失败自动回退重建并在回执里说明；页面下拉 `page/groups` 带群名，默认这条记录的原群。自动转发在 `_save_forward` 末尾调 `_auto_forward()`，目标空或等于源群就跳过。
 - **样式**：`Forwarder.apply_style(**10 项)` 改 `_RenderCfg`；`main._apply_render_style()` 在 `initialize()` 与 `update_style()` 后都调；`pages/style/` 实时预览（debounce 180ms，含合成头像），保存写宿主配置（`_persist_config` → `config.save_config()`，失败只记日志）。`dark` 只替换仍是默认值的颜色。

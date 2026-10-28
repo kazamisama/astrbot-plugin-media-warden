@@ -43,6 +43,10 @@
 - **类型筛选在取数截断之后才做**：`list_records` 先取 500 行再在 Python 里按 `kind` 过滤 —— 「聊天记录」只剩 8 条（真实 60）、「图片」永远是 500（真实 7491）。现在 `_flat_kinds()` 把类型翻成索引里的 `kind` 列表、在 SQL 里过滤，`scan_items(flat_total=…)` 用真实总数算 `total`。
 - **占用口径**：`stats.bytes` 只累加 `_records` 的图片字节，漏了 `render.png` / `entry.json`，与磁盘差一个量级；现在 `_dir_file_bytes()` 把这两个文件也算进去。
 - **详情缺 `has_render` / `render`**：列表项有「有渲染图」徽章，详情里却没有这两个键，页面的「结构化 / 渲染图」标签根本不出现、`render.png` 点不开；现在 `record_detail()` 与 `_entry_detail()` 都带上。
+- **详情里的渲染图只剩一个破图标**：页面用 `.thumb[data-asset]` 找要取图的 `<img>`，而渲染图是 `.render-img` —— 于是它永远没有 `src`，只显示 alt 文案「渲染图加载中…」。现在按 `img[data-asset]` 选，渲染图与缩略图一样走 `page/thumb` 的 base64（桌面版 `<img>` 直连带不上 Authorization，恒 401）。
+- **列表预览只取第一个节点**：一个全是图片的聊天记录在列表里就只剩「[图片]」，看不出是什么。现在 `_forward_preview()` 拼整条记录的文字，一个字的文本都没有时才退回「图片 2 · 表情 1」这种计数。
+- **条目占用不算 `render.png` / `entry.json`**：`_entry_bytes()` 现在把两者计入（同一条记录图片 133 KB、条目实际 286 KB）。
+- 蒙层大图以前只认缩略图 `img.thumb`，渲染图点了没反应；现在 `.render-img` 也能点开。
 - **不可信 uin 照抄**：NapCat 的 `get_forward_msg` 给整条转发的**每个节点同一个 `sender.user_id`**（昵称却是各节点的），页面会显示成「两个不同昵称共用一个 QQ 号」。`record.uin_reliable(nodes)` 在同一个 uin 对上多个昵称时判为不可信并写进 `record.json`，页面此时只显示昵称。
 
 ### Tests
