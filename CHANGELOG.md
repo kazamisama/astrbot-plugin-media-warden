@@ -3,7 +3,7 @@
 ## v1.15.0
 
 配置页重做：把 9 组配置按「用户想事情的顺序」重排，砍掉重复与假选项，默认值按实测结论调整。功能行为除下面两处外不变。
-冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=151)`。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`。
 
 ### 升级前必读（行为/配置变化）
 
@@ -20,9 +20,14 @@
 - **`forward_image_engine` 选项收成 `["pil"]`**：只有 PIL 实现，之前摆出 playwright/wkhtml 两个假选项只会让人白试。旧配置里的这两个值仍会被接受并打一条告警（不静默生效）。
 - **`save_types` 里文档白名单紧跟 `save_files`**：先「存不存文档」再「存哪些扩展名」，不再隔开。
 
+### Fixed
+
+- **动图类型落盘时不该丢**：`main._store_dl()` 以前一律用 `comp.kind`（图片段恒为 `image`）写索引，于是「动图」分类只能靠页面拿 `.gif` 扩展名兜底、**动画 WebP 永远进不了「动图」**，而 `policy.blob_is_animated()` 写了却从没被生产代码调用。现在落盘后用字节复核：`comp_is_animated()` 判过的图，多帧记 `gif`、单帧（含静态 WebP）记回 `image`，`AssetResult.kind` 与预览路径也跟着真实类型。
+- **hint 里三处「说了做不到 / 缺了关键后果」**：`save_gifs` 原来写「静态 WebP 下载后会归回图片」（当时其实没实现，现已实现）；`avatar_platforms` 没写「留空 = 哪个平台都不抓头像」；`doc_ext_whitelist` 的「空 = 不限」没提醒与 ① 的群/人白名单「空 = 不存」**语义相反**；`forward_render_mode` 改成说明白「条目里的 record.json 总是有的，json/both 那份扁平 JSON 是额外副本」。
+
 ### Tests
 
-- 冒烟 150 → **151 项**（Phase 9: 21）：新增「schema 分组顺序 + 宽度旋钮唯一 + `auto_forward_mode` 默认 native」「旧默认值升级规则（未启用/无目标群/仍为 rebuild 才改）」；枚举断言跟着改成 `render` 组与 `["pil"]`。
+- 冒烟 150 → **152 项**（Phase 4: 26 / Phase 9: 21）：新增「schema 分组顺序 + 宽度旋钮唯一 + `auto_forward_mode` 默认 native」「旧默认值升级规则（未启用/无目标群/仍为 rebuild 才改）」；枚举断言跟着改成 `render` 组与 `["pil"]`。
 ## v1.14.0
 
 「存什么 / 怎么存 / 怎么看」三件事一起做完：类型门控 + 六类开关，纯文本与聊天记录统一成「一个条目两种形态」，页面按类型分类管理并支持发到别的群，渲染样式搬进独立页面。

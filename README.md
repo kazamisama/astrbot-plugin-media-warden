@@ -94,10 +94,10 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `save_images` | `true` | 静态图片（动图走下一项） |
-| `save_gifs` | `true` | 动图（GIF / APNG / 动态 WebP；按扩展名+字节判定，不依赖 PIL） |
+| `save_gifs` | `true` | 动图（GIF / APNG / 动态 WebP）。先按扩展名归类，落盘后按字节复核：多帧记 `gif`、单帧归 `image`（进「图片」分类） |
 | `save_videos` | `true` | 视频 |
 | `save_files` | `true` | 文档（群文件），扩展名受 `doc_ext_whitelist` 约束 |
-| `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限** |
+| `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限**（注意与 ① 群/人白名单的空 = 不存相反） |
 | `save_texts` | `false` | 纯文本消息：`entry.json` + `render.png`，共用一个条目 |
 | `save_forwards` | `true` | 聊天记录：`record.json` + `render.png`，共用一个条目 |
 
@@ -125,14 +125,14 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `forward_render_mode` | `image` | `image`（只出渲染图）\| `json`（只存结构化）\| `both`（两者都留，推荐） |
+| `forward_render_mode` | `image` | `image`（只出渲染图）\| `json`（不出图，额外存一份扁平 JSON）\| `both`（两者都留）。条目里的 `record.json` 总是有的 —— json/both 那份扁平 JSON 是额外副本 |
 | `forward_render_max_nodes` | `30` | 超过就只存结构化、不出图 |
 | `forward_image_engine` | `pil` | 只有 `pil`（纯 Python，无外部依赖）；旧配置里的 playwright/wkhtml 会打告警并继续用 PIL |
 | `enable_user_avatar` | `true` | 渲染时画头像（qlogo.cn，失败静默跳过） |
 | `avatar_size` | `36` | 头像直径（像素） |
 | `avatar_timeout_s` | `10` | 头像抓取超时（qlogo 冷启动可能要 5s+） |
 | `avatar_cache_size_mb` | `50` | 头像缓存上限，超出按 mtime LRU 删 |
-| `avatar_platforms` | `["aiocqhttp", "qq_official"]` | 允许抓头像的平台（napcat/lagrange 的平台名是 `aiocqhttp`） |
+| `avatar_platforms` | `["aiocqhttp", "qq_official"]` | 允许抓头像的平台（napcat/lagrange 的平台名是 `aiocqhttp`）；**留空 = 不抓任何平台的头像** |
 
 **⑥ 渲染样式（`render_style`）** —— dashboard 的「渲染样式」页有实时预览，建议在那里调。
 
@@ -277,7 +277,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **151 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 21），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **152 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 26 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 21），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值；**宿主的 schema 分组嵌套配置**能被摊平读取（顶层同名键优先）
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
