@@ -31,6 +31,7 @@ SCHEMA_VERSION = 1
 ENTRY_SCHEMA_VERSION = 1
 RECORDS_DIRNAME = "_records"
 ENTRY_FILENAME = "entry.json"
+RECORD_FILENAME = "record.json"
 RENDER_FILENAME = "render.png"
 
 
@@ -172,6 +173,7 @@ async def capture(
 
     record = {
         "schema_version": SCHEMA_VERSION,
+        "kind": "forward",
         "record_id": rid,
         "platform": platform,
         "group_id": str(group_id or ""),
@@ -181,6 +183,7 @@ async def capture(
         "nodes": out_nodes,
         "assets": assets,
         "missing": missing,
+        "render": None,
         "origin_sha256": _canonical_sha256(out_nodes),
     }
     with open(os.path.join(root, "record.json"), "w", encoding="utf-8") as fh:
@@ -190,6 +193,19 @@ async def capture(
 
 def _entry_path(storage_root: str, record_id: str) -> str:
     return os.path.join(record_dir(storage_root, record_id), ENTRY_FILENAME)
+
+
+def meta_filename(storage_root: str, record_id: str) -> Optional[str]:
+    """条目目录里那份元数据文件名:entry.json(纯文本) 或 record.json(聊天记录).
+
+    v1.14.0 起两种条目共用一个目录形态,只有元数据文件名不同 —— 渲染图登记在
+    各自的元数据里,所以读写渲染字段前必须先问这份文件是谁。
+    """
+    root = record_dir(storage_root, record_id)
+    for name in (ENTRY_FILENAME, RECORD_FILENAME):
+        if os.path.isfile(os.path.join(root, name)):
+            return name
+    return None
 
 
 async def capture_text(
@@ -254,10 +270,18 @@ def load_entry(storage_root: str, record_id: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+def _load_meta(storage_root: str, record_id: str) -> Optional[dict]:
+    """读条目元数据:优先 entry.json,退回 record.json。"""
+    entry = load_entry(storage_root, record_id)
+    if entry is not None:
+        return entry
+    return load_record(storage_root, record_id)
+
+
 def has_render(storage_root: str, record_id: str) -> Optional[str]:
     """条目有渲染图就返回文件名，没有返回 None（只认登记过的 render 字段）。"""
-    entry = load_entry(storage_root, record_id)
-    name = (entry or {}).get("render")
+    meta = _load_meta(storage_root, record_id)
+    name = (meta or {}).get("render")
     if not isinstance(name, str) or not name:
         return None
     if os.path.isfile(os.path.join(record_dir(storage_root, record_id), name)):
@@ -266,17 +290,20 @@ def has_render(storage_root: str, record_id: str) -> Optional[str]:
 
 
 def save_render(storage_root: str, record_id: str, blob: bytes) -> Optional[str]:
-    """把渲染图写进条目目录并登记到 entry.json；没有 entry.json 时不写。"""
-    entry = load_entry(storage_root, record_id)
-    if entry is None or not blob:
+    """把渲染图写进条目目录并登记到该条目的元数据；没有元数据时不写。"""
+    name = meta_filename(storage_root, record_id)
+    if name is None or not blob:
+        return None
+    meta = _load_meta(storage_root, record_id)
+    if meta is None:
         return None
     root = record_dir(storage_root, record_id)
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, RENDER_FILENAME), "wb") as fh:
         fh.write(blob)
-    entry["render"] = RENDER_FILENAME
-    with open(_entry_path(storage_root, record_id), "w", encoding="utf-8") as fh:
-        json.dump(entry, fh, ensure_ascii=False, indent=2)
+    meta["render"] = RENDER_FILENAME
+    with open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=2)
     return RENDER_FILENAME
 
 

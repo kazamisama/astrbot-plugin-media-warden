@@ -5029,12 +5029,76 @@ def test_plugin_type_gating_drops_disabled_and_bad_ext():
         print("  OK -> image off=false, exe dropped, pdf saved:", os.path.basename(pdfs[0]))
 
 
+def test_plugin_forward_saved_as_single_entry():
+    import asyncio
+    banner("plugin: 聊天记录 -> 一个条目(record.json + render.png + assets)")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={
+                "storage_root": td,
+                "match_mode": "blacklist",
+                "forward_render_mode": "both",
+                "enable_user_avatar": False,
+                "enable_index_db": False,
+                "reply_preview": False,
+            },
+        )
+        asyncio.run(inst.initialize())
+        if inst._forwarder is None:
+            print("  SKIP -> PIL unavailable")
+            return
+        nodes = [
+            {"sender": {"user_id": 206216334, "nickname": "橘雪莉"},
+             "time": 1718600000,
+             "message": [
+                 {"type": "text", "data": {"text": "看图"}},
+                 {"type": "image", "data": {"url": "https://x/a.png"}},
+             ]},
+        ]
+        orig_download = plugin_main.download
+
+        async def _fake_download(comp, *a, **k):
+            return Downloaded(data=b"\x89PNG\r\n\x1a\n" + b"0" * 8,
+                              mime="image/png", size=16)
+
+        plugin_main.download = _fake_download
+        try:
+            ctx = SaveContext(platform="aiocqhttp", group_id="961583271",
+                              sender_id="2510536451", sender_name="卡兹",
+                              msg_id="mfwd1", idx=0, ts=1718600000)
+            comp = Component(kind="forward", meta={"nodes": nodes})
+            results = asyncio.run(inst._save_forward(comp, ctx, None))
+        finally:
+            plugin_main.download = orig_download
+
+        kinds = sorted(r.kind for r in results if r.ok)
+        assert kinds == ["forward", "forward_render"], results
+
+        rows = record_store.list_records(td)
+        assert len(rows) == 1 and rows[0]["kind"] == "forward", rows
+        rid = rows[0]["record_id"]
+        rdir = record_store.record_dir(td, rid)
+        assert os.path.isfile(os.path.join(rdir, "record.json"))
+        assert record_store.has_render(td, rid) == "render.png"
+        assert os.path.isdir(os.path.join(rdir, "assets"))
+        rec = record_store.load_record(td, rid)
+        assert rec["kind"] == "forward" and rec["render"] == "render.png"
+        assert rec["node_count"] == 1
+        # 节点内图片落进了条目 assets(与渲染共用同一批字节)
+        assets = rec.get("assets") or []
+        assert assets and all(os.path.isfile(
+            os.path.join(rdir, a["path"].replace("/", os.sep))) for a in assets), assets
+        print("  OK -> 条目", rid, "| assets", len(assets))
+
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
     test_record_text_entry_roundtrip,
     test_plugin_e2e_text_message_saved_as_entry,
     test_plugin_type_gating_drops_disabled_and_bad_ext,
+    test_plugin_forward_saved_as_single_entry,
 ]
 
 

@@ -1383,43 +1383,8 @@ class MediaWardenStar(Star):
                 except Exception as e:
                     self._log(f"avatar fetch failed: {e!r} — proceed without")
 
-        if want_json or not want_image:
-            comp_json = Component(
-                kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
-                raw=comp.raw,
-            )
-            try:
-                payload = json.dumps(
-                    {"forward": True, "node_count": len(nodes),
-                     "nodes": (comp.meta or {}).get("nodes")},
-                    ensure_ascii=False, indent=2,
-                )
-                sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
-                                         mime="application/json")
-            except (TypeError, ValueError, OSError, RuntimeError) as e:
-                # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
-                # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
-                results.append(self._failed(
-                    comp, ctx, "json",
-                    f"json save: {type(e).__name__}: {e}", e,
-                    subject=f"forward_json:{ctx.msg_id}#{ctx.idx}",
-                    failure_kind="save",
-                ))
-            else:
-                if self._index is not None:
-                    try:
-                        self._index.record(
-                            platform=ctx.platform, group_id=ctx.group_id,
-                            sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=ctx.idx,
-                            kind="forward", path=sr.path, size=sr.size,
-                            sha16=sr.blake16, forward_meta={"node_count": len(nodes)},
-                        )
-                    except Exception as e:
-                        self._log(f"index record failed: {e!r}")
-                results.append(AssetResult(kind="forward", ok=True,
-                                           path=sr.path, size=len(payload),
-                                           reused=sr.reused))
-
+        # url -> 已下载字节:渲染与存档共用(声明在 if 之外,存档要用到)
+        blob_by_url: dict[str, bytes] = {}
         if want_image and nodes:
             # 节点内图片也并发下载
             all_urls: list[str] = []
@@ -1488,6 +1453,67 @@ class MediaWardenStar(Star):
                         continue
                     ni = url_to_node[pos]
                     node_imgs[ni].append(r)
+                    blob_by_url[all_urls[pos]] = r
+
+        # v1.14.0: 一个条目 = record.json(结构化) + render.png(渲染) + assets/,
+        # 两种显示模式共用一个目录(聊天记录与纯文本同理)。
+        # 存档用的图片字节就是上面渲染下载的那一批,不再重复拉一遍网络。
+        rid = record_store.make_record_id(ctx.group_id, ctx.msg_id, ctx.ts)
+        archived: Optional[dict] = None
+        raw_nodes_for_archive = (comp.meta or {}).get("nodes") or []
+        if raw_nodes_for_archive:
+            async def _archive_image(data, _blobs=blob_by_url):
+                ref = record_store.image_ref(data)
+                return _blobs.get(ref) if ref else None
+            try:
+                archived = await record_store.capture(
+                    raw_nodes_for_archive,
+                    platform=ctx.platform, group_id=ctx.group_id,
+                    msg_id=ctx.msg_id, storage_root=self.cfg.storage_root,
+                    fetch_image=_archive_image, ts=ctx.ts, record_id=rid,
+                )
+            except Exception as e:
+                # 存档失败不该让整条消息判失败 —— 渲染图/JSON 仍能救场
+                self._log(f"forward archive failed: {type(e).__name__}: {e!r}")
+
+        if want_json or not want_image:
+            comp_json = Component(
+                kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
+                raw=comp.raw,
+            )
+            try:
+                payload = json.dumps(
+                    {"forward": True, "node_count": len(nodes),
+                     "nodes": (comp.meta or {}).get("nodes")},
+                    ensure_ascii=False, indent=2,
+                )
+                sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
+                                         mime="application/json")
+            except (TypeError, ValueError, OSError, RuntimeError) as e:
+                # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
+                # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
+                results.append(self._failed(
+                    comp, ctx, "json",
+                    f"json save: {type(e).__name__}: {e}", e,
+                    subject=f"forward_json:{ctx.msg_id}#{ctx.idx}",
+                    failure_kind="save",
+                ))
+            else:
+                if self._index is not None:
+                    try:
+                        self._index.record(
+                            platform=ctx.platform, group_id=ctx.group_id,
+                            sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=ctx.idx,
+                            kind="forward", path=sr.path, size=sr.size,
+                            sha16=sr.blake16, forward_meta={"node_count": len(nodes)},
+                        )
+                    except Exception as e:
+                        self._log(f"index record failed: {e!r}")
+                results.append(AssetResult(kind="forward", ok=True,
+                                           path=sr.path, size=len(payload),
+                                           reused=sr.reused))
+
+        if want_image and nodes:
             if failed_urls:
                 # 节点内有图片全部重试后仍失败:整图判失败,不落盘
                 self._log(
@@ -1514,6 +1540,11 @@ class MediaWardenStar(Star):
                         raw=comp.raw,
                     )
                     sr = self._storage.save(png, comp_png, ctx, mime="image/png")
+                    if archived is not None:
+                        try:
+                            record_store.save_render(self.cfg.storage_root, rid, png)
+                        except OSError as e:
+                            self._log(f"entry render write failed: {e!r}")
                     if self._index is not None:
                         try:
                             self._index.record(
