@@ -145,7 +145,21 @@ class RecordPageApi:
         flat = self._flat_summary()
         data["flat_total"] = int(flat["total"])
         data["flat_bytes"] = int(flat["bytes"])
+        # 六类各自的保存开关:页面空态要靠它说「这一类是关的」,而不是笼统说
+        # 「发图会自动保存」(v1.14.0 起每一类都是可开关的)。
+        data["save_types"] = self._save_type_flags()
         return {"status": "ok", "data": data}
+
+    def _save_type_flags(self) -> dict:
+        cfg = getattr(self.plugin, "cfg", None)
+        fn = getattr(cfg, "save_type_flags", None)
+        if not callable(fn):
+            return {}
+        try:
+            flags = fn()
+        except Exception:
+            return {}
+        return {str(k): bool(v) for k, v in (flags or {}).items()}
 
     async def list_records(self):
         from astrbot.api.web import request

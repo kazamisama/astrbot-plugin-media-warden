@@ -5578,9 +5578,15 @@ def test_page_stats_and_kind_filter_use_real_counts():
     for i in range(3):
         _mk("g%02d.gif" % i, "image", 4, 1719800000 + i)
 
+    class _Cfg:
+        def save_type_flags(self):
+            return {"image": True, "gif": False, "video": True,
+                    "file": True, "text": False, "forward": True}
+
     class _Pl:
         def __init__(self):
             self._index = index
+            self.cfg = _Cfg()
 
         def _records_root(self):
             return tmp
@@ -5591,6 +5597,9 @@ def test_page_stats_and_kind_filter_use_real_counts():
         _install_web_stub()
         st = asyncio.run(api.get_stats())["data"]
         assert st["flat_total"] == 763, st["flat_total"]
+        # 页面靠 save_types 说「这一类是关的」——六类都有开关，没有默认自动保存的
+        assert st["save_types"]["gif"] is False, st["save_types"]
+        assert st["save_types"]["forward"] is True, st["save_types"]
         assert st["flat_bytes"] == total_bytes, (st["flat_bytes"], total_bytes)
         _install_web_stub(query={"kind": "forward", "limit": "1000"})
         fwd = asyncio.run(api.list_records())["data"]

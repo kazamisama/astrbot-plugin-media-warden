@@ -11,6 +11,12 @@
     voice: "语音", text: "纯文本", forward: "聊天记录"
   };
   var KIND_ORDER = ["all", "image", "gif", "video", "file", "text", "forward"];
+  // v1.14.0 起六类**各自**有保存开关(没有「总是自动保存」的类别):
+  // 空列表/类型标签上的「关」标记都靠这张表说明真相。
+  var KIND_FLAGS = {
+    image: "save_images", gif: "save_gifs", video: "save_videos",
+    file: "save_files", text: "save_texts", forward: "save_forwards"
+  };
 
   function $(id) { return document.getElementById(id); }
 
@@ -117,7 +123,8 @@
     parts.push(["扁平文件", s.flat_total || 0]);
     if (s.flat_bytes) parts.push(["扁平占用", fmtBytes(s.flat_bytes)]);
     if (s.missing) parts.push(["缺失", s.missing]);
-    $("stats").title = "全库统计,不随下面的群/类型筛选变化";
+    $("stats").title = "全库统计，不随下面的群/类型筛选变化";
+    renderKinds();  // 类型标签上的「· 关」依赖 save_types，统计到了才能画
     $("stats").innerHTML = parts.map(function (p) {
       return "<span>" + esc(p[0]) + " <b>" + esc(p[1]) + "</b></span>";
     }).join("");
@@ -126,8 +133,13 @@
   function renderKinds() {
     var bar = $("kinds");
     bar.innerHTML = KIND_ORDER.map(function (k) {
+      var off = k !== "all" && kindOff(k);
+      var label = (KIND_LABELS[k] || k) + (off ? " · 关" : "");
       return '<button class="tab' + (state.kind === k ? " active" : "") +
-        '" data-kind="' + esc(k) + '">' + esc(KIND_LABELS[k] || k) + "</button>";
+        (off ? " muted" : "") +
+        '" data-kind="' + esc(k) + '" title="' + (off
+          ? "这一类在插件配置里是关的（" + KIND_FLAGS[k] + "），不会保存"
+          : "这一类保存开关是开的") + '">' + esc(label) + "</button>";
     }).join("");
     Array.prototype.forEach.call(bar.querySelectorAll(".tab"), function (btn) {
       btn.addEventListener("click", function () {
@@ -177,6 +189,36 @@
     return '<span class="pill kind-' + esc(it.kind || "unknown") + '">' + esc(label) + "</span>";
   }
 
+  function saveFlags() {
+    return (state.stats && state.stats.save_types) || {};
+  }
+
+  function kindOff(kind) {
+    var key = KIND_FLAGS[kind];
+    return !!(key && saveFlags()[key] === false);
+  }
+
+  // 空列表时说清「为什么空」:这一类关了 / 这一类还没存过 / 群和人还没配。
+  function emptyHint() {
+    var flags = saveFlags();
+    if (state.kind && state.kind !== "all") {
+      var label = KIND_LABELS[state.kind] || state.kind;
+      var key = KIND_FLAGS[state.kind];
+      if (kindOff(state.kind)) {
+        return "「" + label + "」这一类当前是关的（配置项 " + key +
+          "），打开后才会存。六类都能单独开关。";
+      }
+      return "这一类还没有保存过内容。六类（图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）都能在插件配置里单独开关。";
+    }
+    var off = Object.keys(KIND_FLAGS).filter(function (k) {
+      return flags[KIND_FLAGS[k]] === false;
+    }).map(function (k) { return KIND_LABELS[k] || k; });
+    if (off.length) {
+      return "当前关闭的类型：" + off.join("、") + "（六类都能在插件配置里单独开关）。";
+    }
+    return "还没有保存过任何内容。先检查 target_groups / target_users（白名单模式下空列表 = 不保存），再看六类开关。";
+  }
+
   function renderList(data) {
     state.items = (data && data.items) || [];
     state.total = (data && data.total) || 0;
@@ -185,8 +227,7 @@
     $("list-head").textContent = "共 " + state.total + " 条" +
       (state.items.length < state.total ? " · 已加载 " + state.items.length : "");
     if (!state.items.length) {
-      list.innerHTML = '<p class="hint">没有匹配的保存物。群里发图/文档会自动保存；' +
-        '合并转发与纯文本需要先开启对应开关。</p>';
+      list.innerHTML = '<p class="hint">没有匹配的保存物。' + esc(emptyHint()) + "</p>";
       return;
     }
     list.innerHTML = state.items.map(function (it) {
