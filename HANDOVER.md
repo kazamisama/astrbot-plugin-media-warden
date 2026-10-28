@@ -1,9 +1,9 @@
-# 交接文档 · astrbot-plugin-media-warden v1.15.0
+# 交接文档 · astrbot-plugin-media-warden v1.16.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.15.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），**变化见下面 §1.-4**；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.16.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
@@ -11,7 +11,30 @@
 - 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`
 
 
-## 1.-4 v1.15.0（配置页重做，当前版本）
+## 1.-5 v1.16.0（渲染开关布尔化，当前版本）
+
+用户诉求（m04174 选「3 按建议」）：三态 `forward_render_mode`（`image`/`json`/`both`）太难懂，收成一个布尔开关；不做老动画 WebP 重扫。
+
+### 做了什么
+
+- **`forward_render_mode` → `forward_render_image: bool = True`**（`warden/config.py`）。语义只剩一句：条目里画不画 `render.png`。结构化 `record.json` 一直都有，所以「存不存 JSON」不再需要配置。
+- **旧值自动派生**：`from_raw_lenient` 里 `legacy_mode = raw.pop("forward_render_mode", None)`，仅当新键缺失时 `raw["forward_render_image"] = str(legacy_mode).lower() != "json"` —— `json` → 关，`image`/`both`/缺省 → 开。
+- **不再落扁平 JSON 副本**：`_save_forward` 删掉 `want_json` 整段。不画图时，条目存在就回 `record.json` 的 `AssetResult(kind="forward")`；只有存档失败（PIL 缺失 / 目录不可写）才退回原来的扁平 JSON 兜底并写索引。
+- **一条转发只回一个结果**：渲染开 → `kind="forward_render"`；渲染关 → `kind="forward"`。以前 `both` 会算两条（聊天记录 + 渲染图），回执计数偏大。
+- `_conf_schema.json` ⑤ 组同步换键，hint 写明旧值映射。
+
+### 顺带修的真 bug
+
+- **内联节点存档成空壳**：转发节点有「裸节点」与「包装段 `{"type":"node","data":{sender,message}}`」两种形态，`record._segments()` 只认前者 → 整条转发只有内联节点时存档内容为空。新增 `record._payload(node)` 统一剥一层；`_segments` / `node_identity` / `dry_nodes` / `capture` 的 `time` 全部走它。
+- **节点昵称缺顶层回退**：`node_identity()` 只读 `sender.card/nickname`，某些实现把昵称放节点顶层 → 名字退化成 QQ 号。现在 `sender.card → sender.nickname → 顶层 card → 顶层 nickname → QQ 号` 逐级回退。
+
+### 测试
+
+- `_archived_records(root)` helper 统一读 `<root>/_records/*/record.json`；三个以扁平 sidecar 为断言对象的测试改写为「条目里有 / 扁平目录里没有」。
+- 结果种类断言从 `["forward", "forward_render"]` 改成 `["forward_render"]`。
+- 冒烟 152 项（Phase 4: 26 / Phase 9: 21），全绿。
+
+## 1.-4 v1.15.0（配置页重做）
 
 用户诉求（m03924）：「默认 native；config schema 整体改一下，要清楚简洁易懂，可以改一下各个配置的位置」。
 

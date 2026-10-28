@@ -26,8 +26,9 @@
 - v1.11.0：**第二轮审计修复** —— Windows 回执路径行（`reporter.py` 里的反斜杠字面量多转义了一层，Windows 路径永远算不出公共目录）、转发渲染失败入库、`/warden list` 显示 sha16、16-hex msg_id 可回退查询、file 段 http 链接兜底、落盘原子写入；冒烟 115 项
 - v1.12.0：**聊天记录存档 + 原地重发** —— 引用合并转发发 `/warden 存档` 存成自包含目录（节点结构 + 图片字节）；`/warden 重发` 默认原地转发（保气泡/挂件/头像），失败回退按存档重建；冒烟 127 项
 - v1.13.0：**dashboard 存档页面** —— 插件详情里的「页面」直接浏览/搜索/预览/重发/删除存档，图片走鉴权接口按需取；冒烟 130 项
-- v1.15.0：**配置页重做** —— schema 九组按「监听 → 存什么 → 存到哪 → 下载 → 渲染 → 样式 → 自动转发 → 回执 → 日志」排序，每组标题带序号、hint 只写现状；删掉与 `style_width` 重复的 `forward_image_width`，渲染引擎选项收成 `pil`（只有它实现），`auto_forward_mode` 默认改成 `native`（优先保装扮，失败自动回退；旧配置在「没启用 + 没目标群 + 仍是旧默认」时才跟着升级）；组键保持不变（只改标题）—— 实测组键改名会让 AstrBot 按新 schema 重写配置文件、把旧值丢掉；冒烟 151 项
 - v1.14.0：**按类型采集 + 分类管理 + 样式页** —— 六类保存开关（图片/动图/视频/纯文本/聊天记录/文档）与扩展名白名单，白名单空列表语义反转为「不保存」；纯文本与聊天记录都是「一个条目两种形态」（结构化 JSON + Pillow 渲染图）；dashboard 按类型分类管理（含老的扁平落盘文件），带群名的目标群下拉与两种转发；可选的自动转发；独立的渲染样式页（宽度/字号/圆角/主色/头像形状/时间格式/深色 + 实时预览）；「重渲染」按当前样式补/刷新旧存档的渲染图，同群同内容不再重复建目录，聊天记录的渲染图只存在于条目里（不再单独成一张「图片」）；冒烟 150 项
+- v1.15.0：**配置页重做** —— schema 九组按「监听 → 存什么 → 存到哪 → 下载 → 渲染 → 样式 → 自动转发 → 回执 → 日志」排序，每组标题带序号、hint 只写现状；删掉与 `style_width` 重复的 `forward_image_width`，渲染引擎选项收成 `pil`（只有它实现），`auto_forward_mode` 默认改成 `native`（优先保装扮，失败自动回退；旧配置在「没启用 + 没目标群 + 仍是旧默认」时才跟着升级）；组键保持不变（只改标题）—— 实测组键改名会让 AstrBot 按新 schema 重写配置文件、把旧值丢掉；冒烟 151 项
+- v1.16.0：**渲染开关布尔化** —— 三态 `forward_render_mode`(image/json/both) 收成一个开关 `forward_render_image`（开 = 条目里画 `render.png`，关 = 只留 `record.json`）；旧配置的 `json` 自动映射成关闭，`image`/`both` 映射成开启。条目里本来总有 `record.json`，所以不再产生「扁平的额外 JSON 副本」，一条转发只回一个结果；顺手修了内联节点（`{"type":"node","data":{…}}` 包装形态）存档成空壳的问题；冒烟 152 项
 
 ## 目录
 
@@ -125,7 +126,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `forward_render_mode` | `image` | `image`（只出渲染图）\| `json`（不出图，额外存一份扁平 JSON）\| `both`（两者都留）。条目里的 `record.json` 总是有的 —— json/both 那份扁平 JSON 是额外副本 |
+| `forward_render_image` | `true` | 开：条目里画一张 `render.png`（结构化数据本来就在 `record.json`）；关：只留结构化记录。旧配置 `forward_render_mode=json` 自动映射成关闭 |
 | `forward_render_max_nodes` | `30` | 超过就只存结构化、不出图 |
 | `forward_image_engine` | `pil` | 只有 `pil`（纯 Python，无外部依赖）；旧配置里的 playwright/wkhtml 会打告警并继续用 PIL |
 | `enable_user_avatar` | `true` | 渲染时画头像（qlogo.cn，失败静默跳过） |
@@ -187,7 +188,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 2. **组件识别**（components）—— OneBot v11 segment 归一化为 `Component`，并从 `raw_message` 恢复被 PreProcessStage 覆盖的原始 http URL
 3. **并发下载**（downloader）—— aiohttp 流式抓取，带超时和大小限制；transient 错误按 `download_retries` 指数退避重试，4xx 立即失败。失败后若 `get_media_fallback=true`：先向 bot 发 `get_image` 换一条新链接重下（候选值优先用 segment 原始的 `file`，参数形态 `file`/`file_id`/`id`/`image` 逐个试），再发 `get_msg` 让 napcat 用当前 rkey 重新解析整条消息拿新链接，最后回退组件本地缓存副本；都失败才计失败，原始错误保留，每一跳的败因写进日志与回执
 4. **命名 + 落盘**（storage）—— 按模板渲染相对路径，blake2b 去重，落盘前做路径越权检查；`index_reuse_saved=true` 且同消息同下标已落盘时跳过下载与落盘
-5. **转发链处理**（forwarder）—— 拉取/展开嵌套节点，按 `avatar_platforms` 白名单抓头像，按 `forward_render_mode` 渲染 PNG 或保存 JSON；透明图片做 alpha 合成
+5. **转发链处理**（forwarder）—— 拉取/展开嵌套节点，按 `avatar_platforms` 白名单抓头像，按 `forward_render_image` 决定是否渲染 PNG（结构化数据始终写进条目 `record.json`）；透明图片做 alpha 合成
 6. **索引写入**（index）—— SQLite 记录每条资产；失败项写入 `failures` 表（同 subject 累计 `attempts`）
 7. **回执**（reporter）—— 汇总成功 / 失败 / 去重复用 / 用时，并按原因分叉文案（下载失败（源链接失效） vs 落盘失败）
 8. **预览回传** —— 优先回传 `forward_render` 图，其次第一张 image；无 `image_result` 时降级为文本路径

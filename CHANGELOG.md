@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.16.0
+
+渲染开关布尔化：三态 `forward_render_mode`（`image`/`json`/`both`）收成一个开关 `forward_render_image`。功能上只有一处变化：**不再落扁平 JSON 副本**。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`（项数与 v1.15.0 相同 —— 改的是测试内容，不是数量）。
+
+### 升级前必读（配置变化）
+
+- **`forward_render_mode` 删除，换成 `forward_render_image`（布尔，默认 `true`）**：旧配置里的值会被自动换算 —— `json` → `false`，`image`/`both`/缺省 → `true`。换算只在**新键不存在**时发生，所以手动设过新键就以你为准。
+- **不再产生扁平的 `forward_*.json`**：条目目录里的 `record.json` 一直就是完整结构化数据，`forward_render_mode=json` 当年多存的那份扁平 JSON 只是重复副本（还让「聊天记录」在分类页里多出一条看不出区别的行）。现在关掉渲染 = 条目里只留 `record.json`。
+- **一条转发只回一个结果**：以前 `both` 会同时算「聊天记录 ×1 + 渲染图 ×1」，现在无论开不开渲染都只算一条（渲染开时结果类型是 `forward_render`，关时是 `forward`）。回执里的分类计数会因此变小，这是对的。
+
+### Changed
+
+- `warden/config.py`：`forward_render_mode: str` → `forward_render_image: bool = True`；三态校验删除；`from_raw_lenient` 增加旧值派生（`legacy_mode = raw.pop("forward_render_mode", None)`，新键缺失时 `str(legacy_mode).lower() != "json"`）。
+- `main._save_forward`：`want_image` 只读新开关；`want_json` 整段删除。`forward_render_mode` 那套「不画图就额外存扁平 JSON」的分支改成：条目存在时直接回 `record.json` 的 `AssetResult`，**只有存档失败**（PIL 缺失 / 目录不可写）才退回扁平 JSON 兜底并写索引。
+- `_conf_schema.json`：⑤ 组里 `forward_render_mode` 换成 `forward_render_image`，hint 说明「旧配置 json 自动映射成关闭」。
+
+### Fixed
+
+- **内联节点存档成空壳**：合并转发的节点有两种形态 —— 裸节点（`{user_id, nickname, content}`）与包装段（`{"type":"node","data":{sender, message}}`）。`record._segments()` 只认前者，遇到包装段当空节点，于是「整条转发只有内联节点」时存档内容为空。新增 `record._payload(node)` 统一剥一层，`_segments` / `node_identity` / `dry_nodes` / `capture` 的 `time` 全部走它。
+- **节点昵称缺顶层回退**：`node_identity()` 只读 `sender.card/nickname`，而某些实现把昵称放在节点顶层 → 名字退化成 QQ 号本身。现在依次取 `sender.card` → `sender.nickname` → 顶层 `card` → 顶层 `nickname` → QQ 号。
+
+### Tests
+
+- 重写：`test_plugin_e2e_forward_saved_as_json_sidecar` → 断言条目 `record.json` + 无扁平 JSON；`test_plugin_e2e_forward_both_modes` → `test_plugin_e2e_forward_entry_render_and_record`；`test_plugin_e2e_forward_too_large_falls_back_to_json` → `..._falls_back_to_entry`。
+- 新增 helper `_archived_records(root)`，嵌套展开 / 昵称来源两个测试改读条目而不是扁平 sidecar；schema 断言改为 `forward_render_image is True` + 旧值派生（`json` → `False`）。
 ## v1.15.0
 
 配置页重做：把 9 组配置按「用户想事情的顺序」重排，砍掉重复与假选项，默认值按实测结论调整。功能行为除下面两处外不变。
