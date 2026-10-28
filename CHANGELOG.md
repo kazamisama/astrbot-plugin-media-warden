@@ -3,7 +3,7 @@
 ## v1.14.0
 
 「存什么 / 怎么存 / 怎么看」三件事一起做完：类型门控 + 六类开关，纯文本与聊天记录统一成「一个条目两种形态」，页面按类型分类管理并支持发到别的群，渲染样式搬进独立页面。
-冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=12, total=142)`。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=13, total=143)`。
 
 ### 升级前必读（语义变化）
 
@@ -28,6 +28,7 @@
 - `Forwarder` 的渲染参数从写死常量变成 `_RenderCfg` 字段，新增 `apply_style()`；`_avatar_mask(size, shape)` 支持方形圆角头像；时间格式可配（默认 `%Y-%m-%d %H:%M`）；`dark` 只替换**仍是默认值**的颜色，用户自己挑过的色不会被深色模式改掉。
 - `record.list_records()` 现在混排 `forward` 与 `text` 两类条目，返回项统一带 `kind`。
 - 页面后端路由 8 → 12：新增 `reveal` / `style` / `style_save` / `style_preview`。
+- `record_admin.native_forward()` / `rebuild_forward()` 的结果带回 `new_message_id`（native 另有 `origin_message_id`），页面「发回」能拿到新消息的 id 去核对或撤回；重建路径以前把动作返回值整个丢掉，现在动作返回 `failed` 也按失败处理，不再静默当成功。
 - `main.on_group_message` 的类型判定提前到下载之前，日志会写 `dropped: image=1 gif=0 …`，全丢时写 `skip: nothing to save`（以前是「下完了才发现不该存」）。
 
 ### Fixed
@@ -41,7 +42,8 @@
 ### Tests
 
 - 新增 Phase 9 共 10 项：类型门控与动图判定、纯文本条目往返、纯文本消息端到端落盘、禁用类型与坏扩展名被丢弃、聊天记录「一个条目两种形态」、分类扫描（含扁平文件）、自动转发到多群、`native` 模式失败回退 `rebuild`、`apply_style` 生效与头像形状、`update_style` 三元组与样式页路由。
-- 冒烟 130 → **142** 项（Phase 9: 12；多出的两项是「宿主分组嵌套配置能被读到」与「样式保存写进 schema 分组、不在顶层留重复键」）。
+- 冒烟 130 → **143** 项（Phase 9: 13；多出的三项是「宿主分组嵌套配置能被读到」「样式保存写进 schema 分组、不在顶层留重复键」「转发结果带回新消息 id」）。
+- 本机实测（2026-10-28）：跨群「原地」转发一条 2026-10-27 的存档回 `消息不存在`（原消息已过期，`get_msg` 先拦下并说明原因），回退「重建」到另一个群成功（`send_group_forward_msg` 3 个节点）—— 这正是「原消息还在就用原地，没了就重建」的设计预期。
 
 ## v1.13.0
 
