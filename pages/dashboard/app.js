@@ -258,6 +258,28 @@
     }
   }
 
+  // 预览大图用页面内蒙层，不用 window.open：桌面版（Tauri）里 window.open
+  // 是空操作，点了等于没反应。
+  function ensureLightbox() {
+    var box = document.getElementById("lightbox");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "lightbox";
+      box.className = "lightbox";
+      box.innerHTML = '<img alt="预览">';
+      box.addEventListener("click", function () { box.classList.remove("show"); });
+      document.body.appendChild(box);
+    }
+    return box;
+  }
+
+  function openLightbox(src) {
+    var box = ensureLightbox();
+    var img = box.querySelector("img");
+    if (img) img.src = src;
+    box.classList.add("show");
+  }
+
   function bind() {
     var qTimer = null;
     $("q").addEventListener("input", function (e) {
@@ -275,8 +297,14 @@
     });
     document.addEventListener("click", function (e) {
       var img = e.target;
-      if (img && img.classList && img.classList.contains("thumb")) {
-        window.open(img.src, "_blank");
+      if (img && img.classList && img.classList.contains("thumb") && img.src) {
+        openLightbox(img.src);
+      }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" || e.key === "Esc") {
+        var box = document.getElementById("lightbox");
+        if (box) box.classList.remove("show");
       }
     });
   }

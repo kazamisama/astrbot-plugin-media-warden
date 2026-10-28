@@ -21,6 +21,7 @@
 - 后端注册：`self.context.register_web_api(route, handler, methods, desc)`，route 必须自带插件名前缀；handler 里 `from astrbot.api.web import request`，`request.query.get(k, default, int)` / `await request.json(default={})` / `file_response(path)`
 - `<img>` 带不上 Authorization 头，legacy `/api/plug/...` 只能靠 dashboard 登录 cookie `astrbot_dashboard_jwt`（httponly + SameSite=Strict + path=/）—— 但桌面版（Tauri）实测**没有**这个 cookie，图片 401。最终做法：`page/thumb` 把资产读成 base64 走**桥接口**（axios 带 Authorization），页面填 `img.src`。以后再做页面取图，直接照这条
 - `bridge-sdk.js` 由宿主注入在 `</body>` 前、**排在页面自己的 `app.js` 之后** → 页面必须轮询等 `window.AstrBotPluginPage` 出现（最多 5s），不能假设脚本一执行桥就在
+- 桌面版（Tauri）里 **`window.open` 是空操作**：预览大图要在页面内做蒙层，别指望新窗口/新标签
 - 页面标题来自 `.astrbot-plugin/i18n/<locale>.json` 的 `pages.<name>.title`；不给就只显示目录名
 
 ### 新增
