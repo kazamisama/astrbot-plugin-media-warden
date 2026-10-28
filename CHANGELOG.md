@@ -11,7 +11,8 @@
 
 ### Notes
 
-- 缩略图走 `/api/plug/<plugin>/page/asset`，靠 dashboard 登录 cookie 鉴权（`<img>` 带不上 Authorization 头）；cookie 失效时页面显示「图片加载失败」而不是破图
+- 缩略图走 `page/thumb`（base64 内联，桥接口自带鉴权）：`<img>` 直连后端带不上 Authorization 头，桌面版（Tauri）也不保证留 dashboard cookie；单张 >8 MB 不回 base64，只提示走下载
+- 页面启动会先等宿主注入的 `bridge-sdk.js`（它排在 `app.js` 之后），最多 5s；等不到再提示刷新
 - 页面**不做** QQ 气泡渲染；要保装扮仍只有「原地转发」一条路（原消息还在服务端才行）
 - 页面后端只读 `_records/`，不写 `_warden.db`：删存档只删目录，索引里没有它的行
 

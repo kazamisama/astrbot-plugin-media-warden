@@ -6,8 +6,23 @@
 """
 from __future__ import annotations
 
+import base64
+import os
+
 from . import record_admin
 from .record import load_record, record_dir
+
+_MIME_BY_EXT = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+}
+# 单张图回 base64 的上限：超过就让页面走下载，别把宿主请求体撑爆
+_THUMB_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _mime_for(path: str) -> str:
+    return _MIME_BY_EXT.get(os.path.splitext(path)[1].lower(),
+                            "application/octet-stream")
 
 PLUGIN_NAME = "astrbot-plugin-media-warden"
 PAGE_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -34,6 +49,8 @@ class RecordPageApi:
                  "media-warden 存档详情")
         register(f"{PAGE_PREFIX}/asset", self.get_asset, ["GET"],
                  "media-warden 存档图片")
+        register(f"{PAGE_PREFIX}/thumb", self.get_thumb, ["GET"],
+                 "media-warden 存档图片（base64，给页面内联显示）")
         register(f"{PAGE_PREFIX}/resend", self.resend, ["POST"],
                  "media-warden 重发存档")
         register(f"{PAGE_PREFIX}/delete", self.delete, ["POST"],
@@ -86,6 +103,34 @@ class RecordPageApi:
         if not full:
             return {"status": "error", "message": "资产不存在", "data": {}}
         return file_response(full)
+
+    async def get_thumb(self):
+        """把一张资产读成 data URL。
+
+        页面在 dashboard 的 iframe 里，<img> 带不上 Authorization 头（宿主的
+        鉴权走 axios），而 Tauri/浏览器不一定留着 dashboard 的 cookie —— 所以
+        缩略图改走这里：桥接口是带鉴权的，图片以 base64 回给页面。
+        """
+        from astrbot.api.web import request
+        rid = str(request.query.get("id", "") or "")
+        rel = str(request.query.get("path", "") or "")
+        full = record_admin.resolve_asset(self._root, rid, rel)
+        if not full:
+            return {"status": "error", "message": "资产不存在", "data": {}}
+        try:
+            size = os.path.getsize(full)
+            if size > _THUMB_MAX_BYTES:
+                return {"status": "error",
+                        "message": f"图片太大（{size} 字节），请用下载", "data": {}}
+            with open(full, "rb") as fh:
+                blob = fh.read()
+        except OSError as e:
+            return {"status": "error", "message": f"读取失败: {e!r}", "data": {}}
+        return {"status": "ok", "data": {
+            "data_url": "data:" + _mime_for(full) + ";base64," +
+                        base64.b64encode(blob).decode("ascii"),
+            "bytes": len(blob),
+        }}
 
     async def resend(self):
         from astrbot.api.web import request

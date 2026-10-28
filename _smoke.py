@@ -4651,8 +4651,9 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 6, routes
+    assert len(routes) == 7, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
+    assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
 
     class _NoReg:
@@ -4689,6 +4690,16 @@ def test_record_page_routes_and_handlers():
         assert isinstance(fr, dict) and fr.get("__file__"), fr
         _install_web_stub(query={"id": rid, "path": "record.json"})
         assert asyncio.run(api.get_asset())["status"] == "error"
+
+        _install_web_stub(query={"id": rid, "path": asset})
+        thumb = asyncio.run(api.get_thumb())
+        assert thumb["status"] == "ok", thumb
+        assert thumb["data"]["data_url"].startswith("data:image/png;base64,"), thumb
+        assert thumb["data"]["bytes"] == len(png), thumb
+        _install_web_stub(query={"id": rid, "path": "../record.json"})
+        assert asyncio.run(api.get_thumb())["status"] == "error"
+        _install_web_stub(query={"id": "nope", "path": asset})
+        assert asyncio.run(api.get_thumb())["status"] == "error"
 
         calls = []
 
@@ -4748,7 +4759,7 @@ def test_record_page_routes_and_handlers():
         sys.modules.pop("astrbot.api.web", None)
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK ->", "6 条路由 + stats/records/record/asset/resend/delete")
+    print("  OK ->", "7 条路由 + stats/records/record/asset/thumb/resend/delete")
 
 
 def test_plugin_initialize_registers_page_api():
@@ -4761,14 +4772,14 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 6, seen
+    assert len(seen) == 7, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
     pl2 = _build_plugin_for_command(tmp2, enable_index=False, log_to_stdout=False)
     asyncio.run(pl2.initialize())
     assert pl2._page_api is None, "宿主没有 register_web_api 时应安静跳过"
-    print("  OK ->", "6 条路由 / 无宿主支持时跳过")
+    print("  OK ->", "7 条路由 / 无宿主支持时跳过")
 
 
 PHASE7 = [

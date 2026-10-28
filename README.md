@@ -174,9 +174,9 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 3. 右侧详情：逐节点列出每段内容（文本 / 图片缩略图 / 表情 / @），缩略图点开看原图；取不到图的段会标出 `missing` 原因
 4. 三个按钮：**发回原群（原地·保装扮）** / **发回群（重建·丢装扮）** / **删除存档**（删整个 `_records/<id>/`，不可恢复）
 
-页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,resend,delete}`。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
+页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,resend,delete}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
 
-图片走 `/api/plug/<plugin>/page/asset`，靠 dashboard 的登录 cookie 鉴权（`<img>` 带不上 Authorization 头，这是唯一可用的一条）。
+缩略图经 `page/thumb` 读成 base64 内联显示：`<img>` 直接指后端 URL 带不上 Authorization 头，而桌面版（Tauri）不一定留着 dashboard 的 cookie —— 桥接接口两边都通。单张 >8 MB 时只回错误、让用户走下载。
 
 > 页面**不做** QQ 那种气泡渲染 —— 浏览就是普通 HTML 列表 + 原图；想保留装扮只有「原地转发」一条路（见「已知边界」）。
 

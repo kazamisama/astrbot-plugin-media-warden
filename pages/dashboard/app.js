@@ -66,9 +66,22 @@
     return resp.data === undefined ? resp : resp.data;
   }
 
-  function assetUrl(rid, p) {
-    return "/api/plug/" + encodeURIComponent(PLUGIN) + "/page/asset?id=" +
-      encodeURIComponent(rid) + "&path=" + encodeURIComponent(p);
+  function hydrateThumbs(rid) {
+    var imgs = document.querySelectorAll(".thumb[data-asset]");
+    Array.prototype.forEach.call(imgs, function (img) {
+      var rel = img.getAttribute("data-asset");
+      img.removeAttribute("data-asset");
+      api("thumb", { id: rid, path: rel }).then(function (payload) {
+        var d = unwrap(payload);
+        if (d && d.data_url) {
+          img.src = d.data_url;
+        } else {
+          img.outerHTML = '<div class="thumb broken">图片加载失败</div>';
+        }
+      }).catch(function () {
+        img.outerHTML = '<div class="thumb broken">图片加载失败</div>';
+      });
+    });
   }
 
   function renderStats(s) {
@@ -127,9 +140,9 @@
       if (seg.missing) {
         return '<p class="seg-dim">[图片缺失' + (seg.reason ? ": " + esc(seg.reason) : "") + "]</p>";
       }
-      return '<div class="thumbs"><img class="thumb" loading="lazy" src="' +
-        esc(assetUrl(rid, seg.asset)) + '" alt="图片" title="点击查看原图"' +
-        ' onerror="this.outerHTML=\'<div class=&quot;thumb broken&quot;>图片加载失败</div>\'"></div>';
+      // src 由 hydrateThumbs() 通过带鉴权的桥接口取 base64 后填上
+      return '<div class="thumbs"><img class="thumb" data-asset="' + esc(seg.asset) +
+        '" alt="加载中…" title="点击查看原图"></div>';
     }
     if (seg.type === "text") {
       return seg.text ? '<p class="seg-text">' + esc(seg.text) + "</p>" : "";
@@ -209,6 +222,7 @@
     try {
       var d = unwrap(await api("record", { id: rid }));
       renderDetail(d);
+      hydrateThumbs(rid);
     } catch (e) {
       $("detail").innerHTML = '<p class="hint">打开失败：' + esc(e.message) + "</p>";
     }
