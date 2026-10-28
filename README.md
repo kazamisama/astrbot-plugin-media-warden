@@ -208,6 +208,8 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 **老扁平聊天记录自动迁移**（v1.14.0 起，启动时跑一次）：v1.12.0 之前的聊天记录存成 `…_forward_json_*.json`，页面上只是文件卡片。现在 `record_admin.migrate_flat_forwards()` 把它们迁成 `_records/` 条目 —— 节点能看、能重渲染、能重建转发；图片 url 早已过期，所以不下载、进 `missing`（页面显示「缺 N 图」），原始 JSON 复制成条目里的 `legacy_forward.json` 留底，扁平文件与索引行随后删掉。列表预览也从文件名变成正文。幂等，坏 JSON 不迁不删。
 
+类型标签会标出**当前关掉的类别**（「纯文本 · 关」并淡化），空列表也直接说原因（这一类关了 / 还没存过 / 群和人还没配）—— v1.14.0 起六类都是开关，没有「默认自动存」的类型，页面上不再写含糊的「发图会自动保存」。
+
 几个容易踩的点都在页面里处理掉了：老 GIF 在索引里记的是 `image`，筛选按扩展名再分一次，「动图」标签能筛到 2026-10-28 之前存的那批；「转发原消息」失败且原因是原消息不存在时，会往条目元数据写 `native_unavailable`，之后那条按钮就是灰的、头部显示「原消息已失效」（网络抖动不写，避免一次超时永久禁掉）；删除用页内蒙层确认（桌面版的 `window.confirm` 不保证弹得出来）；列表标题写「共 N 条 · 已加载 M」，和底部的「加载更多」不再打架。
 
 页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,groups,resend,render,delete,reveal,style,style_save,style_preview}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
