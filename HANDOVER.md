@@ -1,17 +1,39 @@
-# 交接文档 · astrbot-plugin-media-warden v1.12.0
+# 交接文档 · astrbot-plugin-media-warden v1.13.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.12.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.12.0 是聊天记录存档/重发，**变化见下面 §1.-1**；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.13.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.13.0 是 dashboard 存档页面，**变化见下面 §1.-2**；v1.12.0 是聊天记录存档/重发，见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12, total=127)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3, total=130)`
 
 
-## 1.-1 v1.12.0（聊天记录存档 + 原地重发，当前版本）
+## 1.-2 v1.13.0（dashboard 存档页面，当前版本）
+
+目标：存档要能在 WebUI 里看、搜、删、发回去，而且浏览不需要 QQ 那种渲染（用户原话 m01757：保存 / dashboard 浏览管理 / 保装扮再发送）。
+
+### 机制（AstrBot 这边，别再翻代码找了）
+- 页面目录：`<plugin>/pages/<name>/index.html`，宿主自动发现（`pages` + `index.html` 两个常量在 `dashboard/routes/plugin.py`）；**同目录的 css/js 用相对路径引用即可**，宿主按「文档 URL 目录」解析，token 在路径里（`/api/v1/plugins/<plugin>/views/<page>/_t/<token>/`）
+- 页面里用 `window.AstrBotPluginPage`（`apiGet/apiPost`）→ 宿主拼成 **`/api/plug/<pluginName>/<endpoint>`**（strapi 那层 axios 带 Authorization 头）；不是 `/api/v1/plugins/extensions/...`（易记错）
+- 后端注册：`self.context.register_web_api(route, handler, methods, desc)`，route 必须自带插件名前缀；handler 里 `from astrbot.api.web import request`，`request.query.get(k, default, int)` / `await request.json(default={})` / `file_response(path)`
+- `<img>` 带不上 Authorization 头，所以取图走 **legacy `/api/plug/...`**（宿主接受 dashboard 登录 cookie `astrbot_dashboard_jwt`，httponly + SameSite=Strict + path=/）
+- 页面标题来自 `.astrbot-plugin/i18n/<locale>.json` 的 `pages.<name>.title`；不给就只显示目录名
+
+### 新增
+- `warden/record_admin.py`（读侧，纯函数）：`scan_records(root, *, q, group, limit, offset)` / `stats(root)` / `record_detail(root, rid)` / `resolve_asset(root, rid, rel)`（只认 record.assets 里的 path 且校验没越界）/ `delete_record` / `node_payloads` / `native_forward` / `rebuild_forward`
+- `warden/record_page.py`：`PAGE_PREFIX = "/<plugin>/page"`，六个接口 stats/records/record/asset/resend/delete；`register_routes()` 返回 `False` 表示宿主太老
+- `pages/dashboard/{index.html,app.js,styles.css}`；`.astrbot-plugin/i18n/{zh-CN,en-US}.json`
+- `main.initialize()` 里 try/except 注册，失败只记日志；启动日志多了 `page=on|off`
+
+### 设计取舍
+- 页面**不**复刻 QQ 气泡：用户明确说浏览不需要那种渲染。要保装扮 = 原地转发，页面只是给它一个按钮。
+- 页面只读 `_records/`，不碰 `_warden.db`：删存档删目录即可（索引里本来也没有存档行）。
+- 搜索在 Python 里做（按 captured_ts 排序后切片），存档量不大，没必要再加索引。
+
+## 1.-1 v1.12.0（聊天记录存档 + 原地重发）
 
 目标：把群里的合并转发**存下来、以后还能原样发出去**。先做了一轮协议实验（NapCat 4.18.37 / QQ 9.9.26），结论直接决定了实现方式。
 
@@ -458,11 +480,23 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `_conf_schema.json` | 三个枚举补 `options`；迟到缓存 hint 改 5s/20s |
 | `_smoke.py`（115 项） | 新 Phase 6 四项；扩展 list / lookup / conf-schema 断言 |
 
+### 3.3 v1.13.0 主要修改文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `warden/record_admin.py`（新） | 存档读侧纯函数：`scan_records` / `stats` / `record_detail` / `resolve_asset` / `delete_record` / `node_payloads` / `native_forward` / `rebuild_forward` |
+| `warden/record_page.py`（新） | `PAGE_PREFIX = "/<plugin>/page"` + `RecordPageApi`；六条路由；处理函数只做 IO 转接（`from astrbot.api.web import request` 惰性导入，离线可测） |
+| `pages/dashboard/index.html` / `styles.css` / `app.js` | 列表 + 搜索 + 群过滤 + 节点详情 + 缩略图（cookie 鉴权取图）+ 原地/重建发回 + 删除 |
+| `.astrbot-plugin/i18n/zh-CN.json` / `en-US.json` | 页面标题「聊天记录存档」/「Chat records」与显示名 |
+| `main.py` | 导入 `RecordPageApi`；`initialize()` 里 try/except 注册（宿主没 `register_web_api` 只记一句日志）；启动日志加 `page=on|off` |
+| `_smoke.py`（130 项） | 新 Phase 8 三项：存档读侧、页面路由与处理函数、initialize 注册/跳过 |
+
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4, total=115)`（v1.11.0）
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3, total=130)`（v1.13.0）
+- v1.13.0 页面链路在本机 AstrBot 上实测（2026-10-28）：插件重载后 `/api/plugin/page/entry?name=…&page=dashboard` 返回 `content_path`；页面 HTML 200（标题已被 i18n 换成「聊天记录存档」）；`app.js` / `styles.css` 以 `text/javascript` / `text/css` 200 返回；`/api/plug/<plugin>/page/stats` 与 `/page/records` 返回 3 条真实存档（群 961583271）。**没做浏览器内点击验证**（页面 DOM 只做了语法与 id 交叉检查）
 - v1.11.0 的 Windows 路径修复用临时脚本实测过：`BatchResult.storage_root` 从 `None` 变为 `C:/data/warden/g1/`，且 `format_batch()` 输出 `  路径: C:/data/warden/g1/`
 - `_conf_schema.json` JSON 解析通过
 - **v1.9.5 的本机实测**：8 张线上失败图逐个在 `C:\Users\chiriu\Documents\Tencent Files\` 下按 MD5 命中，单次查找 <1ms；`deadbeef…` / 短名 / 空串 / `None` 均正确返回 `None`（不误报）

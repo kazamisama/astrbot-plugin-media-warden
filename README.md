@@ -24,6 +24,8 @@
 - v1.9.9：**迟到缓存重查** —— 三级补救全败后隔 `5s`/`20s` 再查一次 QQ 本地缓存（`_LATE_CACHE_DELAYS_S`，合计 25s；接收端客户端常在几秒~几十秒后才把图落盘，插件第一次查必然扑空）
 - v1.10.0：**重构 + 补齐** —— 删掉空转配置与死代码（`download(fallback=)` / `download_many` / `from_raw` …），把重复实现合成一份（转发渲染双实现、组件双归一、失败文案三处），补上索引 schema 迁移、空转发记为失败、`reply_to_original` 真正生效（默认改为关闭）、`/warden lookup <sha16>` 与「反复失败」统计；冒烟 111 项
 - v1.11.0：**第二轮审计修复** —— Windows 回执路径行（`reporter.py` 里的反斜杠字面量多转义了一层，Windows 路径永远算不出公共目录）、转发渲染失败入库、`/warden list` 显示 sha16、16-hex msg_id 可回退查询、file 段 http 链接兜底、落盘原子写入；冒烟 115 项
+- v1.12.0：**聊天记录存档 + 原地重发** —— 引用合并转发发 `/warden 存档` 存成自包含目录（节点结构 + 图片字节）；`/warden 重发` 默认原地转发（保气泡/挂件/头像），失败回退按存档重建；冒烟 127 项
+- v1.13.0：**dashboard 存档页面** —— 插件详情里的「页面」直接浏览/搜索/预览/重发/删除存档，图片走鉴权接口按需取；冒烟 130 项
 
 ## 目录
 
@@ -33,6 +35,8 @@ astrbot-plugin-media-warden/
   _conf_schema.json          # 配置 schema（WebUI 编辑）
   requirements.txt           # Pillow>=10.0
   main.py                    # 入口（@register 类 + 钩子 + 8 个命令）
+  pages/dashboard/           # 插件页面（AstrBot 自动发现）：index.html / app.js / styles.css
+  .astrbot-plugin/i18n/      # 页面标题与显示名（zh-CN / en-US）
   warden/
     __init__.py              # 公开符号
     config.py                # MediaWardenConfig dataclass + 校验
@@ -46,6 +50,8 @@ astrbot-plugin-media-warden/
     localcache.py            # 按 MD5 找 QQ 本地图片缓存（rkey 失效时的首选补救）
     avatar.py                # 头像抓取 + 文件缓存
     record.py                # 聊天记录存档（自包含目录：节点 + 图片字节）
+    record_admin.py          # 存档读侧（扫描/搜索/汇总/详情/取图/删除/还原节点）
+    record_page.py           # 插件页面后端（/<plugin>/page/* 六个接口）
   README.md                  # 本文件
   CHANGELOG.md               # 变更记录
   HANDOVER.md                # 交接文档
@@ -159,6 +165,21 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `/warden 存档 [msg_id]` | **引用（回复）**一条合并转发后发它，把节点 + 节点内图片字节存成 `_records/<id>/`；也可直接转发给机器人，或给 OneBot `message_id`（v1.12.0） |
 | `/warden 重发 [原地\|重建] [record_id\|list]` | 重发存档：默认先**原地**（`forward_group_single_msg`，让 QQ 把原消息再转发一遍，气泡/挂件/头像全保），不行再按存档**重建**合并转发（装饰会丢）；`list` 列最近 10 条（v1.12.0） |
 
+## 存档页面（dashboard）
+
+存档不只能用命令管，WebUI 里也能点开看：
+
+1. dashboard → 插件 → `astrbot-plugin-media-warden` → 页面 `dashboard`（标题「聊天记录存档」）
+2. 左侧列表：时间 / 群号 / 节点数 / 图片数 / 首节点预览；顶部输入框按「发送者 / 文本 / 群号 / 记录 id」搜索，下拉框按群过滤
+3. 右侧详情：逐节点列出每段内容（文本 / 图片缩略图 / 表情 / @），缩略图点开看原图；取不到图的段会标出 `missing` 原因
+4. 三个按钮：**发回原群（原地·保装扮）** / **发回群（重建·丢装扮）** / **删除存档**（删整个 `_records/<id>/`，不可恢复）
+
+页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,resend,delete}`。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
+
+图片走 `/api/plug/<plugin>/page/asset`，靠 dashboard 的登录 cookie 鉴权（`<img>` 带不上 Authorization 头，这是唯一可用的一条）。
+
+> 页面**不做** QQ 那种气泡渲染 —— 浏览就是普通 HTML 列表 + 原图；想保留装扮只有「原地转发」一条路（见「已知边界」）。
+
 ## 离线自测
 
 ```bash
@@ -167,7 +188,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **127 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **130 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
@@ -182,6 +203,7 @@ python -m pytest -q _smoke.py
 - 预览回传与命令权限注册
 - v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离、raw_message 恢复链接按标识配对（顺序错位也不错领）
 - v1.11.0 补齐（Phase 6）：Windows 反斜杠路径算出公共目录且不切出半截目录、file 段把 http 链接放在 `file` 上仍可下载、转发渲染失败在 failures 表留下 `forward_render` 行、落盘后没有 `.part-` 残骸
+- v1.13.0 补齐（Phase 8）：存档读侧的扫描/搜索/汇总/详情/取图/删除（含路径越界与不存在的资产）、插件页面 6 条路由的注册与处理函数（含原地失败回退重建、鉴权取图）、`initialize()` 在有无 `register_web_api` 两种宿主下的行为
 - v1.12.0 补齐（Phase 7）：存档往返（`record.json` + `assets/` + `build_nodes` 还原）、同字节只落一份、单图失败只进 `missing`、列表倒序与坏目录容错、`image_ref` 规则、引用合并转发按 reply id 取节点、引用普通消息时 `get_msg` 找 forward 段、无引用时的可读提示、原地转发用 OneBot 短 id、老存档拒绝原地转发、默认先原地失败回退重建
 
 ## 已知边界

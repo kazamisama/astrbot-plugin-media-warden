@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.13.0
+
+### Added
+
+- **dashboard 存档页面**（`pages/dashboard/`：`index.html` / `app.js` / `styles.css`）—— 插件详情的「页面」里直接管存档：列表 + 按「发送者/文本/群号/记录 id」搜索 + 按群过滤、逐节点详情、图片缩略图（点开看原图）、**发回原群（原地·保装扮）** / **发回群（重建·丢装扮）** / **删除存档**
+- `warden/record_admin.py` —— 存档读侧纯函数（`scan_records` / `stats` / `record_detail` / `resolve_asset` / `delete_record` / `node_payloads` / `native_forward` / `rebuild_forward`），页面与 API 只做 IO 转接，所以这些行为都能离线测
+- `warden/record_page.py` —— 插件页面后端，注册 `/<plugin>/page/{stats,records,record,asset,resend,delete}`（`context.register_web_api`）；宿主没有这个 API 时安静跳过
+- `.astrbot-plugin/i18n/{zh-CN,en-US}.json` —— 页面标题（「聊天记录存档」/「Chat records」）与显示名；没有它页面标题只会是目录名 `dashboard`
+
+### Notes
+
+- 缩略图走 `/api/plug/<plugin>/page/asset`，靠 dashboard 登录 cookie 鉴权（`<img>` 带不上 Authorization 头）；cookie 失效时页面显示「图片加载失败」而不是破图
+- 页面**不做** QQ 气泡渲染；要保装扮仍只有「原地转发」一条路（原消息还在服务端才行）
+- 页面后端只读 `_records/`，不写 `_warden.db`：删存档只删目录，索引里没有它的行
+
+### Tests
+
+- 冒烟 127 → 130 项（Phase 8: 3）：存档读侧六个函数（含路径越界/不存在的资产）、页面六条路由的注册与处理函数（含原地失败回退重建、鉴权取图、参数缺失）、`initialize()` 在有/无 `register_web_api` 两种宿主下的行为
+
 ## v1.12.0
 
 聊天记录「存档 + 重发」：先摸清 QQ 合并转发到底能不能带装扮，结论决定了两条路都要做。
