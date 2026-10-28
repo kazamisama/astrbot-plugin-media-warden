@@ -210,6 +210,8 @@ download = plugin_warden.downloader.download
 aiohttp_fetcher = plugin_warden.downloader.aiohttp_fetcher
 astrbot_component_fetcher = plugin_warden.downloader.astrbot_component_fetcher
 record_store = plugin_warden.record
+record_admin = importlib.import_module(_pname + ".warden.record_admin")
+record_page = importlib.import_module(_pname + ".warden.record_page")
 
 
 def banner(t):
@@ -4508,6 +4510,265 @@ def test_plugin_resend_defaults_to_native_then_rebuild():
     print("  OK ->", str(texts[0])[:60])
 
 
+def test_record_admin_scan_stats_detail():
+    banner("record_admin: 列表/搜索/汇总/详情/取图/删除")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_admin_")
+    nodes1 = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1718600000,
+               "message": [{"type": "text", "data": {"text": "看图"}},
+                           {"type": "image", "data": {"url": "https://x/a.png"}}]}]
+    nodes2 = [{"sender": {"user_id": 8, "nickname": "小八"}, "time": 1718600100,
+               "message": [{"type": "text", "data": {"text": "你好"}}]}]
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 8
+    rid1 = record_store.make_record_id("g111", "1481691615", ts=1720000000)
+    rid2 = record_store.make_record_id("g222", "m2", ts=1720000900)
+    async def fetch_png(_data):
+        return png
+
+    async def fetch_none(_data):
+        return None
+
+    asyncio.run(record_store.capture(
+        nodes1, platform="aiocqhttp", group_id="g111", msg_id="1481691615",
+        storage_root=tmp, fetch_image=fetch_png, ts=1720000000, record_id=rid1))
+    asyncio.run(record_store.capture(
+        nodes2, platform="aiocqhttp", group_id="g222", msg_id="m2",
+        storage_root=tmp, fetch_image=fetch_none, ts=1720000900, record_id=rid2))
+
+    allrows = record_admin.scan_records(tmp)
+    assert allrows["total"] == 2, allrows
+    assert [r["record_id"] for r in allrows["items"]] == [rid2, rid1], allrows["items"]
+    assert allrows["items"][1]["asset_count"] == 1, allrows["items"][1]
+    assert allrows["items"][1]["can_native"] is True
+    assert record_admin.scan_records(tmp, q="看图")["total"] == 1
+    assert record_admin.scan_records(tmp, q="阿七")["total"] == 1
+    assert record_admin.scan_records(tmp, q="g222")["total"] == 1
+    assert record_admin.scan_records(tmp, q="不存在的词")["total"] == 0
+    assert record_admin.scan_records(tmp, group="g111")["total"] == 1
+    assert record_admin.scan_records(tmp, group="g111")["root"].endswith("_records")
+    assert len(record_admin.scan_records(tmp, limit=1)["items"]) == 1
+    assert record_admin.scan_records(tmp, offset=1)["items"][0]["record_id"] == rid1
+
+    st = record_admin.stats(tmp)
+    assert st["records"] == 2 and st["nodes"] == 2, st
+    assert st["assets"] == 1 and st["missing"] == 0, st
+    assert st["bytes"] == len(png), st
+    assert st["groups"] == {"g111": 1, "g222": 1}, st
+
+    d = record_admin.record_detail(tmp, rid1)
+    assert d["node_count"] == 1 and len(d["nodes"]) == 1, d
+    segs = d["nodes"][0]["segments"]
+    assert [s["type"] for s in segs] == ["text", "image"], segs
+    assert segs[0]["text"] == "看图"
+    assert segs[1]["asset"].startswith("assets/"), segs[1]
+    assert segs[1]["sha16"], segs[1]
+    full = record_admin.resolve_asset(tmp, rid1, segs[1]["asset"])
+    assert full and os.path.isfile(full), full
+    assert record_admin.resolve_asset(tmp, rid1, "record.json") is None
+    assert record_admin.resolve_asset(tmp, rid1, "../record.json") is None
+    assert record_admin.resolve_asset(tmp, rid1, segs[1]["asset"] + "x") is None
+    assert record_admin.record_detail(tmp, "nope") is None
+
+    gone = record_admin.delete_record(tmp, rid1)
+    assert gone["deleted"] is True, gone
+    assert record_store.load_record(tmp, rid1) is None
+    assert record_admin.scan_records(tmp)["total"] == 1
+    assert record_admin.delete_record(tmp, rid1)["deleted"] is False
+    assert record_admin.delete_record(tmp, "../evil")["deleted"] is False
+    print("  OK ->", "搜索/汇总/取图/删除均通过")
+
+
+def _install_web_stub(*, query=None, body=None):
+    web = types.ModuleType("astrbot.api.web")
+
+    class _Q:
+        def __init__(self, d):
+            self._d = dict(d or {})
+
+        def get(self, key, default=None, cast=None):
+            v = self._d.get(key, default)
+            if cast is not None and v is not None:
+                try:
+                    return cast(v)
+                except Exception:
+                    return default
+            return v
+
+    class _Req:
+        def __init__(self):
+            self.query = _Q(query)
+            self.username = "tester"
+            self._body = dict(body or {})
+
+        async def json(self, default=None):
+            return self._body if self._body else (default if default is not None else {})
+
+    web.request = _Req()
+
+    def file_response(path, **kw):
+        return {"__file__": path, "filename": kw.get("filename")}
+
+    web.file_response = file_response
+    sys.modules["astrbot.api.web"] = web
+    return web
+
+
+def test_record_page_routes_and_handlers():
+    banner("record_page: 路由注册 + 6 个处理函数")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_page_")
+    nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1,
+              "message": [{"type": "text", "data": {"text": "看图"}},
+                          {"type": "image", "data": {"url": "https://x/a.png"}}]}]
+    rid = record_store.make_record_id("g1", "m1", ts=1720000000)
+    png = b"\x89PNG\r\n\x1a\n" + b"1" * 4
+
+    async def fetch_png(_data):
+        return png
+
+    asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="m1",
+        storage_root=tmp, fetch_image=fetch_png,
+        ts=1720000000, record_id=rid))
+
+    class _Ctx:
+        def __init__(self):
+            self.routes = []
+
+        def register_web_api(self, route, handler, methods=None, desc=""):
+            self.routes.append((route, handler, tuple(methods or ())))
+
+    class _Pl:
+        def __init__(self):
+            self.context = _Ctx()
+
+        def _records_root(self):
+            return tmp
+
+    pl = _Pl()
+    api = record_page.RecordPageApi(pl)
+    assert api.register_routes() is True
+    routes = {r[0]: r[2] for r in pl.context.routes}
+    assert len(routes) == 6, routes
+    assert record_page.PAGE_PREFIX + "/stats" in routes, routes
+    assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
+
+    class _NoReg:
+        pass
+
+    class _PlNoReg:
+        def __init__(self):
+            self.context = _NoReg()
+
+        def _records_root(self):
+            return tmp
+
+    assert record_page.RecordPageApi(_PlNoReg()).register_routes() is False
+
+    saved = sys.modules.pop("astrbot.api.web", None)
+    try:
+        _install_web_stub()
+        assert asyncio.run(api.get_stats())["data"]["records"] == 1
+        _install_web_stub(query={"q": "看图"})
+        lst = asyncio.run(api.list_records())
+        assert lst["status"] == "ok" and lst["data"]["total"] == 1, lst
+        _install_web_stub(query={"q": "没有这个词"})
+        assert asyncio.run(api.list_records())["data"]["total"] == 0
+
+        _install_web_stub(query={"id": rid})
+        detail = asyncio.run(api.get_record())
+        assert detail["status"] == "ok" and detail["data"]["nodes"], detail
+        asset = detail["data"]["nodes"][0]["segments"][1]["asset"]
+        _install_web_stub(query={"id": "nope"})
+        assert asyncio.run(api.get_record())["status"] == "error"
+
+        _install_web_stub(query={"id": rid, "path": asset})
+        fr = asyncio.run(api.get_asset())
+        assert isinstance(fr, dict) and fr.get("__file__"), fr
+        _install_web_stub(query={"id": rid, "path": "record.json"})
+        assert asyncio.run(api.get_asset())["status"] == "error"
+
+        calls = []
+
+        async def fake_native(bot, group_id, message_id):
+            calls.append(("native", group_id, message_id))
+            return {"ok": True, "mode": "native"}
+
+        async def fake_rebuild(bot, group_id, rec, base):
+            calls.append(("rebuild", group_id, rec.get("record_id")))
+            return {"ok": True, "mode": "rebuild"}
+
+        async def fail_native(bot, group_id, message_id):
+            return {"ok": False, "error": "消息不存在"}
+
+        orig_native = record_admin.native_forward
+        orig_rebuild = record_admin.rebuild_forward
+        record_admin.native_forward = fake_native
+        record_admin.rebuild_forward = fake_rebuild
+        try:
+            _install_web_stub(body={"id": rid, "mode": "native"})
+            r = asyncio.run(api.resend())
+            assert r["status"] == "ok" and r["data"]["ok"] is True, r
+            assert calls == [("native", "g1", "m1")], calls
+
+            record_admin.native_forward = fail_native
+            _install_web_stub(body={"id": rid, "mode": "native", "fallback": True})
+            r2 = asyncio.run(api.resend())
+            assert r2["data"]["ok"] is True, r2
+            assert "已回退重建" in r2["data"].get("note", ""), r2
+            assert calls[-1] == ("rebuild", "g1", rid), calls
+
+            _install_web_stub(body={"id": rid, "mode": "native", "fallback": False})
+            r3 = asyncio.run(api.resend())
+            assert r3["data"]["ok"] is False, r3
+
+            _install_web_stub(body={"id": rid, "mode": "rebuild"})
+            r4 = asyncio.run(api.resend())
+            assert r4["data"]["mode"] == "rebuild", r4
+
+            _install_web_stub(body={"id": "nope"})
+            assert asyncio.run(api.resend())["status"] == "error"
+            _install_web_stub(body={})
+            assert asyncio.run(api.resend())["status"] == "error"
+        finally:
+            record_admin.native_forward = orig_native
+            record_admin.rebuild_forward = orig_rebuild
+
+        _install_web_stub(body={"id": rid})
+        d = asyncio.run(api.delete())
+        assert d["status"] == "ok" and d["data"]["deleted"] is True, d
+        assert record_store.load_record(tmp, rid) is None
+        _install_web_stub(body={"id": rid})
+        assert asyncio.run(api.delete())["status"] == "error"
+        _install_web_stub(body={})
+        assert asyncio.run(api.delete())["status"] == "error"
+    finally:
+        sys.modules.pop("astrbot.api.web", None)
+        if saved is not None:
+            sys.modules["astrbot.api.web"] = saved
+    print("  OK ->", "6 条路由 + stats/records/record/asset/resend/delete")
+
+
+def test_plugin_initialize_registers_page_api():
+    banner("plugin: initialize() 注册存档页面 API")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_page_init_")
+    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=False)
+    seen = []
+    pl.context.register_web_api = (
+        lambda route, handler, methods=None, desc="": seen.append(route))
+    asyncio.run(pl.initialize())
+    assert pl._page_api is not None, "page api 应已注册"
+    assert len(seen) == 6, seen
+    assert record_page.PAGE_PREFIX + "/stats" in seen, seen
+
+    tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
+    pl2 = _build_plugin_for_command(tmp2, enable_index=False, log_to_stdout=False)
+    asyncio.run(pl2.initialize())
+    assert pl2._page_api is None, "宿主没有 register_web_api 时应安静跳过"
+    print("  OK ->", "6 条路由 / 无宿主支持时跳过")
+
+
 PHASE7 = [
     # v1.12 原型: 聊天记录存档(保存再发送)
     test_record_capture_roundtrip,
@@ -4524,14 +4785,24 @@ PHASE7 = [
     test_plugin_resend_defaults_to_native_then_rebuild,
 ]
 
+
+PHASE8 = [
+    # v1.13 存档后台: 浏览/搜索/删除 + 插件页面 API
+    test_record_admin_scan_stats_detail,
+    test_record_page_routes_and_handlers,
+    test_plugin_initialize_registers_page_api,
+]
+
 if __name__ == "__main__":
     # 离线冒烟不真等「迟到缓存重查」的 sleep,否则下载失败类用例每个多等 16s。
     # (需要验证等待逻辑本身的用例自己在内部把这一项恢复成真值)
     plugin_main._LATE_CACHE_DELAYS_S = ()
-    for t in PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5 + PHASE6 + PHASE7:
+    for t in (PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5 + PHASE6 + PHASE7
+              + PHASE8):
         t()
     print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d phase6=%d "
-          "phase7=%d, total=%d)"
+          "phase7=%d phase8=%d, total=%d)"
           % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4), len(PHASE5),
-             len(PHASE6), len(PHASE7), len(PHASE1) + len(PHASE2) + len(PHASE3)
-             + len(PHASE4) + len(PHASE5) + len(PHASE6) + len(PHASE7)))
+             len(PHASE6), len(PHASE7), len(PHASE8),
+             len(PHASE1) + len(PHASE2) + len(PHASE3) + len(PHASE4) + len(PHASE5)
+             + len(PHASE6) + len(PHASE7) + len(PHASE8)))
