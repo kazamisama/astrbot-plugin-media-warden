@@ -51,6 +51,8 @@ class RecordPageApi:
                  "media-warden 存档图片")
         register(f"{PAGE_PREFIX}/thumb", self.get_thumb, ["GET"],
                  "media-warden 存档图片（base64，给页面内联显示）")
+        register(f"{PAGE_PREFIX}/groups", self.list_groups, ["GET"],
+                 "media-warden 机器人所在的群（带群名，给转发目标下拉）")
         register(f"{PAGE_PREFIX}/resend", self.resend, ["POST"],
                  "media-warden 重发存档")
         register(f"{PAGE_PREFIX}/delete", self.delete, ["POST"],
@@ -103,6 +105,41 @@ class RecordPageApi:
         if not full:
             return {"status": "error", "message": "资产不存在", "data": {}}
         return file_response(full)
+
+    async def list_groups(self):
+        """机器人所在的群列表（OneBot get_group_list，带群名）。
+
+        页面上的「转发到」下拉用它 —— 裸群号没人认得出来，带群名才选得动。
+        aiocqhttp 的 call_action 成功时已解包成 data（列表），个别实现回
+        {"data": [...]}，这里两种都认。
+        """
+        bot = self._bot()
+        if bot is None:
+            return {"status": "error", "message": "机器人未连接（没有 aiocqhttp 实例）",
+                    "data": {}}
+        try:
+            res = await bot.call_action("get_group_list")
+        except Exception as e:
+            return {"status": "error", "message": f"取群列表失败: {e!r}", "data": {}}
+        if isinstance(res, dict):
+            res = res.get("data") or res.get("groups") or []
+        items = []
+        for g in res or []:
+            if not isinstance(g, dict):
+                continue
+            gid = g.get("group_id") or g.get("groupId") or g.get("id")
+            if gid in (None, ""):
+                continue
+            name = g.get("group_name") or g.get("groupName") or g.get("name") or ""
+            count = g.get("member_count") or g.get("memberCount") or 0
+            try:
+                count = int(count or 0)
+            except (TypeError, ValueError):
+                count = 0
+            items.append({"group_id": str(gid), "name": str(name),
+                          "member_count": count})
+        items.sort(key=lambda it: (it["name"], it["group_id"]))
+        return {"status": "ok", "data": {"groups": items, "total": len(items)}}
 
     async def get_thumb(self):
         """把一张资产读成 data URL。

@@ -9,6 +9,7 @@ v1.3 增量:
 """
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -27,7 +28,10 @@ from .warden import (
     event_sender_name,
     extract_components,
     recover_raw_media_refs,
+    raw_segments,
     summarize,
+    media_kind,
+    kind_allowed,
     AssetResult,
     BatchResult,
     format_batch,
@@ -366,14 +370,44 @@ class MediaWardenStar(Star):
             return
 
         components = extract_components(event)
-        media = [c for c in components if c.is_media]
+
+        # v1.14.0 类型门控:六类各自开关 + 文档扩展名白名单.
+        # 门控放在这里(而不是下载之后),是为了让「类型没开」和「下载失败」在日志里
+        # 分得清 —— 前者不是错误,不该进 failures 表。
+        media: list[Component] = []
+        dropped: dict[str, int] = {}
+        for c in components:
+            if not c.is_media:
+                continue
+            kind = media_kind(c)
+            if not kind_allowed(self.cfg, kind):
+                dropped[kind] = dropped.get(kind, 0) + 1
+                continue
+            if kind == "file" and not self.cfg.doc_ext_allowed(
+                    (c.name or "") or (c.meta or {}).get("name") or ""):
+                dropped["file_ext"] = dropped.get("file_ext", 0) + 1
+                continue
+            media.append(c)
+
         forwards = [c for c in components if c.is_forward]
-        if not media and not forwards:
+        if forwards and not kind_allowed(self.cfg, "forward"):
+            dropped["forward"] = len(forwards)
+            forwards = []
+
+        text_segments = self._text_segments(event)
+        # 纯文本只在这条消息没有别的可存内容时才算数(带图的消息已由图片条目覆盖)
+        wants_text = (
+            bool(text_segments) and not media and not forwards
+            and kind_allowed(self.cfg, "text")
+        )
+
+        if not media and not forwards and not wants_text:
             if self.cfg.log_to_stdout:
-                kinds = summarize(components)
+                extra = "".join(f" {k}={v}" for k, v in sorted(dropped.items()))
                 self._log(
-                    f"skip: text-only | msg={getattr(event, 'message_id', '?')} "
-                    f"| segments={kinds}"
+                    f"skip: nothing to save{(' | dropped:' + extra) if extra else ''} "
+                    f"| msg={getattr(event, 'message_id', '?')} "
+                    f"| segments={summarize(components)}"
                 )
             return
 
@@ -398,6 +432,21 @@ class MediaWardenStar(Star):
                 f"matched | msg={msg_id} sender={sender_id} "
                 f"media={len(media)} forward={len(forwards)}"
             )
+
+        # 纯文本走独立分支:一条消息就是一个条目,没有下载/落盘的并发问题
+        if wants_text:
+            t0 = time.time()
+            text_item = await self._save_text(
+                text_segments, platform=platform, group_id=group_id,
+                sender_id=sender_id, sender_name=sender_name,
+                msg_id=msg_id, ts=ts,
+            )
+            text_batch = BatchResult(items=[text_item],
+                                     duration_s=time.time() - t0)
+            async for ev in self._emit_receipt(text_batch, msg_id, sender_id,
+                                              event=event):
+                yield ev
+            return
 
         t0 = time.time()
         batch = BatchResult()
@@ -444,23 +493,146 @@ class MediaWardenStar(Star):
                 batch.items.append(r)
 
         batch.duration_s = time.time() - t0
+        async for ev in self._emit_receipt(batch, msg_id, sender_id, event=event):
+            yield ev
+
+    async def _emit_receipt(self, batch: BatchResult, msg_id: str,
+                            sender_id: str, event: AstrMessageEvent | None = None):
+        """回执 + 预览 + @失败者 —— 图片路径与纯文本路径共用,避免两套文案漂移。"""
         text = format_batch(batch)
         # reply_to_original: 把回执挂成对原消息的引用(默认关闭 = v1.9 的实际行为)
         reply_prefix = self._reply_prefix(msg_id)
-        if reply_prefix:
+        if event is not None and reply_prefix:
             yield event.chain_result(reply_prefix + [Plain(text)])
-        else:
+        elif event is not None:
             yield event.plain_result(text)
-        for extra in self._build_previews(event, batch):
-            yield extra
+        if event is not None:
+            for extra in self._build_previews(event, batch):
+                yield extra
         if self.cfg.at_on_save_failure and batch.fail_count > 0:
             try:
-                yield event.chain_result([
-                    At(qq=sender_id),
-                    Plain(" 有 " + batch.failure_phrase()),
-                ])
+                if event is not None:
+                    yield event.chain_result([
+                        At(qq=sender_id),
+                        Plain(" 有 " + batch.failure_phrase()),
+                    ])
             except Exception as e:
                 self._log(f"at-on-failure notify failed: {e!r}")
+
+    # ----------------- 内部:纯文本条目 -----------------
+
+    _TEXT_SEG_KINDS = ("text", "at", "face", "reply")
+
+    def _text_segments(self, event: AstrMessageEvent) -> list[dict]:
+        """纯文本条目的段列表.
+
+        优先用 raw_message(保真:At/Face/Reply 原样保留),没有时退化成
+        message_str 的一行文字 —— 非 OneBot 平台也能存,只是丢表情与 @。
+        """
+        try:
+            segs = [s for s in raw_segments(event)
+                    if s.get("type") in self._TEXT_SEG_KINDS]
+        except Exception as e:
+            self._log(f"raw segments failed: {e!r}")
+            segs = []
+        if segs:
+            return segs
+        text = (getattr(event, "message_str", "") or "").strip()
+        return [{"type": "text", "data": {"text": text}}] if text else []
+
+    async def _fetch_node_avatars(self, nodes: list, platform: str) -> None:
+        """给渲染节点补头像(失败静默,渲染照常)."""
+        if not (self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes):
+            return
+        allowed = {p.lower() for p in self.cfg.avatar_platforms}
+        if (platform or "").lower() not in allowed:
+            return
+        try:
+            seen = set()
+            pairs = []
+            for nd in nodes:
+                key = (platform, nd.sender_id)
+                if nd.sender_id and key not in seen:
+                    seen.add(key)
+                    pairs.append(key)
+            if not pairs:
+                return
+            avatar_map = await fetch_many_avatars(
+                self._avatar_cache, pairs, concurrency=self.cfg.max_concurrent,
+            )
+            for nd in nodes:
+                nd.avatar_path = avatar_map.get((platform, nd.sender_id))
+        except Exception as e:
+            self._log(f"avatar fetch failed: {e!r} — proceed without")
+
+    async def _save_text(self, segments: list, *, platform: str, group_id: str,
+                         sender_id: str, sender_name: str, msg_id: str,
+                         ts: int) -> AssetResult:
+        """纯文本条目:entry.json(结构化) + render.png(Pillow 渲染) 共用一个目录.
+
+        两种形式都存是刻意的:结构化那份能搜索、能改样式重渲染、能重建发送;
+        渲染图那份就是用户眼里的「正常形式」。
+        """
+        root = self.cfg.storage_root
+        rid = record_store.make_record_id(group_id, msg_id, ts)
+        ctx = SaveContext(platform=platform, group_id=group_id,
+                          sender_id=sender_id, sender_name=sender_name,
+                          msg_id=msg_id, idx=0, ts=ts)
+        comp = Component(kind="text", name=f"text_{msg_id}")
+        try:
+            await record_store.capture_text(
+                segments, platform=platform, group_id=group_id, msg_id=msg_id,
+                sender_id=sender_id, sender_name=sender_name,
+                storage_root=root, ts=ts, record_id=rid,
+            )
+        except Exception as e:
+            return self._failed(
+                comp, ctx, "text",
+                f"text save: {type(e).__name__}: {e}", e,
+                subject=f"text:{msg_id}#0", failure_kind="save",
+            )
+
+        render_name = None
+        png: Optional[bytes] = None
+        if self._forwarder is not None:
+            from .warden.forwarder import _coerce_nodes
+            node = {
+                "sender": {"user_id": sender_id, "nickname": sender_name},
+                "time": int(ts),
+                "message": segments,
+            }
+            nodes = _coerce_nodes([node])
+            if nodes and self._forwarder.can_handle(nodes):
+                await self._fetch_node_avatars(nodes, platform)
+                try:
+                    png = await self._forwarder.render(nodes)
+                except Exception as e:
+                    self._log(f"text render failed: {e!r}")
+                else:
+                    try:
+                        render_name = record_store.save_render(root, rid, png)
+                    except OSError as e:
+                        self._log(f"text render write failed: {e!r}")
+
+        rel = render_name or record_store.ENTRY_FILENAME
+        path = os.path.join(record_store.record_dir(root, rid), rel)
+        size = len(png) if (png is not None and render_name) else 0
+        if self._index is not None:
+            try:
+                sha16 = hashlib.blake2b(png, digest_size=8).hexdigest() if png else None
+                self._index.record(
+                    platform=platform, group_id=group_id, sender_id=sender_id,
+                    msg_id=msg_id, idx=0, kind="text", path=path, size=size,
+                    sha16=sha16,
+                )
+            except Exception as e:
+                self._log(f"index record failed: {e!r}")
+        if render_name is None:
+            self._log(f"text saved without render: {rid}")
+        return AssetResult(
+            kind="text", ok=True, path=path, size=size,
+            preview_path=path if render_name else None,
+        )
 
     # ----------------- 内部:并发下载 + 落盘 -----------------
 

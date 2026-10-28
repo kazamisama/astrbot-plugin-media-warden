@@ -28,7 +28,10 @@ import time
 from typing import Any, Awaitable, Callable, Optional
 
 SCHEMA_VERSION = 1
+ENTRY_SCHEMA_VERSION = 1
 RECORDS_DIRNAME = "_records"
+ENTRY_FILENAME = "entry.json"
+RENDER_FILENAME = "render.png"
 
 
 def _safe_token(value: Any) -> str:
@@ -185,6 +188,98 @@ async def capture(
     return record
 
 
+def _entry_path(storage_root: str, record_id: str) -> str:
+    return os.path.join(record_dir(storage_root, record_id), ENTRY_FILENAME)
+
+
+async def capture_text(
+    segments: list,
+    *,
+    platform: str,
+    group_id: Any,
+    msg_id: Any,
+    sender_id: Any,
+    sender_name: str,
+    storage_root: str,
+    ts: Optional[int] = None,
+    record_id: Optional[str] = None,
+) -> dict:
+    """把一条**纯文本消息**存成条目（与聊天记录共用 _records/<id>/ 目录）。
+
+    纯文本的「正常形式」是 Pillow 渲染图，但文字本身带元数据（谁/何时/说了什么）
+    必须留一份结构化的，否则样式改了以后没法重渲染，也没法搜索。
+    所以：entry.json（结构化）+ render.png（渲染图），缺一不可。
+    """
+    captured = int(ts if ts is not None else time.time())
+    rid = record_id or make_record_id(group_id, msg_id, captured)
+    root = record_dir(storage_root, rid)
+    os.makedirs(root, exist_ok=True)
+
+    cleaned: list = []
+    for seg in segments or []:
+        if not isinstance(seg, dict):
+            continue
+        kind = str(seg.get("type") or "").lower()
+        data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+        cleaned.append({"type": kind, "data": dict(data)})
+
+    entry = {
+        "schema_version": ENTRY_SCHEMA_VERSION,
+        "kind": "text",
+        "record_id": rid,
+        "platform": platform,
+        "group_id": str(group_id or ""),
+        "root_msg_id": str(msg_id or ""),
+        "sender_id": str(sender_id or ""),
+        "sender_name": str(sender_name or ""),
+        "captured_ts": captured,
+        "node_count": 1,
+        "segments": cleaned,
+        "assets": [],
+        "missing": [],
+        "render": None,
+        "origin_sha256": _canonical_sha256(cleaned),
+    }
+    with open(_entry_path(storage_root, rid), "w", encoding="utf-8") as fh:
+        json.dump(entry, fh, ensure_ascii=False, indent=2)
+    return entry
+
+
+def load_entry(storage_root: str, record_id: str) -> Optional[dict]:
+    try:
+        with open(_entry_path(storage_root, record_id), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def has_render(storage_root: str, record_id: str) -> Optional[str]:
+    """条目有渲染图就返回文件名，没有返回 None（只认登记过的 render 字段）。"""
+    entry = load_entry(storage_root, record_id)
+    name = (entry or {}).get("render")
+    if not isinstance(name, str) or not name:
+        return None
+    if os.path.isfile(os.path.join(record_dir(storage_root, record_id), name)):
+        return name
+    return None
+
+
+def save_render(storage_root: str, record_id: str, blob: bytes) -> Optional[str]:
+    """把渲染图写进条目目录并登记到 entry.json；没有 entry.json 时不写。"""
+    entry = load_entry(storage_root, record_id)
+    if entry is None or not blob:
+        return None
+    root = record_dir(storage_root, record_id)
+    os.makedirs(root, exist_ok=True)
+    with open(os.path.join(root, RENDER_FILENAME), "wb") as fh:
+        fh.write(blob)
+    entry["render"] = RENDER_FILENAME
+    with open(_entry_path(storage_root, record_id), "w", encoding="utf-8") as fh:
+        json.dump(entry, fh, ensure_ascii=False, indent=2)
+    return RENDER_FILENAME
+
+
 def load_record(storage_root: str, record_id: str) -> Optional[dict]:
     path = os.path.join(record_dir(storage_root, record_id), "record.json")
     try:
@@ -196,22 +291,39 @@ def load_record(storage_root: str, record_id: str) -> Optional[dict]:
 
 
 def list_records(storage_root: str, limit: int = 20) -> list:
-    """按 captured_ts 倒序列出记录摘要（只读 record.json，不碰资产）。"""
+    """按 captured_ts 倒序列出条目摘要（聊天记录 + 纯文本，两种共用 _records/）。
+
+    只读元数据文件，不碰资产。
+    """
     root = records_root(storage_root)
     if not os.path.isdir(root):
         return []
     out: list = []
     for name in os.listdir(root):
         rec = load_record(storage_root, name)
-        if not rec:
+        if rec:
+            out.append({
+                "record_id": rec.get("record_id", name),
+                "kind": "forward",
+                "captured_ts": rec.get("captured_ts", 0),
+                "node_count": rec.get("node_count", 0),
+                "asset_count": len(rec.get("assets") or []),
+                "group_id": rec.get("group_id", ""),
+                "root_msg_id": rec.get("root_msg_id", ""),
+            })
+            continue
+        entry = load_entry(storage_root, name)
+        if not entry:
             continue
         out.append({
-            "record_id": rec.get("record_id", name),
-            "captured_ts": rec.get("captured_ts", 0),
-            "node_count": rec.get("node_count", 0),
-            "asset_count": len(rec.get("assets") or []),
-            "group_id": rec.get("group_id", ""),
-            "root_msg_id": rec.get("root_msg_id", ""),
+            "record_id": entry.get("record_id", name),
+            "kind": entry.get("kind") or "text",
+            "captured_ts": entry.get("captured_ts", 0),
+            "node_count": 1,
+            "asset_count": 0,
+            "group_id": entry.get("group_id", ""),
+            "root_msg_id": entry.get("root_msg_id", ""),
+            "sender_name": entry.get("sender_name", ""),
         })
     out.sort(key=lambda r: r["captured_ts"], reverse=True)
     return out[:limit]

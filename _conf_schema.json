@@ -2,26 +2,29 @@
   "filter": {
     "description": "监听范围",
     "type": "object",
-    "hint": "配置监听哪些群 / 哪些用户的消息。空列表 = 该维度不限。",
+    "hint": "监听范围。**空 = 不保存**（安全默认）：群列表空则什么都不存；用户列表空同样什么都不存，写 `*` 表示该群所有人。黑名单模式下空 = 不限。",
     "items": {
       "target_groups": {
         "type": "list",
         "default": [],
-        "description": "监听的群 ID（格式: platform:group_id，如 aiocqhttp:123456）。空表示不限。",
-        "hint": "支持 `platform:group_id` 形式或裸 group_id。"
+        "description": "要保存的群 ID（`platform:group_id` 或裸 group_id）。空 = 不保存任何群。",
+        "hint": "v1.14.0 起语义反转：以前空 = 不限，现在空 = 关闭。"
       },
       "target_users": {
         "type": "list",
         "default": [],
-        "description": "监听的用户 sender_id 列表。空表示不限。",
-        "hint": "支持裸 user_id 或 `platform:user_id` 形式。"
+        "description": "要保存的发送人 user_id 列表。空 = 不保存任何人；写 `*` = 该群所有人。",
+        "hint": "示例：[\"*\"] 全部人、[\"2510536451\", \"206216334\"] 只存这两人。"
       },
       "match_mode": {
         "type": "string",
         "default": "whitelist",
-        "options": ["whitelist", "blacklist"],
+        "options": [
+          "whitelist",
+          "blacklist"
+        ],
         "description": "匹配模式: whitelist(白名单) | blacklist(黑名单)",
-        "hint": "白名单：群 + 用户两个维度都允许才落盘。黑名单：任一维度命中即跳过。"
+        "hint": "白名单：群 + 用户都命中才保存（空 = 不保存）。黑名单：任一维度命中即跳过（空 = 不限，想全存用这个）。"
       }
     }
   },
@@ -124,14 +127,22 @@
       "forward_render_mode": {
         "type": "string",
         "default": "image",
-        "options": ["image", "json", "both"],
+        "options": [
+          "image",
+          "json",
+          "both"
+        ],
         "description": "转发链处理方式: image(渲染成图片) | json(保存为结构化JSON) | both(两者都生成)",
         "hint": "image / both 才会调用 PIL 渲染；json 总是会写 JSON 侧车。"
       },
       "forward_image_engine": {
         "type": "string",
         "default": "pil",
-        "options": ["pil", "playwright", "wkhtml"],
+        "options": [
+          "pil",
+          "playwright",
+          "wkhtml"
+        ],
         "description": "渲染引擎: pil(纯Python) | playwright(需Chromium) | wkhtml(wkhtmltoimage)",
         "hint": "只有 pil 真正实现。选 playwright/wkhtml 也能启动：插件会打一条明确告警（'forward_image_engine=… 未实现 — 实际使用 PIL 渲染'）并继续用 PIL，不会静默切引擎，也不会降级成 JSON。"
       },
@@ -178,7 +189,10 @@
       },
       "avatar_platforms": {
         "type": "list",
-        "default": ["aiocqhttp", "qq_official"],
+        "default": [
+          "aiocqhttp",
+          "qq_official"
+        ],
         "description": "允许抓取头像的平台白名单（v1.8.0+）",
         "hint": "仅对名单内平台抓取转发节点头像（QQ qlogo.cn）。napcat/lagrange 等 OneBot 实现平台名为 aiocqhttp，已被默认覆盖。"
       }
@@ -206,6 +220,170 @@
         "default": true,
         "description": "保存出现失败时，是否额外 @ 触发该消息的监听对象进行提醒",
         "hint": "如果有失败项，会在 reply chain 末尾追加 @sender_id + ' 有 X/Y 个媒体保存失败'。"
+      }
+    }
+  },
+  "save_types": {
+    "type": "object",
+    "description": "保存哪些类型",
+    "hint": "六类各自开关。纯文本是 v1.14.0 新增能力（以前纯文本不进保存流程），默认关。",
+    "items": {
+      "save_images": {
+        "type": "bool",
+        "default": true,
+        "description": "保存图片",
+        "hint": "不含动图（动图单独开关）"
+      },
+      "save_gifs": {
+        "type": "bool",
+        "default": true,
+        "description": "保存动图",
+        "hint": "gif / apng；静态 webp 下载后会归回「图片」"
+      },
+      "save_videos": {
+        "type": "bool",
+        "default": true,
+        "description": "保存视频",
+        "hint": ""
+      },
+      "save_files": {
+        "type": "bool",
+        "default": true,
+        "description": "保存文档文件",
+        "hint": "受下面的扩展名白名单约束"
+      },
+      "save_forwards": {
+        "type": "bool",
+        "default": true,
+        "description": "保存聊天记录（合并转发）",
+        "hint": "落结构化 JSON + Pillow 渲染图，共用一个条目"
+      },
+      "save_texts": {
+        "type": "bool",
+        "default": false,
+        "description": "保存纯文本消息",
+        "hint": "落 text.json（含元数据）+ render.png，共用一个条目"
+      },
+      "doc_ext_whitelist": {
+        "type": "list",
+        "default": [
+          "pdf",
+          "doc",
+          "docx",
+          "xls",
+          "xlsx",
+          "ppt",
+          "pptx",
+          "txt",
+          "md",
+          "csv",
+          "zip",
+          "7z",
+          "rar",
+          "epub"
+        ],
+        "description": "文档扩展名白名单（不含点，大小写不敏感）",
+        "hint": "只保存这些扩展名的 file 段；留空 = 不限制。"
+      }
+    }
+  },
+  "auto_forward": {
+    "type": "object",
+    "description": "聊天记录自动转发",
+    "hint": "可选功能：把源群收到的聊天记录再发到另外的群。目标群为空时本功能不生效。",
+    "items": {
+      "auto_forward_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用自动转发",
+        "hint": "关闭时下面的设置都不生效"
+      },
+      "auto_forward_mode": {
+        "type": "string",
+        "default": "rebuild",
+        "options": [
+          "rebuild",
+          "native"
+        ],
+        "description": "转发模式",
+        "hint": "rebuild = 用存档重建合并转发（无装扮，永远可用）；native = 把源群原消息原地转发（保气泡，跨群需 QQ 允许，失败自动回退 rebuild）"
+      },
+      "forward_target_groups": {
+        "type": "list",
+        "default": [],
+        "description": "转发目标群（可多个）",
+        "hint": "填群号；留空 = 不转发。"
+      }
+    }
+  },
+  "render_style": {
+    "type": "object",
+    "description": "Pillow 渲染样式",
+    "hint": "纯文本与聊天记录的渲染图样式。dashboard 有独立的样式编辑页，支持实时预览；这里是最小配置入口。",
+    "items": {
+      "style_width": {
+        "type": "int",
+        "default": 720,
+        "description": "画布宽度（像素）",
+        "hint": "200..3000"
+      },
+      "style_bg_color": {
+        "type": "string",
+        "default": "#f5f6f7",
+        "description": "背景色（#rrggbb）",
+        "hint": ""
+      },
+      "style_bubble_color": {
+        "type": "string",
+        "default": "#ffffff",
+        "description": "气泡颜色（#rrggbb）",
+        "hint": ""
+      },
+      "style_text_color": {
+        "type": "string",
+        "default": "#1c1f24",
+        "description": "正文颜色（#rrggbb）",
+        "hint": ""
+      },
+      "style_dim_color": {
+        "type": "string",
+        "default": "#8a9099",
+        "description": "次要文字/时间颜色（#rrggbb）",
+        "hint": ""
+      },
+      "style_radius": {
+        "type": "int",
+        "default": 12,
+        "description": "气泡圆角（像素）",
+        "hint": "0..96"
+      },
+      "style_font_size": {
+        "type": "int",
+        "default": 15,
+        "description": "正文字号（像素）",
+        "hint": "8..48"
+      },
+      "style_avatar_shape": {
+        "type": "string",
+        "default": "circle",
+        "options": [
+          "circle",
+          "square"
+        ],
+        "description": "头像形状",
+        "hint": ""
+      },
+      "style_time_format": {
+        "type": "string",
+        "default": "%H:%M",
+        "description": "时间格式（strftime）",
+        "hint": "例：%H:%M / %m-%d %H:%M"
+      },
+      "style_dark": {
+        "type": "bool",
+        "default": false,
+        "description": "深色配色",
+        "hint": "开启后气泡/文字颜色按深色主题反转（仍以显式颜色为准）"
       }
     }
   }

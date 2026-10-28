@@ -258,6 +258,29 @@ def recover_raw_media_refs(event) -> List[dict]:
     return out
 
 
+def raw_segments(event) -> List[dict]:
+    """event.message_obj.raw_message 里的原始段, 归一成 [{"type","data"}].
+
+    纯文本条目要「保真」：At/Face/Reply 这些段在归一化成 Component 时会被压扁,
+    重渲染与重发都需要原始类型, 所以走这条路而不是复用 extract_components。
+    非 OneBot 形态或无 raw_message 时返回 []。
+    """
+    obj = getattr(event, "message_obj", None)
+    raw = getattr(obj, "raw_message", None) if obj is not None else None
+    if raw is None:
+        return []
+    segs = raw.get("message") if isinstance(raw, dict) else getattr(raw, "message", None)
+    if not isinstance(segs, list):
+        return []
+    out: List[dict] = []
+    for seg in segs:
+        tn = _seg_type(seg)
+        if not tn:
+            continue
+        out.append({"type": tn, "data": dict(_seg_data(seg))})
+    return out
+
+
 def extract_components(event) -> List[Component]:
     """从 event.message_obj 抽 Component[].
 

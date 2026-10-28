@@ -6,8 +6,11 @@ from .config import MediaWardenConfig, VERSION
 from .policy import (
     MatchDecision, evaluate,
     event_platform, event_group_id, event_sender_id, event_sender_name,
+    media_kind, kind_allowed, comp_is_animated, blob_is_animated, ALL_SENDERS,
 )
-from .components import Component, extract_components, summarize, recover_raw_media_refs
+from .components import (
+    Component, extract_components, summarize, recover_raw_media_refs, raw_segments,
+)
 from .reporter import (
     AssetResult, BatchResult, format_batch,
     classify_error,
@@ -23,10 +26,16 @@ __all__ = [
     "event_group_id",
     "event_sender_id",
     "event_sender_name",
+    "media_kind",
+    "kind_allowed",
+    "comp_is_animated",
+    "blob_is_animated",
+    "ALL_SENDERS",
     "Component",
     "extract_components",
     "summarize",
     "recover_raw_media_refs",
+    "raw_segments",
     "AssetResult",
     "BatchResult",
     "format_batch",

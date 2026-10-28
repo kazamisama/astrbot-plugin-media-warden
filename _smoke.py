@@ -368,12 +368,23 @@ def test_policy_group_whitelist_case_insensitive():
     print("  OK")
 
 
-def test_policy_whitelist_empty_lists_means_unrestricted():
-    banner("policy: empty whitelist = unrestricted")
+def test_policy_whitelist_empty_lists_means_nothing_saved():
+    banner("policy: empty whitelist = save nothing（v1.14.0 语义反转）")
     cfg = MediaWardenConfig(target_groups=[], target_users=[], match_mode="whitelist")
-    for gid in ["g1", "g2", "g999"]:
-        for uid in ["u1", "u42"]:
-            assert evaluate(cfg, _fake_event(group_id=gid, user_id=uid)).allow
+    d = evaluate(cfg, _fake_event(group_id="g1", user_id="u1"))
+    assert d.allow is False and "empty" in d.reason, d
+    # 群配上、人不配 = 仍然不保存
+    cfg2 = MediaWardenConfig(target_groups=["aiocqhttp:g1"], target_users=[])
+    d2 = evaluate(cfg2, _fake_event(group_id="g1", user_id="u1"))
+    assert d2.allow is False and "sender" in d2.reason, d2
+    # "*" = 该群所有人
+    cfg3 = MediaWardenConfig(target_groups=["aiocqhttp:g1"], target_users=["*"])
+    assert evaluate(cfg3, _fake_event(group_id="g1", user_id="u1")).allow is True
+    assert evaluate(cfg3, _fake_event(group_id="g1", user_id="u42")).allow is True
+    assert evaluate(cfg3, _fake_event(group_id="g2", user_id="u1")).allow is False
+    # 黑名单空 = 不限（逃生口）
+    cfg4 = MediaWardenConfig(match_mode="blacklist", target_groups=[], target_users=[])
+    assert evaluate(cfg4, _fake_event(group_id="g9", user_id="u9")).allow is True
     print("  OK")
 
 
@@ -1127,7 +1138,7 @@ PHASE1 = [
     test_policy_key_format,
     test_policy_whitelist_match_and_miss,
     test_policy_group_whitelist_case_insensitive,
-    test_policy_whitelist_empty_lists_means_unrestricted,
+    test_policy_whitelist_empty_lists_means_nothing_saved,
     test_policy_blacklist,
     test_policy_private_skipped,
     test_components_extract_onebot_segments,
@@ -2485,6 +2496,9 @@ def _build_plugin_for_command(tmpdir, *, enable_index=True, log_to_stdout=False,
         "storage_root": tmpdir,
         "enable_index_db": enable_index,
         "log_to_stdout": log_to_stdout,
+        # v1.14.0: whitelist 空列表已变成「不保存」，这些用例测的是下游流水线，
+        # 用黑名单空列表（= 不限）表达「全存」，不掺和策略本身。
+        "match_mode": "blacklist",
     }
     if extra:
         cfg.update(extra)
@@ -4651,9 +4665,10 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 7, routes
+    assert len(routes) == 8, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
+    assert record_page.PAGE_PREFIX + "/groups" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
 
     class _NoReg:
@@ -4759,7 +4774,7 @@ def test_record_page_routes_and_handlers():
         sys.modules.pop("astrbot.api.web", None)
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK ->", "7 条路由 + stats/records/record/asset/thumb/resend/delete")
+    print("  OK ->", "8 条路由 + stats/records/record/asset/thumb/groups/resend/delete")
 
 
 def test_plugin_initialize_registers_page_api():
@@ -4772,14 +4787,14 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 7, seen
+    assert len(seen) == 8, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
     pl2 = _build_plugin_for_command(tmp2, enable_index=False, log_to_stdout=False)
     asyncio.run(pl2.initialize())
     assert pl2._page_api is None, "宿主没有 register_web_api 时应安静跳过"
-    print("  OK ->", "7 条路由 / 无宿主支持时跳过")
+    print("  OK ->", "8 条路由 / 无宿主支持时跳过")
 
 
 PHASE7 = [
@@ -4806,16 +4821,233 @@ PHASE8 = [
     test_plugin_initialize_registers_page_api,
 ]
 
+# =========================================================
+# Phase 9 测试: v1.14.0 类型门控 + 纯文本条目
+# =========================================================
+
+
+def test_policy_media_kind_and_type_flags():
+    import warden.policy as policy
+    banner("policy: media_kind / kind_allowed / 文档白名单 / 动图判定")
+    mk = policy.media_kind
+    assert mk(Component(kind="image", url="https://x/a.png?x=1")) == "image"
+    assert mk(Component(kind="image", url="https://x/a.GIF")) == "gif"
+    assert mk(Component(kind="image", file_id="abc.apng")) == "gif"
+    assert mk(Component(kind="video", url="https://x/a.mp4")) == "video"
+    assert mk(Component(kind="file", name="a.pdf")) == "file"
+    assert mk(Component(kind="voice", url="https://x/a.amr")) == "voice"
+
+    assert policy.comp_is_animated(Component(kind="image", file_id="x.webp")) is True
+    assert policy.comp_is_animated(Component(kind="image", url="https://x/x.png")) is False
+    gif = b"GIF89a" + b"\x00\x21\xf9\x04" * 2 + b"\x2c" * 2
+    assert policy.blob_is_animated(gif) is True
+    assert policy.blob_is_animated(b"RIFF\x00\x00\x00\x00WEBPVP8 ANIM") is True
+    assert policy.blob_is_animated(b"\x89PNG\r\n\x1a\n" + b"0" * 8 + b"acTL") is True
+    assert policy.blob_is_animated(b"\x89PNG\r\n\x1a\n" + b"0" * 8) is False
+    assert policy.blob_is_animated(b"GIF89a" + b"\x21\xf9\x04" * 1) is False
+
+    assert policy.kind_allowed(MediaWardenConfig(), "image") is True
+    off = MediaWardenConfig(save_images=False)
+    assert policy.kind_allowed(off, "image") is False
+    assert policy.kind_allowed(off, "gif") is True
+    assert policy.kind_allowed(MediaWardenConfig(save_texts=False), "text") is False
+    assert policy.kind_allowed(MediaWardenConfig(save_texts=True), "text") is True
+    assert policy.kind_allowed(MediaWardenConfig(save_forwards=False), "forward") is False
+
+    assert MediaWardenConfig().doc_ext_allowed("PDF") is True
+    assert MediaWardenConfig().doc_ext_allowed(".docx") is True
+    assert MediaWardenConfig().doc_ext_allowed("exe") is False
+    assert MediaWardenConfig(doc_ext_whitelist=[]).doc_ext_allowed("exe") is True
+    print("  OK -> image/gif/video/file/voice 分类, 六类开关, 白名单空=不限")
+
+
+def test_record_text_entry_roundtrip():
+    import asyncio
+    banner("record: capture_text 落 entry.json + save_render + list_records 混排")
+    tmp = tempfile.mkdtemp(prefix="wd_text_")
+    segs = [
+        {"type": "text", "data": {"text": "你好"}},
+        {"type": "at", "data": {"qq": "206216334"}},
+        {"type": "face", "data": {"id": "14"}},
+    ]
+    entry = asyncio.run(record_store.capture_text(
+        segs, platform="aiocqhttp", group_id="961583271", msg_id="m1",
+        sender_id="2510536451", sender_name="卡兹", storage_root=tmp,
+        ts=1720000000,
+    ))
+    rid = entry["record_id"]
+    loaded = record_store.load_entry(tmp, rid)
+    assert loaded is not None
+    assert loaded["kind"] == "text"
+    assert loaded["segments"] == segs
+    assert loaded["sender_name"] == "卡兹"
+    assert record_store.has_render(tmp, rid) is None
+
+    name = record_store.save_render(tmp, rid, b"\x89PNG\r\n\x1a\nxx")
+    assert name == "render.png"
+    assert record_store.has_render(tmp, rid) == "render.png"
+    assert record_store.load_entry(tmp, rid)["render"] == "render.png"
+    # 没有 entry.json 的目录:不写、不炸
+    assert record_store.save_render(tmp, "nope", b"x") is None
+
+    # 混排:聊天记录 + 纯文本都能出现在同一列表里
+    asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "a"}, "time": 1720000100,
+          "message": [{"type": "text", "data": {"text": "x"}}]}],
+        platform="aiocqhttp", group_id="961583271", msg_id="m2",
+        storage_root=tmp, fetch_image=_noop_fetch_image,
+        ts=1720000100,
+    ))
+    rows = record_store.list_records(tmp)
+    kinds = sorted(r["kind"] for r in rows)
+    assert kinds == ["forward", "text"], rows
+    print("  OK -> entry.json/render.png/混排列表都通")
+
+
+async def _noop_fetch_image(data):
+    return None
+
+
+def test_plugin_e2e_text_message_saved_as_entry():
+    import asyncio
+    banner("plugin: 纯文本 -> _records 条目(entry.json + render.png)")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={
+                "storage_root": td,
+                "match_mode": "blacklist",
+                "save_texts": True,
+                "enable_index_db": True,
+                "reply_preview": False,
+            },
+        )
+        asyncio.run(inst.initialize())
+        raw = {"message": [
+            {"type": "text", "data": {"text": "你好呀"}},
+            {"type": "at", "data": {"qq": "206216334"}},
+        ]}
+        ev = _fake_event(
+            group_id="g1", user_id="u1", nickname="alice",
+            message=list(raw["message"]), raw_message=raw,
+            message_str="你好呀", message_id="mtext1", timestamp=1718600000,
+        )
+        out = _drive_command(inst, ev, inst.on_group_message)
+        assert len(out) == 1, out
+        text = out[0].text if hasattr(out[0], "text") else str(out[0])
+        assert "✅" in text, text
+
+        rows = record_store.list_records(td)
+        assert len(rows) == 1, rows
+        rid = rows[0]["record_id"]
+        assert rows[0]["kind"] == "text"
+        entry = record_store.load_entry(td, rid)
+        assert entry["segments"] == raw["message"], entry["segments"]
+        rdir = record_store.record_dir(td, rid)
+        assert os.path.isfile(os.path.join(rdir, "entry.json"))
+        has_png = os.path.isfile(os.path.join(rdir, "render.png"))
+        if inst._forwarder is None:
+            print("  SKIP render -> PIL unavailable")
+        else:
+            assert has_png, os.listdir(rdir)
+            assert entry["render"] == "render.png"
+        # 索引也能查到(改了样式还能找到原文)
+        if inst._index is not None:
+            hit = inst._index.find_by_msg("mtext1")
+            assert hit and hit[0]["kind"] == "text", hit
+            inst._index.close()
+            inst._index = None
+        print("  OK ->", text.replace(chr(10), " | ")[:70],
+              "| render=" + ("on" if has_png else "off"))
+
+
+def test_plugin_type_gating_drops_disabled_and_bad_ext():
+    import asyncio
+    banner("plugin: 类型开关 / 文档白名单 在下载之前就拦掉")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={
+                "storage_root": td,
+                "match_mode": "blacklist",
+                "save_images": False,
+                "save_files": True,
+                "doc_ext_whitelist": ["pdf"],
+                "enable_index_db": False,
+                "reply_preview": False,
+            },
+        )
+        asyncio.run(inst.initialize())
+
+        # 1) 图片关掉 -> 什么都不存, 也就不应该有回执
+        ev_img = _fake_event(
+            group_id="g1", user_id="u1", nickname="alice",
+            message=[{"type": "image", "data": {"file": "a.jpg",
+                                                 "url": "https://x/a.png"}}],
+            message_id="mimg", timestamp=1718600000,
+        )
+        out = _drive_command(inst, ev_img, inst.on_group_message)
+        assert out == [], out
+
+        # 2) 文档扩展名不在白名单 -> 也不存
+        ev_exe = _fake_event(
+            group_id="g1", user_id="u1", nickname="alice",
+            message=[{"type": "file", "data": {"file": "setup.exe",
+                                               "name": "setup.exe",
+                                               "url": "https://x/setup.exe"}}],
+            message_id="mexe", timestamp=1718600001,
+        )
+        out = _drive_command(inst, ev_exe, inst.on_group_message)
+        assert out == [], out
+
+        # 3) 白名单内的 pdf -> 正常落盘(下载打桩, 离线可跑)
+        orig_download = plugin_main.download
+
+        async def _fake_download(comp, *a, **k):
+            return Downloaded(data=b"%PDF-1.4 offline", mime="application/pdf",
+                              size=16)
+
+        plugin_main.download = _fake_download
+        try:
+            ev_pdf = _fake_event(
+                group_id="g1", user_id="u1", nickname="alice",
+                message=[{"type": "file", "data": {"file": "doc.pdf",
+                                                   "name": "doc.pdf",
+                                                   "url": "https://x/doc.pdf"}}],
+                message_id="mpdf", timestamp=1718600002,
+            )
+            out = _drive_command(inst, ev_pdf, inst.on_group_message)
+        finally:
+            plugin_main.download = orig_download
+        assert len(out) == 1, out
+        text = out[0].text if hasattr(out[0], "text") else str(out[0])
+        assert "✅" in text and "file" in text, text
+        pdfs = []
+        for root, _, fs in os.walk(td):
+            pdfs += [os.path.join(root, f) for f in fs if f.endswith(".pdf")]
+        assert pdfs, os.listdir(td)
+        print("  OK -> image off=false, exe dropped, pdf saved:", os.path.basename(pdfs[0]))
+
+
+PHASE9 = [
+    # v1.14.0: 类型门控 + 纯文本条目
+    test_policy_media_kind_and_type_flags,
+    test_record_text_entry_roundtrip,
+    test_plugin_e2e_text_message_saved_as_entry,
+    test_plugin_type_gating_drops_disabled_and_bad_ext,
+]
+
+
 if __name__ == "__main__":
     # 离线冒烟不真等「迟到缓存重查」的 sleep,否则下载失败类用例每个多等 16s。
     # (需要验证等待逻辑本身的用例自己在内部把这一项恢复成真值)
     plugin_main._LATE_CACHE_DELAYS_S = ()
     for t in (PHASE1 + PHASE2 + PHASE3 + PHASE4 + PHASE5 + PHASE6 + PHASE7
-              + PHASE8):
+              + PHASE8 + PHASE9):
         t()
     print("\nALL OK (phase1=%d phase2=%d phase3=%d phase4=%d phase5=%d phase6=%d "
-          "phase7=%d phase8=%d, total=%d)"
+          "phase7=%d phase8=%d phase9=%d, total=%d)"
           % (len(PHASE1), len(PHASE2), len(PHASE3), len(PHASE4), len(PHASE5),
-             len(PHASE6), len(PHASE7), len(PHASE8),
+             len(PHASE6), len(PHASE7), len(PHASE8), len(PHASE9),
              len(PHASE1) + len(PHASE2) + len(PHASE3) + len(PHASE4) + len(PHASE5)
-             + len(PHASE6) + len(PHASE7) + len(PHASE8)))
+             + len(PHASE6) + len(PHASE7) + len(PHASE8) + len(PHASE9)))
