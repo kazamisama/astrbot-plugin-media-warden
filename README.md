@@ -121,7 +121,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `max_concurrent` | `4` | 同一条消息的并发下载数（节点图与头像共用） |
 | `get_media_fallback` | `true` | 下载失败的补救链：QQ 本地缓存（按 MD5）→ `get_image` / `get_msg` 换新链接 → 组件本地副本 → 5s/20s 后再查本地缓存 |
 
-**⑤ 聊天记录渲染（`render`）**
+**⑤ 聊天记录渲染（`forward`）**
 
 | 字段 | 默认 | 说明 |
 |---|---|---|

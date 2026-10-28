@@ -17,23 +17,21 @@
 
 ### 做了什么
 
-- **九组重排**（配置页顺序 = 读的顺序）：① `filter` 监听范围 → ② `save_types` 保存哪些类型 → ③ `storage` 存储与索引 → ④ `download` 下载与重试 → ⑤ `render` 聊天记录渲染 → ⑥ `render_style` 渲染样式 → ⑦ `auto_forward` 自动转发 → ⑧ `reply` 保存后的回执 → ⑨ `logging` 日志。每组 `description` 直接写序号。
+- **九组重排**（配置页顺序 = 读的顺序）：① `filter` 监听范围 → ② `save_types` 保存哪些类型 → ③ `storage` 存储与索引 → ④ `download` 下载与重试 → ⑤ `forward` 聊天记录渲染 → ⑥ `render_style` 渲染样式 → ⑦ `auto_forward` 自动转发 → ⑧ `reply` 保存后的回执 → ⑨ `logging` 日志。每组 `description` 直接写序号。**组键（内部名）不动**，只改中文标题。
 - **hint 重写**：只写「这一项现在会怎样」，删掉版本考古与实现细节。`_conf_schema.json` 从 46 键降到 45 键（删 `forward_image_width`）。
-- **`auto_forward_mode` 默认 `native`**（`warden/config.py`）。实测约束写进 hint：native 只对原群可靠，跨群基本必失败并自动回退 rebuild。
+- **`auto_forward_mode` 默认 `native`**（`warden/config.py`）。实测约束写进 hint：native 只对原群可靠，跨群基本必失败并自动回退 rebuild。旧配置里的值不会自动变 —— 除非满足 `_promote_auto_forward_default()` 的三个条件（未启用 / 无目标群 / 值仍是旧默认 rebuild），那时启动会静默改成 native 并写回，日志 `auto_forward_mode: rebuild -> native`。
 - **`forward_image_width` 彻底删除**：`warden/config.py` 字段与校验、`main.py` 里 `Forwarder(width=…)` 改用 `self.cfg.style_width`、`style_snapshot()` 里那一行。画布宽度只剩 `style_width`。
 - **`forward_image_engine` 选项收成 `["pil"]`**；`main.initialize()` 对旧值（playwright/wkhtml）仍打告警并继续用 PIL。
-- **一次性配置组迁移** `main._migrate_config_groups()`（`initialize()` 最前面调用）：旧 `forward` 组整组并进 `render`（已存在的键不覆盖、`forward_image_width` 丢弃），`obj.pop("forward")` 后 `save_config()` 写一次；幂等。日志 `config groups migrated: forward -> render (N key(s))`。
 
-### 为什么这样迁移
+### 为什么组键不改名（重要）
 
-读端 `MediaWardenConfig._flatten_raw()` 摊平 raw 里**所有** dict 值，所以组改名后读的时候仍能读到老值；但 AstrBot WebUI 一保存就按新 schema 重写文件，老组会消失 → 启动时必须把值挪进新组并保存，否则用户「打开 WebUI 改个别的」就会静默丢配置。
+一度把 ⑤ 的组键从 `forward` 改成 `render`，实测（2026-10-28）重载后 **AstrBot 按新 schema 重写了配置文件，旧 `forward` 组连同里面的值一起消失**（写端根本不用插件的 `_flatten_raw` 那套兼容读取）。结论：`_conf_schema.json` 的顶层键是配置的**存储地址**，改标题安全、改键等于丢用户配置。所以最终只改 `description`，键保持 `forward`；`_migrate_config_groups()` 那套迁移也随之删除（没有键变化就不需要它）。
 
 ### 踩坑
 
 - `test_conf_schema_covers_all_config_fields` 断言 schema 字段集合 == dataclass 可配字段集合，删 schema 键必须同时删 dataclass 字段。
-- 迁移测试用 `main.MediaWardenStar._migrate_config_groups(fake)` 这种 unbound 调用（插件模块名是 `astrbot_plugin_media_warden_smoke`）。
+- 默认值升级这类「迁移」逻辑写成 `@staticmethod`（`MediaWardenStar._promote_auto_forward_default(cfg)`）才能脱离插件实例直接测；插件模块名是 `astrbot_plugin_media_warden_smoke`，不能 `from astrbot_plugin_media_warden…`。
 - 改表格文档别用 `Set-Content` 全量重写后立刻 `tools.edit` —— edit 的读缓存会失效，必须先 `read` 再 `edit`。
-## 1.-3 v1.14.0（按类型采集 + 分类管理 + 样式页）
 
 目标（用户 m02240）：只存**特定群 / 特定人**发来的**特定类型** —— 图片 / 动图 / 视频 / 纯文本 / 聊天记录 / 文档；纯文本与聊天记录的「正常形式」都是 Pillow 渲染（这点要标清）；dashboard 按类型**分类管理**；聊天记录的两种形态共用一个条目；结构化条目能「去气泡重发」也能自动转发到别的群；渲染样式单独一页可改。
 
