@@ -43,7 +43,7 @@
         "type": "bool",
         "default": true,
         "description": "动图",
-        "hint": "GIF / APNG / 动态 WebP；静态 WebP 下载后会归回「图片」。"
+        "hint": "GIF / APNG / 动态 WebP。按扩展名先判一类，落盘后再按字节复核：单帧的仍记成图片。关掉时这些扩展名都会被丢弃。"
       },
       "save_videos": {
         "type": "bool",
@@ -76,7 +76,7 @@
           "epub"
         ],
         "description": "文档扩展名白名单",
-        "hint": "不带点、大小写不敏感；留空 = 不限扩展名。"
+        "hint": "不带点、大小写不敏感；留空 = 不限扩展名。注意与 ① 的群/人白名单相反 —— 那里留空 = 不存，这里留空 = 全收。"
       },
       "save_texts": {
         "type": "bool",
@@ -184,7 +184,7 @@
           "both"
         ],
         "description": "聊天记录存成什么",
-        "hint": "image=渲染图；json=结构化 JSON；both=两者都留（推荐）。条目本身总会存结构化数据。"
+        "hint": "image=只出渲染图；json=不出图、额外存一份扁平 JSON；both=两者都留。条目里的 record.json 总是有的，json/both 那份扁平 JSON 是额外副本。"
       },
       "forward_render_max_nodes": {
         "type": "int",
@@ -236,7 +236,7 @@
           "qq_official"
         ],
         "description": "允许抓头像的平台",
-        "hint": "napcat / lagrange 等 OneBot 实现的平台名是 aiocqhttp，默认已覆盖。"
+        "hint": "napcat / lagrange 等 OneBot 实现的平台名是 aiocqhttp，默认已覆盖。留空 = 哪些平台都不抓头像（等于关掉头像）。"
       }
     }
   },

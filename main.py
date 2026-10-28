@@ -32,6 +32,8 @@ from .warden import (
     summarize,
     media_kind,
     kind_allowed,
+    comp_is_animated,
+    blob_is_animated,
     AssetResult,
     BatchResult,
     format_batch,
@@ -1319,23 +1321,29 @@ class MediaWardenStar(Star):
         except (ValueError, OSError, RuntimeError) as e:
             return self._failed(comp, ctx, "save",
                                 f"save: {type(e).__name__}: {e}", e)
+        # 落盘后的**真实**类型:图片段先按扩展名猜动图,再拿字节复核 —— 单帧 GIF /
+        # 静态 WebP 应该记成 image。以前这里直接写 comp.kind(恒为 image),于是
+        # 「动图」分类只能靠页面拿扩展名兜底,动画 WebP 根本进不去。
+        true_kind = comp.kind
+        if comp.kind == "image" and comp_is_animated(comp):
+            true_kind = "gif" if blob_is_animated(dl.data) else "image"
         if self._index is not None:
             try:
                 self._index.record(
                     platform=ctx.platform, group_id=ctx.group_id,
                     sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=ctx.idx,
-                    kind=comp.kind, path=sr.path, size=sr.size,
+                    kind=true_kind, path=sr.path, size=sr.size,
                     sha16=sr.blake16,
                 )
             except Exception as e:
                 self._log(f"index record failed: {e!r}")
-        preview = sr.path if comp.kind == "image" else None
+        preview = sr.path if true_kind in ("image", "gif") else None
         note = None
         origin = getattr(dl, "origin", None)
         if origin:
             note = f"链接已重取: {origin[:60]}"
         return AssetResult(
-            kind=comp.kind, ok=True, path=sr.path,
+            kind=true_kind, ok=True, path=sr.path,
             size=dl.size, preview_path=preview,
             reused=(True if reuse else sr.reused), note=note,
         )

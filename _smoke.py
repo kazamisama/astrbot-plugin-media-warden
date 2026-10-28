@@ -2901,6 +2901,51 @@ def test_save_forward_falls_back_when_forwarder_missing():
         print("  OK -> JSON fallback path:", results[0].path)
 
 
+def test_store_dl_records_true_media_kind():
+    """落盘时按字节复核动图:多帧 GIF / 动画 WebP 记 gif,单帧记 image。"""
+    banner("plugin: _store_dl 按字节复核动图,索引 kind 记真实类型")
+    import types
+
+    class _Storage:
+        def save(self, data, comp, ctx, *, mime=None):
+            return types.SimpleNamespace(path=ctx.msg_id + ".bin", size=len(data),
+                                         blake16="b" * 16, reused=False)
+
+    class _Index:
+        def __init__(self):
+            self.kinds = []
+
+        def record(self, *, platform, group_id, sender_id, msg_id, idx, kind,
+                   path, size, sha16=None, forward_meta=None):
+            self.kinds.append(kind)
+
+    inst = plugin_main.MediaWardenStar.__new__(plugin_main.MediaWardenStar)
+    inst._storage = _Storage()
+    inst._index = _Index()
+    inst._log = lambda msg: None
+    save_ctx = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                           sender_name="alice", msg_id="m1", idx=0, ts=1718600000)
+    # 两帧 GIF(含两个 image descriptor)
+    gif = b"GIF89a" + b"\x00" * 10 + b"\x2c" + b"\x00" * 4 + b"\x2c" + b"\x00" * 4
+    res = inst._store_dl(Component(kind="image", url="https://x/a.gif"), save_ctx,
+                         Downloaded(data=gif, mime="image/gif", size=len(gif)))
+    assert inst._index.kinds == ["gif"], inst._index.kinds
+    assert res.kind == "gif" and res.preview_path, res
+    # 静态 WebP(没有 ANIM 块):扩展名像动图,但字节说是静态 -> image
+    webp = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 16
+    inst._index.kinds.clear()
+    res2 = inst._store_dl(Component(kind="image", url="https://x/b.webp"), save_ctx,
+                          Downloaded(data=webp, mime="image/webp", size=len(webp)))
+    assert inst._index.kinds == ["image"], inst._index.kinds
+    assert res2.kind == "image", res2
+    # 普通 png:ext 不判动图,走原路径
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    inst._index.kinds.clear()
+    inst._store_dl(Component(kind="image", url="https://x/c.png"), save_ctx,
+                   Downloaded(data=png, mime="image/png", size=len(png)))
+    assert inst._index.kinds == ["image"], inst._index.kinds
+    print("  OK -> 多帧 GIF -> gif,静态 WebP -> image,png -> image")
+
 def test_store_dl_isolates_oserror():
     banner("plugin: _store_dl isolates OSError as failed AssetResult")
 
@@ -2947,6 +2992,7 @@ PHASE4 = [
     test_downloader_retries_aiohttp_client_error,
     test_save_forward_falls_back_when_forwarder_missing,
     test_store_dl_isolates_oserror,
+    test_store_dl_records_true_media_kind,
 ]
 
 
