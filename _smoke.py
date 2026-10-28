@@ -5360,6 +5360,73 @@ def test_plugin_style_update_and_page():
     print("  OK -> 保存生效 / 非法值拒绝 / 页面读取与预览均通")
 
 
+def test_config_reads_nested_schema_groups():
+    banner("config: 宿主按 schema 分组嵌套传配置时能读到(以前的静默忽略)")
+    cfg, errors = MediaWardenConfig.from_raw_lenient({
+        "filter": {"target_groups": ["961583271"], "target_users": ["*"],
+                   "match_mode": "whitelist"},
+        "storage": {"storage_root": "D:/wd", "dedupe": False},
+        "save_types": {"save_texts": True, "save_images": False},
+        "render_style": {"style_width": 800, "style_bg_color": "#000000"},
+        "logging": {"log_to_stdout": False},
+    })
+    assert errors == [], errors
+    assert cfg.target_groups == ["961583271"], cfg.target_groups
+    assert cfg.target_users == ["*"]
+    assert cfg.storage_root == "D:/wd" and cfg.dedupe is False
+    assert cfg.save_texts is True and cfg.save_images is False
+    assert cfg.style_width == 800 and cfg.style_bg_color == "#000000"
+    assert cfg.log_to_stdout is False
+    # 顶层同名键优先:样式页等直接写顶层的调用方仍然有效
+    cfg2, _ = MediaWardenConfig.from_raw_lenient({
+        "render_style": {"style_width": 800}, "style_width": 640})
+    assert cfg2.style_width == 640, cfg2.style_width
+    # 扁平配置(老形态/测试)照旧
+    cfg3, _ = MediaWardenConfig.from_raw_lenient(
+        {"match_mode": "blacklist", "save_texts": True})
+    assert cfg3.match_mode == "blacklist" and cfg3.save_texts is True
+    print("  OK -> 嵌套分组摊平 / 顶层优先 / 扁平兼容")
+
+
+def test_plugin_persist_config_writes_schema_group():
+    import asyncio
+    banner("plugin: 样式保存写进宿主的 schema 分组(不在顶层留重复键)")
+    calls = []
+
+    class FakeCfg(dict):
+        def save_config(self, *a, **kw):
+            calls.append(1)
+            return True
+
+    live = FakeCfg({
+        "filter": {"target_groups": ["961583271"], "target_users": ["*"],
+                   "match_mode": "whitelist"},
+        "render_style": {
+            "style_width": 720, "style_bg_color": "#f5f6f7",
+            "style_bubble_color": "#ffffff", "style_text_color": "#1c1f24",
+            "style_dim_color": "#8a9099", "style_radius": 12,
+            "style_font_size": 15, "style_avatar_shape": "circle",
+            "style_time_format": "%H:%M", "style_dark": False,
+        },
+    })
+    tmp = tempfile.mkdtemp(prefix="wd_persist_")
+    live["storage"] = {"storage_root": tmp, "enable_index_db": False}
+    inst = plugin_main.MediaWardenStar(
+        plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+        config=live,
+    )
+    asyncio.run(inst.initialize())
+    # 分组带的 whitelist 群号这次必须真的生效(以前读顶层,永远是空)
+    assert inst.cfg.target_groups == ["961583271"], inst.cfg.target_groups
+    snap, errors, persisted = inst.update_style({"style_width": 800})
+    assert errors == [], errors
+    assert "style_width" in persisted, persisted
+    assert live["render_style"]["style_width"] == 800, live["render_style"]
+    assert "style_width" not in live, "不应在顶层留下重复键"
+    assert calls, "save_config 没被调用"
+    assert inst._forwarder is None or inst._forwarder.cfg.width == 800
+    print("  OK -> 写进 render_style 分组并落盘")
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5372,6 +5439,8 @@ PHASE9 = [
     test_plugin_auto_forward_native_falls_back_to_rebuild,
     test_forwarder_apply_style_and_avatar_shape,
     test_plugin_style_update_and_page,
+    test_config_reads_nested_schema_groups,
+    test_plugin_persist_config_writes_schema_group,
 ]
 
 

@@ -260,7 +260,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.13.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 存档页面(浏览/搜索/取图/发回/删除), 命令仅管理员可用",
+    "群聊素材守门人 v1.14.0: 按群/按人 + 按类型(图片/动图/视频/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染/JSON 保存, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -409,14 +409,25 @@ class MediaWardenStar(Star):
         return self.style_snapshot(), [], persisted
 
     def _persist_config(self, updates: dict) -> list[str]:
-        """写回宿主的插件配置文件(失败只记日志 —— 本次运行仍然生效)."""
+        """写回宿主的插件配置文件(失败只记日志 —— 本次运行仍然生效).
+
+        宿主的插件配置按 `_conf_schema.json` 分组嵌套（`{"render_style": {...}}`），
+        写到顶层既不会生效、还会在文件里留下同名的重复键。所以先找这个键所在的
+        分组，写进它，找不到才写顶层。
+        """
         obj = getattr(self, "_config_obj", None)
         if not isinstance(obj, dict):
             return []
+        groups = [(k, v) for k, v in obj.items() if isinstance(v, dict)]
         written: list[str] = []
         for k, v in (updates or {}).items():
+            target = obj
+            for _group_name, group_value in groups:
+                if k in group_value:
+                    target = group_value
+                    break
             try:
-                obj[k] = v
+                target[k] = v
                 written.append(k)
             except Exception as e:
                 self._log(f"config set {k} failed: {e!r}")

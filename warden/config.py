@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
@@ -214,10 +214,32 @@ class MediaWardenConfig:
                 out.append(v)
         return out
 
+    @staticmethod
+    def _flatten_raw(raw: dict) -> dict:
+        """把 AstrBot 传来的分组配置摊平。
+
+        AstrBot 用 `_conf_schema.json` 的顶层键**分组嵌套**传配置（`{"filter": {...},
+        "render_style": {...}}`），而本类的字段是扁平的。v1.10.0 把 schema 改成
+        分组之后，这里一直只读顶层键 → WebUI 里改的所有值都被静默忽略（当时
+        各项默认值恰好等于用户配置，所以没人发现）。v1.14.0 的「白名单空列表 =
+        不保存」让这个 bug 变成实伤：日志里 groups=0 而配置文件里明明写着群号。
+        规则：同名键**顶层优先**（样式页等直接写顶层的调用方仍有效），嵌套值只
+        在顶层缺失时补进来。
+        """
+        flat: dict = {}
+        for value in raw.values():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    flat.setdefault(sub_key, sub_value)
+        for key, value in raw.items():
+            if not isinstance(value, dict):
+                flat[key] = value
+        return flat
+
     @classmethod
     def from_raw_lenient(cls, raw: dict | None) -> tuple["MediaWardenConfig", List[str]]:
         """按字段容错构造:合法字段保留,非法字段跳过并记录错误."""
-        raw = raw or {}
+        raw = cls._flatten_raw(raw or {})
         known = {f.name for f in cls.__dataclass_fields__.values() if f.init}
         errors: List[str] = []
         kwargs: dict = {}
