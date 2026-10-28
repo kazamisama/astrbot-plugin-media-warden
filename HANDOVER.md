@@ -545,7 +545,7 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `pages/style/*`（新） | 样式编辑器 + 实时预览（样例里带合成头像，才看得出圆/方差别） |
 | `_conf_schema.json` | 6 组 → 9 组（`save_types` / `auto_forward` / `render_style`） |
 | `main.py` | 下载前类型门控、`_save_text()`、`_emit_receipt()`、`_auto_forward()`、`_apply_render_style()` / `style_snapshot()` / `update_style()` / `_persist_config()`（写进键所属的 schema 分组，不在顶层留重复键） |
-| `_smoke.py`（140 项） | 新 Phase 9 十项 |
+| `_smoke.py`（142 项） | 新 Phase 9 十二项 |
 
 ## 4. 验证记录
 
