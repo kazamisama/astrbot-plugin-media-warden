@@ -756,7 +756,7 @@ class MediaWardenStar(Star):
                           msg_id=msg_id, idx=0, ts=ts)
         comp = Component(kind="text", name=f"text_{msg_id}")
         try:
-            await record_store.capture_text(
+            entry = await record_store.capture_text(
                 segments, platform=platform, group_id=group_id, msg_id=msg_id,
                 sender_id=sender_id, sender_name=sender_name,
                 storage_root=root, ts=ts, record_id=rid,
@@ -767,6 +767,12 @@ class MediaWardenStar(Star):
                 f"text save: {type(e).__name__}: {e}", e,
                 subject=f"text:{msg_id}#0", failure_kind="save",
             )
+        if entry.get("reused"):
+            # 同群同内容已经存过:不建新目录,下面直接写进原条目
+            self._log("text duplicate of entry " + str(entry.get("record_id"))
+                      + " (requested " + str(entry.get("duplicate_of_requested")) + ")"
+                      + " — no new dir")
+            rid = str(entry.get("record_id") or rid)
 
         render_name = None
         png: Optional[bytes] = None
@@ -1698,6 +1704,15 @@ class MediaWardenStar(Star):
             except Exception as e:
                 # 存档失败不该让整条消息判失败 —— 渲染图/JSON 仍能救场
                 self._log(f"forward archive failed: {type(e).__name__}: {e!r}")
+            else:
+                if archived is not None:
+                    if archived.get("reused"):
+                        # 同群同内容已经存过:不建新目录,后面直接写进原条目
+                        self._log(
+                            f"forward duplicate of entry {archived.get('record_id')} "
+                            f"(requested {archived.get('duplicate_of_requested')}) — no new dir"
+                        )
+                    rid = str(archived.get("record_id") or rid)
 
         if want_json or not want_image:
             comp_json = Component(

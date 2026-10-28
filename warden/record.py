@@ -122,6 +122,28 @@ def _canonical_sha256(payload: Any) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+def dry_nodes(nodes: list) -> list:
+    """只归一化结构、不落盘也不下图——用来算内容指纹做去重判断。
+
+    形状必须与 capture() 最后写进 record.json 的节点一致(同样含 index/uin/
+    name/time/segments),否则两边的 origin_sha256 对不上。
+    """
+    out: list = []
+    for ni, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            continue
+        uin, name = node_identity(node)
+        segments: list = []
+        for seg in _segments(node):
+            kind = str(seg.get("type") or "").lower()
+            data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+            segments.append({"type": kind, "data": dict(data)})
+        out.append({"index": ni, "uin": uin, "name": name,
+                    "time": int(node.get("time") or 0),
+                    "segments": segments})
+    return out
+
+
 async def capture(
     nodes: list,
     *,
@@ -140,6 +162,19 @@ async def capture(
     """
     captured = int(ts if ts is not None else time.time())
     rid = record_id or make_record_id(group_id, msg_id, captured)
+    # 同群同内容已经存过 → 直接复用那条目录，不再建新目录、也不再下图。
+    # 指纹只归一化结构（段 data 原样），与后面写进 record.json 的节点同形。
+    dry = dry_nodes(nodes)
+    origin = _canonical_sha256(dry)
+    dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id)
+    if dup:
+        existing = load_record(storage_root, dup)
+        if existing:
+            existing = dict(existing)
+            existing["reused"] = True
+            existing["duplicate_of"] = dup
+            existing["duplicate_of_requested"] = rid
+            return existing
     root = record_dir(storage_root, rid)
     assets_dir = os.path.join(root, "assets")
     os.makedirs(assets_dir, exist_ok=True)
@@ -202,20 +237,21 @@ async def capture(
     }
     # 同内容被转发两次 → 后来的记下先来的 id（不合并目录，重发要各用各的 msg_id）
     record["duplicate_of"] = find_duplicate(
-        storage_root, record["origin_sha256"], exclude=rid)
+        storage_root, record["origin_sha256"], exclude=rid, group_id=group_id)
     with open(os.path.join(root, "record.json"), "w", encoding="utf-8") as fh:
         json.dump(record, fh, ensure_ascii=False, indent=2)
     return record
 
 
 def find_duplicate(storage_root: str, origin_sha256: str, *,
-                   exclude: str = "") -> str:
-    """同内容条目先来的那条 id（没有则空串）。
+                   exclude: str = "", group_id: Optional[str] = None) -> str:
+    """同群同内容条目先来的那条 id（没有则空串）。
 
-    扁平文件有 Storage 的 blake2b 去重、索引也有 sha 行，但 `_records/` 这一层
-    一直是「一个 record_id 一个目录」：同一条消息被转发两次就是两个目录、两份
-    图片字节。这里不做合并（两条的 root_msg_id 不同，重发要各用各的），只把
-    「内容相同」记下来，页面能标出重复、也方便以后按需清理。
+    扁平文件有 Storage 的 blake2b 去重、索引也有 sha 行；`_records/` 这一层以前
+    是「一个 record_id 一个目录」，同一条消息被转发两次就是两个目录、两份图片
+    字节。现在 capture()/capture_text() 在这里**直接复用**已有目录（不再建新
+    目录、也不再下图），并把原来的 record_id 记进 `duplicate_of_requested`。
+    只在**同一个群**内比对：同一内容出现在别的群各存一份是对的（每群语境不同）。
     """
     if not origin_sha256:
         return ""
@@ -235,8 +271,13 @@ def find_duplicate(storage_root: str, origin_sha256: str, *,
                     other = json.load(fh)
             except (OSError, ValueError):
                 continue
-            if str(other.get("origin_sha256") or "") == origin_sha256:
-                return str(other.get("record_id") or name)
+            if str(other.get("origin_sha256") or "") != origin_sha256:
+                continue
+            # 只比同一个群:同一份内容在不同群各存一份是对的(每群的存档语境不同),
+            # 跨群合并会让后一个群的记录指向别的群。
+            if group_id is not None and str(other.get("group_id") or "") != str(group_id):
+                continue
+            return str(other.get("record_id") or name)
     return ""
 
 
@@ -262,7 +303,8 @@ def backfill_duplicates(storage_root: str) -> int:
             except (OSError, ValueError):
                 continue
             sha = str(data.get("origin_sha256") or "")
-            dup = seen.get(sha, "") if sha else ""
+            key = (str(data.get("group_id") or ""), sha)
+            dup = seen.get(key, "") if sha else ""
             if str(data.get("duplicate_of") or "") != dup:
                 data["duplicate_of"] = dup
                 try:
@@ -273,7 +315,8 @@ def backfill_duplicates(storage_root: str) -> int:
                 else:
                     changed += 1
             if sha:
-                seen.setdefault(sha, str(data.get("record_id") or name))
+                seen.setdefault((str(data.get("group_id") or ""), sha),
+                                str(data.get("record_id") or name))
             break
     return changed
 
@@ -315,8 +358,6 @@ async def capture_text(
     """
     captured = int(ts if ts is not None else time.time())
     rid = record_id or make_record_id(group_id, msg_id, captured)
-    root = record_dir(storage_root, rid)
-    os.makedirs(root, exist_ok=True)
 
     cleaned: list = []
     for seg in segments or []:
@@ -325,6 +366,19 @@ async def capture_text(
         kind = str(seg.get("type") or "").lower()
         data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
         cleaned.append({"type": kind, "data": dict(data)})
+
+    origin = _canonical_sha256(cleaned)
+    dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id)
+    if dup:
+        existing = load_entry(storage_root, dup)
+        if existing:
+            existing = dict(existing)
+            existing["reused"] = True
+            existing["duplicate_of"] = dup
+            existing["duplicate_of_requested"] = rid
+            return existing
+    root = record_dir(storage_root, rid)
+    os.makedirs(root, exist_ok=True)
 
     entry = {
         "schema_version": ENTRY_SCHEMA_VERSION,
@@ -341,10 +395,10 @@ async def capture_text(
         "assets": [],
         "missing": [],
         "render": None,
-        "origin_sha256": _canonical_sha256(cleaned),
+        "origin_sha256": origin,
     }
     entry["duplicate_of"] = find_duplicate(
-        storage_root, entry["origin_sha256"], exclude=rid)
+        storage_root, origin, exclude=rid, group_id=group_id)
     with open(_entry_path(storage_root, rid), "w", encoding="utf-8") as fh:
         json.dump(entry, fh, ensure_ascii=False, indent=2)
     return entry

@@ -5587,10 +5587,10 @@ def test_page_stats_and_kind_filter_use_real_counts():
         index.close()
     print("  OK -> stats 760 行 / forward 60 / image 700 / text 0")
 
-def test_record_duplicate_flag_and_rerender():
-    """同内容条目记下先来的 id；插件按当前样式补/重画渲染图（老存档也能有图）。"""
+def test_record_duplicate_dedupe_and_rerender():
+    """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
     import asyncio
-    banner("record: 同内容记 duplicate_of；插件重画渲染图（补老存档）")
+    banner("record: 同群重复不建新目录；插件重画渲染图（补老存档）")
     tmp = tempfile.mkdtemp(prefix="wd_rerender_")
     png = b"\x89PNG\r\n\x1a\n" + b"9" * 8
     nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1720000100,
@@ -5609,7 +5609,11 @@ def test_record_duplicate_flag_and_rerender():
         nodes, platform="aiocqhttp", group_id="g1", msg_id="m2",
         storage_root=tmp, fetch_image=fetch_png, ts=1720000200, record_id=rid2))
     assert rec1.get("duplicate_of") == "", rec1
-    assert rec2.get("duplicate_of") == rid1, rec2
+    # 同群同内容:直接复用原条目,不建新目录、也不下图
+    assert rec2.get("reused") is True, rec2
+    assert rec2.get("record_id") == rid1, rec2
+    assert rec2.get("duplicate_of_requested") == rid2
+    assert not os.path.isdir(record_store.record_dir(tmp, rid2)), "重复内容不该建目录"
 
     segs = [{"type": "text", "data": {"text": "一句话"}}]
     e1 = asyncio.run(record_store.capture_text(
@@ -5619,24 +5623,36 @@ def test_record_duplicate_flag_and_rerender():
         segs, platform="aiocqhttp", group_id="g1", msg_id="t2", sender_id="7",
         sender_name="阿七", storage_root=tmp, ts=1720000400))
     assert e1.get("duplicate_of") == "", e1
-    assert e2.get("duplicate_of") == e1["record_id"], e2
+    assert e2.get("reused") is True and e2["record_id"] == e1["record_id"], e2
 
+    # 只有两条条目(两个队的重复都被合并),没有多出来的目录
     data = record_admin.scan_items(tmp)
-    flagged = sorted(it["duplicate_of"] for it in data["items"] if it.get("duplicate_of"))
-    assert flagged == sorted([rid1, e1["record_id"]]), flagged
-    detail = record_admin.record_detail(tmp, rid2)
-    assert detail["duplicate_of"] == rid1, detail.get("duplicate_of")
+    assert data["total"] == 2, data["total"]
+    assert record_admin.record_detail(tmp, rid2) is None
 
-    # 老条目没有这个字段:backfill 补上(只读一遍目录,按时间先后定「先来的」)
+    # 别的群同样的内容 = 另一条记录(每群各存一份),不算重复
+    rec_other = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g2", msg_id="m3",
+        storage_root=tmp, fetch_image=fetch_png, ts=1720000500))
+    assert rec_other.get("reused") is None and rec_other["record_id"] != rid1
+    assert record_store.load_record(tmp, rec_other["record_id"]) is not None
+
+    # 老条目(v1.14.0 之前)没有这个字段且已经各存一份:backfill 只补标记,不删数据
     import json as _json
-    rpath = os.path.join(record_store.record_dir(tmp, rid2), "record.json")
-    with open(rpath, "r", encoding="utf-8") as fh:
+    import shutil as _shutil
+    legacy_rid = record_store.make_record_id("g1", "m9", ts=1720000600)
+    _shutil.copytree(record_store.record_dir(tmp, rid1),
+                     record_store.record_dir(tmp, legacy_rid))
+    lpath = os.path.join(record_store.record_dir(tmp, legacy_rid), "record.json")
+    with open(lpath, "r", encoding="utf-8") as fh:
         legacy = _json.load(fh)
+    legacy.update({"record_id": legacy_rid, "root_msg_id": "m9",
+                   "captured_ts": 1720000600})
     legacy.pop("duplicate_of", None)
-    with open(rpath, "w", encoding="utf-8") as fh:
+    with open(lpath, "w", encoding="utf-8") as fh:
         _json.dump(legacy, fh, ensure_ascii=False)
     assert record_store.backfill_duplicates(tmp) >= 1
-    assert record_store.load_record(tmp, rid2)["duplicate_of"] == rid1
+    assert record_store.load_record(tmp, legacy_rid)["duplicate_of"] == rid1
 
     # 老存档没有 render.png —— 插件按当前样式补一张
     inst = plugin_main.MediaWardenStar(
@@ -5649,16 +5665,65 @@ def test_record_duplicate_flag_and_rerender():
     if inst._forwarder is None:
         print("  SKIP -> PIL unavailable")
         return
-    assert record_store.has_render(tmp, rid2) is None
-    out = asyncio.run(inst.rerender_record(rid2))
+    assert record_store.has_render(tmp, rid1) is None
+    out = asyncio.run(inst.rerender_record(rid1))
     assert out.get("ok") and out.get("has_render"), out
-    assert record_store.has_render(tmp, rid2) == "render.png"
-    assert record_admin.record_detail(tmp, rid2)["has_render"] is True
-    out_text = asyncio.run(inst.rerender_record(e2["record_id"]))
+    assert record_store.has_render(tmp, rid1) == "render.png"
+    assert record_admin.record_detail(tmp, rid1)["has_render"] is True
+    out_text = asyncio.run(inst.rerender_record(e1["record_id"]))
     assert out_text.get("ok"), out_text
     assert asyncio.run(inst.rerender_record("nope"))["ok"] is False
-    print("  OK -> duplicate_of", rid1[:16], "|", e1["record_id"][:16],
+    print("  OK -> 同群重复复用", rid1[:16], "| 纯文本复用", e1["record_id"][:16],
+          "| 跨群另存", rec_other["record_id"][:16],
           "| rerender", out.get("bytes"), "bytes")
+
+
+def test_plugin_forward_dedupe_reuses_entry():
+    """同群同内容转发两次:插件层也只留一个条目目录(第二次复用,不建新目录)。"""
+    import asyncio
+    banner("plugin: 同群同内容转发两次只留一个条目目录")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={"storage_root": td, "match_mode": "blacklist",
+                    "forward_render_mode": "both", "enable_user_avatar": False,
+                    "enable_index_db": False, "reply_preview": False},
+        )
+        asyncio.run(inst.initialize())
+        nodes = [{"sender": {"user_id": 206216334, "nickname": "橘雪莉"},
+                  "time": 1718600000,
+                  "message": [{"type": "text", "data": {"text": "同一段"}},
+                               {"type": "image", "data": {"url": "https://x/a.png"}}]}]
+        orig_download = plugin_main.download
+
+        async def _fake_download(comp, *a, **k):
+            return Downloaded(data=b"\x89PNG\r\n\x1a\n" + b"0" * 8,
+                              mime="image/png", size=16)
+
+        plugin_main.download = _fake_download
+        try:
+            def send(msg_id, ts):
+                ctx = SaveContext(platform="aiocqhttp", group_id="961583271",
+                                  sender_id="2510536451", sender_name="卡兹",
+                                  msg_id=msg_id, idx=0, ts=ts)
+                return asyncio.run(inst._save_forward(
+                    Component(kind="forward", meta={"nodes": nodes}), ctx, None))
+
+            first = send("fwd1", 1718600000)
+            second = send("fwd2", 1718600100)
+        finally:
+            plugin_main.download = orig_download
+
+        assert sorted(r.kind for r in first if r.ok) == ["forward", "forward_render"]
+        assert sorted(r.kind for r in second if r.ok) == ["forward", "forward_render"]
+        rows = record_store.list_records(td)
+        assert len(rows) == 1, [r["record_id"] for r in rows]
+        rid = rows[0]["record_id"]
+        assert not os.path.isdir(record_store.record_dir(
+            td, record_store.make_record_id("961583271", "fwd2", 1718600100)))
+        # 第二条仍然写进了同一个条目(渲染图被复用那条的目录持有)
+        assert record_store.has_render(td, rid) == "render.png"
+        print("  OK -> 两条转发一个条目", rid)
 
 
 PHASE9 = [
@@ -5678,7 +5743,8 @@ PHASE9 = [
     test_record_admin_forward_returns_new_message_id,
     test_record_detail_render_and_uin_reliability,
     test_page_stats_and_kind_filter_use_real_counts,
-    test_record_duplicate_flag_and_rerender,
+    test_record_duplicate_dedupe_and_rerender,
+    test_plugin_forward_dedupe_reuses_entry,
 ]
 
 
