@@ -4557,6 +4557,8 @@ def test_record_admin_scan_stats_detail():
 
     d = record_admin.record_detail(tmp, rid1)
     assert d["node_count"] == 1 and len(d["nodes"]) == 1, d
+    assert d["can_native"] is True, d
+    assert record_admin.record_detail(tmp, rid2)["can_native"] is False
     segs = d["nodes"][0]["segments"]
     assert [s["type"] for s in segs] == ["text", "image"], segs
     assert segs[0]["text"] == "看图"

@@ -154,6 +154,7 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "group_id": str(rec.get("group_id") or ""),
         "root_msg_id": str(rec.get("root_msg_id") or ""),
         "captured_ts": int(rec.get("captured_ts") or 0),
+        "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
         "schema_version": int(rec.get("schema_version") or 0),
         "node_count": int(rec.get("node_count") or len(nodes_out)),
         "asset_count": len(rec.get("assets") or []),
