@@ -38,7 +38,7 @@
 - **原消息失效要落盘**：`page/resend` 的 native 失败且错误含「取不到原消息 / 消息不存在 / 无法找到」时调 `record.set_meta(root, rid, native_unavailable=<ts>)`（写回 `record.json` / `entry.json`）；`record_admin._can_native(rec)` = 有数字短 id 且没有这个标记，条目列表项 / 详情 / 页面按钮都读它。**偶发错误不写**（`_GONE_HINTS` 只认那三种），否则一次超时会把按钮永久禁掉。
 - **动图分类兼容老索引**：v1.14.0 之前 GIF 记成 `kind=image`。`index._asset_filter()` 里 image / gif 两个分类按扩展名互斥切分（`lower(path) LIKE '%.gif'`），`record_admin.flat_item()` 同步把这类行显示成 `gif`，两边口径必须一致，否则「动图」筛不到、「图片」里混着 GIF。
 - **旧数据迁移 `reconcile_flat_renders(root, index)`**：`main.initialize()` 在索引 open 后自动跑一次（日志 `flat forward renders reconciled: N row(s), M file(s) removed, K adopted into entries`）。三条规则：条目**已有** `render.png` → 删字节相同的扁平行（该路径无别的行引用才删文件）；条目**没有** render 且同 msg_id 的扁平行只有一种字节 → 把那张图**收编**成条目 `render.png` 再删行；一份文件被多行共享（`Storage` 去重）→ 只删行、文件留着。删行用 `index.delete_row(asset_id)`（同一个 path 可能有多行，`forget_path` 会连带删干净）。
-- **转发**：`record_admin.native_forward`（跨群原地同样保装扮）/ `rebuild_forward`（丢装扮），原地失败自动回退重建并在回执里说明；页面下拉 `page/groups` 带群名，默认这条记录的原群。自动转发在 `_save_forward` 末尾调 `_auto_forward()`，目标空或等于源群就跳过。
+- **转发**：`record_admin.native_forward`（**只对原群可靠**：2026-10-28 实测同一条存档原群成功、跨群回「消息不存在」——`forwardMsg(peer, …)` 按目标 peer 找消息）/ `rebuild_forward`（丢装扮，跨群要它），原地失败自动回退重建并在回执里说明；页面下拉 `page/groups` 带群名，默认这条记录的原群。自动转发在 `_save_forward` 末尾调 `_auto_forward()`，目标空或等于源群就跳过。
 - **样式**：`Forwarder.apply_style(**10 项)` 改 `_RenderCfg`；`main._apply_render_style()` 在 `initialize()` 与 `update_style()` 后都调；`pages/style/` 实时预览（debounce 180ms，含合成头像），保存写宿主配置（`_persist_config` → `config.save_config()`，失败只记日志）。`dark` 只替换仍是默认值的颜色。
 
 ### 签名变化（改测试/改调用前先看这里）

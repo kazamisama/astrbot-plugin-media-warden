@@ -116,7 +116,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `save_texts` | `false` | 保存纯文本消息（entry.json + render.png 共用一个条目） |
 | `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限制** |
 | `auto_forward_enabled` | `false` | 收到聊天记录后自动转发到目标群（可选功能） |
-| `auto_forward_mode` | `rebuild` | rebuild（重建，无装扮）/ native（跨群原地，失败自动回退重建） |
+| `auto_forward_mode` | `rebuild` | rebuild（重建，无装扮）/ native（先试原地保装扮；跨群基本必失败，会自动回退重建） |
 | `forward_target_groups` | `[]` | 自动转发的目标群（可多个，空 = 不转发） |
 | `style_width` | `720` | 渲染画布宽度（200..3000） |
 | `style_bg_color` | `#f5f6f7` | 背景色 |
@@ -261,7 +261,8 @@ python -m pytest -q _smoke.py
 - **转发节点图里的老图**（v1.9.8/v1.9.9 定论）：NapCat 自己不下载转发节点里的图片字节（`get_forward_msg` 只给元数据），`get_image` 也救不了（它先查 `FileNapCatOneBotUUID` 这个**进程内内存 map**，节点图的 MD5 从未进过那里，直接 `file not found`）。**但接收端 QQ 客户端会在随后几秒~几十秒把图落到本地缓存** —— v1.9.9 的「迟到缓存重查」就是等这个（`late local cache hit after Ns`）。仍失败的只剩「客户端自始至终没下过那张图」这一种。**普通图片**不受此限：QQ 客户端会下，v1.9.5 能命中 `Image/C2C/Image2`
 - **QQ 本地缓存补救依赖 QQ 客户端自己的缓存目录**（`Tencent Files/<QQ号>/…`，Windows 默认在“文档”下）：缓存被清理、机器人跑在与 QQ 不同的机器上、或消息段的 `data.file` 不是 32 位 MD5 时，这条路用不上，会照旧返回失败
 - **合并转发里的装扮（气泡 / 挂件 / 头像）**：2026-10-27 实测两种重发方式结论不同 —— ①**重建节点**（存档 → `Nodes` → `send_group_forward_msg`）只有昵称 + 内容，装饰全丢；②**原地转发**（`forward_group_single_msg`）让 QQ 自己把原消息再转发一次，气泡、挂件、头像、原时间戳全部保留。因此 `/warden 重发` 默认走原地，**但原地依赖原消息仍在服务端**：消息被撤回 / 过期 / 清理后只能回落存档重建（装饰丢失）。
-- **跨群「原地」转发同样受「原消息还在」约束**：2026-10-28 实测，拿 2026-10-27 的存档往另一个群 `native` 转发，`get_msg` 直接回「消息不存在」（原消息已过期），回退「重建」才发出去。要跨群保留装扮，前提是那条原消息还在服务端。
+- **跨群「原地」转发基本必然失败**：2026-10-28 再实测同一条存档 —— 发回**原群** `native` 成功（气泡/挂件都在），发到**另一个群**回「消息不存在」。原因是 `forward_group_single_msg` → `MsgApi.forwardMsg(peer, …)` 是**按目标 peer** 去找那条消息的，别处根本没有它。所以跨群就别指望保装扮：直接「重建转发」；自动转发选 `native` 时每个群都会先白试一次再回退。
+- **同一条「原地」还受「原消息还在」约束**：消息被撤回 / 过期 / 清理后，回原群也会失败，只能回落重建（装饰丢失）。
 - **两套 message_id 不能混用**：`forward_group_single_msg` 只认 OneBot 层的短 `message_id`（如 `1481691615`），段里的长 `msgId`（`7701368446137848000`）会回「无法找到消息」；而 `get_forward_msg` 认的正是段里的长 id。插件里 `root_msg_id` 一律存短的，`get_msg` 只用于核验目标是不是合并转发。
 - 存档**不解析视频 / 语音字节**（还原时是占位文本）；节点里只有 `file=<md5>` 没有可下载 url 的图会进 `missing`（NapCat 本来就不下节点图）
 - 高并发群发场景尚未压测
