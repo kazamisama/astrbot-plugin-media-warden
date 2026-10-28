@@ -1,17 +1,39 @@
-# 交接文档 · astrbot-plugin-media-warden v1.14.0
+# 交接文档 · astrbot-plugin-media-warden v1.15.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.14.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.14.0 是按类型采集 + 分类管理 + 样式页，**变化见下面 §1.-3**；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.15.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），**变化见下面 §1.-4**；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 / v1.12.0（`7396611` + `f3368ca`）/ v1.13.0（八笔小步提交）/ v1.14.0（`ba83bbf` → `4ef1afe` → `b8cb445` → `18e8544`）各一批提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=20, total=150)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=151)`
 
 
-## 1.-3 v1.14.0（按类型采集 + 分类管理 + 样式页，当前版本）
+## 1.-4 v1.15.0（配置页重做，当前版本）
+
+用户诉求（m03924）：「默认 native；config schema 整体改一下，要清楚简洁易懂，可以改一下各个配置的位置」。
+
+### 做了什么
+
+- **九组重排**（配置页顺序 = 读的顺序）：① `filter` 监听范围 → ② `save_types` 保存哪些类型 → ③ `storage` 存储与索引 → ④ `download` 下载与重试 → ⑤ `render` 聊天记录渲染 → ⑥ `render_style` 渲染样式 → ⑦ `auto_forward` 自动转发 → ⑧ `reply` 保存后的回执 → ⑨ `logging` 日志。每组 `description` 直接写序号。
+- **hint 重写**：只写「这一项现在会怎样」，删掉版本考古与实现细节。`_conf_schema.json` 从 46 键降到 45 键（删 `forward_image_width`）。
+- **`auto_forward_mode` 默认 `native`**（`warden/config.py`）。实测约束写进 hint：native 只对原群可靠，跨群基本必失败并自动回退 rebuild。
+- **`forward_image_width` 彻底删除**：`warden/config.py` 字段与校验、`main.py` 里 `Forwarder(width=…)` 改用 `self.cfg.style_width`、`style_snapshot()` 里那一行。画布宽度只剩 `style_width`。
+- **`forward_image_engine` 选项收成 `["pil"]`**；`main.initialize()` 对旧值（playwright/wkhtml）仍打告警并继续用 PIL。
+- **一次性配置组迁移** `main._migrate_config_groups()`（`initialize()` 最前面调用）：旧 `forward` 组整组并进 `render`（已存在的键不覆盖、`forward_image_width` 丢弃），`obj.pop("forward")` 后 `save_config()` 写一次；幂等。日志 `config groups migrated: forward -> render (N key(s))`。
+
+### 为什么这样迁移
+
+读端 `MediaWardenConfig._flatten_raw()` 摊平 raw 里**所有** dict 值，所以组改名后读的时候仍能读到老值；但 AstrBot WebUI 一保存就按新 schema 重写文件，老组会消失 → 启动时必须把值挪进新组并保存，否则用户「打开 WebUI 改个别的」就会静默丢配置。
+
+### 踩坑
+
+- `test_conf_schema_covers_all_config_fields` 断言 schema 字段集合 == dataclass 可配字段集合，删 schema 键必须同时删 dataclass 字段。
+- 迁移测试用 `main.MediaWardenStar._migrate_config_groups(fake)` 这种 unbound 调用（插件模块名是 `astrbot_plugin_media_warden_smoke`）。
+- 改表格文档别用 `Set-Content` 全量重写后立刻 `tools.edit` —— edit 的读缓存会失效，必须先 `read` 再 `edit`。
+## 1.-3 v1.14.0（按类型采集 + 分类管理 + 样式页）
 
 目标（用户 m02240）：只存**特定群 / 特定人**发来的**特定类型** —— 图片 / 动图 / 视频 / 纯文本 / 聊天记录 / 文档；纯文本与聊天记录的「正常形式」都是 Pillow 渲染（这点要标清）；dashboard 按类型**分类管理**；聊天记录的两种形态共用一个条目；结构化条目能「去气泡重发」也能自动转发到别的群；渲染样式单独一页可改。
 
@@ -563,13 +585,13 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `pages/style/*`（新） | 样式编辑器 + 实时预览（样例里带合成头像，才看得出圆/方差别） |
 | `_conf_schema.json` | 6 组 → 9 组（`save_types` / `auto_forward` / `render_style`） |
 | `main.py` | 下载前类型门控、`_save_text()`、`_emit_receipt()`、`_auto_forward()`、`_apply_render_style()` / `style_snapshot()` / `update_style()` / `_persist_config()`（写进键所属的 schema 分组，不在顶层留重复键） |
-| `_smoke.py`（150 项） | 新 Phase 9 二十项 |
+| `_smoke.py`（151 项） | 新 Phase 9 二十一项 |
 
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=20, total=150)`（v1.14.0）
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=151)`（v1.14.0）
 - v1.14.0 本机实测（2026-10-28）：重载后日志 `loaded: v1.14.0 | mode=whitelist | groups=1 users=1`、`page=on`（修复前同一条是 `groups=0 users=0` —— 配置根本没被读到）；`/api/plug/astrbot-plugin-media-warden/page/{stats,groups,style,records,style_preview}` 全部 200（stats：3 条存档 / 7 节点 / 4 资产 / flat 2000；groups：collect `961583271` 与 llm `256678737`，各 3 人；style_preview 返回 `data:image/png;base64,…`）；`/api/plugin/page/entry?name=…&page=style` 返回 `content_path`（标题由前端按 i18n 的 `pages.style.title` 解析）。**没做浏览器内点击验证**。
 - 本机插件配置在 `C:\Users\chiriu\.astrbot\data\config\astrbot-plugin-media-warden_config.json`（按 schema 分组嵌套）；当前值 `target_groups=["961583271"]`、`target_users=["2510536451"]`、`match_mode=whitelist` —— 修复配置读取后，抓取范围就是「collect 群 + 風見かずき」。
 - v1.14.0 跨群转发实测（2026-10-28，pages API 走真实 bot）：对 2026-10-27 的存档做 `mode=native` → 目标群 `256678737`，`get_msg` 直接回 **「消息不存在」**（原消息已过期；插件先核验再转发，所以没有乱发）；同一条记录 `mode=rebuild` → `ok: true`，`send_group_forward_msg` 送 3 个节点进 llm 群。结论：跨群「原地」同样受「原消息还在」约束，`_auto_forward` 的 native 失败回退 rebuild 是必须的（llm 群里留了一条测试转发，可手动撤回）。

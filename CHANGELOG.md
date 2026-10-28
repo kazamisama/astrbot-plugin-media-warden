@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.15.0
+
+配置页重做：把 9 组配置按「用户想事情的顺序」重排，砍掉重复与假选项，默认值按实测结论调整。功能行为除下面两处外不变。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=151)`。
+
+### 升级前必读（行为/配置变化）
+
+- **`auto_forward_mode` 默认 `rebuild` → `native`**：开自动转发时优先「转发原消息」保气泡/挂件。注意实测结论：native **只对原群可靠**，而自动转发的目标群通常就是别的群 —— 每个跨群目标会先失败一次再自动回退 rebuild，回执里仍会说明。想省这一次请求就手动改回 `rebuild`。
+- **`forward_image_width` 删除**：它一直是死旋钮 —— `main.initialize()` 先按它构造 Forwarder，紧接着 `_apply_render_style()` 用 `style_width` 覆盖。画布宽度只有 `style_width` 一个真源。旧配置文件里留着这个键不会报错，只是不再被读。
+- **配置分组 `forward` → `render`**：插件启动时会把旧 `forward` 组的值一次性并进 `render`（已存在的键不覆盖），然后删掉旧组并保存一次配置；日志 `config groups migrated: forward -> render (N key(s))`。幂等。
+
+### Changed
+
+- **九组顺序**：① 监听范围（`filter`）→ ② 保存哪些类型（`save_types`）→ ③ 存储与索引（`storage`）→ ④ 下载与重试（`download`）→ ⑤ 聊天记录渲染（`render`）→ ⑥ 渲染样式（`render_style`）→ ⑦ 自动转发（`auto_forward`）→ ⑧ 保存后的回执（`reply`）→ ⑨ 日志（`logging`）。每组标题直接写序号，扫一眼就知道从哪开始。
+- **hint 全部改成「这一项现在会怎样」**：删掉版本考古（`v1.9.0+` / `v1.7.1: 5 → 10` / 「关闭后行为回到 v1.8.x」）与实现细节，替成一句可判断后果的话（例：白名单空列表 = 不存；`native` 跨群基本必失败并自动回退）。
+- **组内顺序按使用频率**：`reply_preview` 在 `reply_to_original` 之前（前者更常开）；下载组把超时/重试/并发放前面，补救链放最后；渲染组把「存成什么」放最前，头像参数在后。
+- **`forward_image_engine` 选项收成 `["pil"]`**：只有 PIL 实现，之前摆出 playwright/wkhtml 两个假选项只会让人白试。旧配置里的这两个值仍会被接受并打一条告警（不静默生效）。
+- **`save_types` 里文档白名单紧跟 `save_files`**：先「存不存文档」再「存哪些扩展名」，不再隔开。
+
+### Tests
+
+- 冒烟 150 → **151 项**（Phase 9: 21）：新增「schema 分组顺序 + 宽度旋钮唯一 + `auto_forward_mode` 默认 native」「旧 `forward` 组迁进 `render`（不覆盖已有值、丢弃旧宽度键、幂等）」；枚举断言跟着改成 `render` 组与 `["pil"]`。
 ## v1.14.0
 
 「存什么 / 怎么存 / 怎么看」三件事一起做完：类型门控 + 六类开关，纯文本与聊天记录统一成「一个条目两种形态」，页面按类型分类管理并支持发到别的群，渲染样式搬进独立页面。

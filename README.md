@@ -26,6 +26,7 @@
 - v1.11.0：**第二轮审计修复** —— Windows 回执路径行（`reporter.py` 里的反斜杠字面量多转义了一层，Windows 路径永远算不出公共目录）、转发渲染失败入库、`/warden list` 显示 sha16、16-hex msg_id 可回退查询、file 段 http 链接兜底、落盘原子写入；冒烟 115 项
 - v1.12.0：**聊天记录存档 + 原地重发** —— 引用合并转发发 `/warden 存档` 存成自包含目录（节点结构 + 图片字节）；`/warden 重发` 默认原地转发（保气泡/挂件/头像），失败回退按存档重建；冒烟 127 项
 - v1.13.0：**dashboard 存档页面** —— 插件详情里的「页面」直接浏览/搜索/预览/重发/删除存档，图片走鉴权接口按需取；冒烟 130 项
+- v1.15.0：**配置页重做** —— schema 九组按「监听 → 存什么 → 存到哪 → 下载 → 渲染 → 样式 → 自动转发 → 回执 → 日志」排序，每组标题带序号、hint 只写现状；删掉与 `style_width` 重复的 `forward_image_width`，渲染引擎选项收成 `pil`（只有它实现），`auto_forward_mode` 默认改成 `native`（优先保装扮，失败自动回退）；启动时把旧 `forward` 组的值一次性并进 `render` 组；冒烟 151 项
 - v1.14.0：**按类型采集 + 分类管理 + 样式页** —— 六类保存开关（图片/动图/视频/纯文本/聊天记录/文档）与扩展名白名单，白名单空列表语义反转为「不保存」；纯文本与聊天记录都是「一个条目两种形态」（结构化 JSON + Pillow 渲染图）；dashboard 按类型分类管理（含老的扁平落盘文件），带群名的目标群下拉与两种转发；可选的自动转发；独立的渲染样式页（宽度/字号/圆角/主色/头像形状/时间格式/深色 + 实时预览）；「重渲染」按当前样式补/刷新旧存档的渲染图，同群同内容不再重复建目录，聊天记录的渲染图只存在于条目里（不再单独成一张「图片」）；冒烟 150 项
 
 ## 目录
@@ -76,58 +77,99 @@ pip install Pillow  # forwarder 自绘气泡
 
 ## 配置
 
-AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。schema 按 9 组组织：监听范围 / 保存与索引 / 下载与并发 / 日志 / 转发渲染 / 回复行为 / **保存类型** / **自动转发** / **渲染样式**。
+AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。schema 按 **9 组**组织，顺序就是配置页里的顺序：① 监听范围 → ② 保存哪些类型 → ③ 存储与索引 → ④ 下载与重试 → ⑤ 聊天记录渲染 → ⑥ 渲染样式 → ⑦ 自动转发 → ⑧ 保存后的回执 → ⑨ 日志。每组标题都带序号，hint 只写「这一项现在会怎样」。
 
 > **v1.14.0 语义变化**：白名单模式下 **空列表 = 不保存**（以前是「不限」）。要「全存」请用 `match_mode=blacklist`（空列表 = 不限），或把 `target_users` 写成 `["*"]`。
 
+**① 监听范围（`filter`）**
+
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `target_groups` | `[]` | 群白名单/黑名单，格式 `platform:group_id` 或裸 ID |
-| `target_users` | `[]` | 用户白名单/黑名单（sender.user_id） |
-| `match_mode` | `whitelist` | `whitelist` \| `blacklist` |
-| `storage_root` | `data/warden` | 落盘根目录，相对 AstrBot 工作目录 |
-| `filename_pattern` | 见下 | 命名模板 |
-| `max_file_size_mb` | `100` | 单文件大小上限（必须 >= 1） |
-| `dedupe` | `true` | 基于 blake2b 内容指纹去重 |
-| `enable_index_db` | `true` | 是否启用 SQLite 索引 |
-| `index_reuse_saved` | `false` | 同消息同下标已落盘过且文件仍在时直接复用（v1.9.0+） |
-| `download_retries` | `2` | transient 错误重试次数（>= 0） |
-| `max_concurrent` | `4` | 并发下载上限（>= 1） |
-| `download_timeout_s` | `30` | 单次下载超时（> 0） |
-| `get_media_fallback` | `true` | 下载失败后的补救链：QQ 本地缓存（按 MD5）→ OneBot `get_image` / `get_msg` 重取链接 → 组件本地副本 → 迟到缓存重查（v1.9.0+，v1.9.1 修入参，v1.9.2 加 `get_msg`，v1.9.9 加迟到重查） |
-| `forward_render_mode` | `image` | `image` \| `json` \| `both` |
-| `forward_image_engine` | `pil` | `pil` \| `playwright` \| `wkhtml`（仅 `pil` 实现；选别的会在启动日志明确告警并继续用 PIL 渲染，不静默降级 JSON） |
-| `forward_image_width` | `720` | 转发渲染图宽度（>= 1） |
-| `forward_render_max_nodes` | `30` | 单条转发渲染最大节点数，超限降级 JSON（>= 1） |
-| `enable_user_avatar` | `true` | 是否在转发渲染中绘制节点头像 |
+| `match_mode` | `whitelist` | `whitelist`（群+人都命中才存，两个列表都空 = 不存）\| `blacklist`（任一维度命中就跳过，列表空 = 不限） |
+| `target_groups` | `[]` | 要保存的群，`platform:group_id` 或裸群号 |
+| `target_users` | `[]` | 要保存的发送人 user_id；`*` = 该群所有人 |
+
+**② 保存哪些类型（`save_types`）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `save_images` | `true` | 静态图片（动图走下一项） |
+| `save_gifs` | `true` | 动图（GIF / APNG / 动态 WebP；按扩展名+字节判定，不依赖 PIL） |
+| `save_videos` | `true` | 视频 |
+| `save_files` | `true` | 文档（群文件），扩展名受 `doc_ext_whitelist` 约束 |
+| `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限** |
+| `save_texts` | `false` | 纯文本消息：`entry.json` + `render.png`，共用一个条目 |
+| `save_forwards` | `true` | 聊天记录：`record.json` + `render.png`，共用一个条目 |
+
+**③ 存储与索引（`storage`）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `storage_root` | `data/warden` | 落盘根目录（相对 AstrBot 工作目录） |
+| `filename_pattern` | 见下 | 扁平文件的命名模板 |
+| `max_file_size_mb` | `100` | 单文件上限（>= 1）；头像另有固定 5MB 上限 |
+| `dedupe` | `true` | 相同内容只落盘一份（blake2b 指纹 + `.ptr` 指针） |
+| `enable_index_db` | `true` | 启用 SQLite 索引；关掉后 `/warden list/stats/export/lookup/prune` 与页面分类管理都不可用 |
+| `index_reuse_saved` | `false` | 同一消息同一下标已存过且文件仍在 → 跳过下载（文件被删会明确报错） |
+
+**④ 下载与重试（`download`）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `download_timeout_s` | `30` | 单次下载超时（秒） |
+| `download_retries` | `2` | 只重试超时/连接错/5xx/429，4xx 直接失败 |
+| `max_concurrent` | `4` | 同一条消息的并发下载数（节点图与头像共用） |
+| `get_media_fallback` | `true` | 下载失败的补救链：QQ 本地缓存（按 MD5）→ `get_image` / `get_msg` 换新链接 → 组件本地副本 → 5s/20s 后再查本地缓存 |
+
+**⑤ 聊天记录渲染（`render`）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `forward_render_mode` | `image` | `image`（只出渲染图）\| `json`（只存结构化）\| `both`（两者都留，推荐） |
+| `forward_render_max_nodes` | `30` | 超过就只存结构化、不出图 |
+| `forward_image_engine` | `pil` | 只有 `pil`（纯 Python，无外部依赖）；旧配置里的 playwright/wkhtml 会打告警并继续用 PIL |
+| `enable_user_avatar` | `true` | 渲染时画头像（qlogo.cn，失败静默跳过） |
 | `avatar_size` | `36` | 头像直径（像素） |
-| `avatar_timeout_s` | `10` | 单头像抓取超时 |
-| `avatar_cache_size_mb` | `50` | 头像缓存容量上限（>= 0） |
-| `avatar_platforms` | `["aiocqhttp", "qq_official"]` | 允许抓取头像的平台白名单 |
-| `reply_to_original` | `false` | 是否用 Reply 引用原消息回复（v1.10.0 起真正生效；适配器不支持 `Reply` 或拿不到 msg_id 时退化为纯文本；默认关闭 = v1.9.x 的实际行为） |
-| `reply_preview` | `true` | 是否附带第一张图作预览 |
-| `at_on_save_failure` | `true` | 保存失败时 @ 触发消息的监听对象 |
-| `log_to_stdout` | `true` | 是否把匹配消息打到日志 |
-| `save_images` | `true` | 保存静态图片（动图走 save_gifs） |
-| `save_gifs` | `true` | 保存动图（gif / apng / 动画 webp；按扩展名 + 字节特征判定，不依赖 PIL） |
-| `save_videos` | `true` | 保存视频 |
-| `save_files` | `true` | 保存文档文件（受 doc_ext_whitelist 约束） |
-| `save_forwards` | `true` | 保存合并转发（落 _records/<id>/，一个条目两种形态：record.json + render.png） |
-| `save_texts` | `false` | 保存纯文本消息（entry.json + render.png 共用一个条目） |
-| `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限制** |
-| `auto_forward_enabled` | `false` | 收到聊天记录后自动转发到目标群（可选功能） |
-| `auto_forward_mode` | `rebuild` | rebuild（重建，无装扮）/ native（先试原地保装扮；跨群基本必失败，会自动回退重建） |
-| `forward_target_groups` | `[]` | 自动转发的目标群（可多个，空 = 不转发） |
-| `style_width` | `720` | 渲染画布宽度（200..3000） |
+| `avatar_timeout_s` | `10` | 头像抓取超时（qlogo 冷启动可能要 5s+） |
+| `avatar_cache_size_mb` | `50` | 头像缓存上限，超出按 mtime LRU 删 |
+| `avatar_platforms` | `["aiocqhttp", "qq_official"]` | 允许抓头像的平台（napcat/lagrange 的平台名是 `aiocqhttp`） |
+
+**⑥ 渲染样式（`render_style`）** —— dashboard 的「渲染样式」页有实时预览，建议在那里调。
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `style_width` | `720` | 画布宽度（200..3000）；**唯一的宽度旋钮**（旧的 `forward_image_width` 已删） |
+| `style_font_size` | `15` | 正文字号（8..48） |
+| `style_radius` | `12` | 气泡圆角（0..96） |
+| `style_avatar_shape` | `circle` | 头像形状 `circle` / `square` |
+| `style_time_format` | `%H:%M` | 时间格式（strftime） |
+| `style_dark` | `false` | 深色配色（只替换仍是默认值的颜色） |
 | `style_bg_color` | `#f5f6f7` | 背景色 |
 | `style_bubble_color` | `#ffffff` | 气泡色 |
 | `style_text_color` | `#1c1f24` | 正文色 |
 | `style_dim_color` | `#8a9099` | 次要文字/时间色 |
-| `style_radius` | `12` | 气泡圆角（0..96） |
-| `style_font_size` | `15` | 正文字号（8..48） |
-| `style_avatar_shape` | `circle` | 头像形状 circle / square |
-| `style_time_format` | `%H:%M` | 时间格式（strftime） |
-| `style_dark` | `false` | 深色配色（只替换仍是默认值的颜色，不动你自己挑的色） |
+
+**⑦ 自动转发（`auto_forward`，可选）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `auto_forward_enabled` | `false` | 收到聊天记录后自动转发到目标群 |
+| `forward_target_groups` | `[]` | 目标群（可多个，空 = 不转发） |
+| `auto_forward_mode` | `native` | `native`（转发原消息，保气泡/挂件；**只对原群可靠**，跨群基本必失败并自动回退）\| `rebuild`（按存档重拼，无装扮，永远可用） |
+
+**⑧ 保存后的回执（`reply`）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `reply_preview` | `true` | 回执附图预览（优先渲染图，其次第一张图） |
+| `reply_to_original` | `false` | 回执用 Reply 引用原消息（适配器不支持时退化为纯文本） |
+| `at_on_save_failure` | `true` | 有失败项时 @ 触发消息的人 |
+
+**⑨ 日志（`logging`）**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `log_to_stdout` | `true` | 把插件日志打到标准输出；关掉后失败仍进索引，可用 `/warden fail` 查 |
 
 **默认命名模板**：
 
@@ -235,7 +277,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **150 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 20），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **151 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 21），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值；**宿主的 schema 分组嵌套配置**能被摊平读取（顶层同名键优先）
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
