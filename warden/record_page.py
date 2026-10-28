@@ -84,6 +84,35 @@ class RecordPageApi:
 
     # ---------------- 处理函数 ----------------
 
+    # 页面类型 → 索引库里真实的 kind 值。老版本把转发渲染图单独记成
+    # forward_render、把转发 JSON 记成 forward_json，页面把它们并到
+    # 「图片 / 聊天记录」两类里，否则这两批文件在页面上永远点不到。
+    _FLAT_KIND_MAP = {
+        "image": ["image", "forward_render"],
+        "gif": ["gif"],
+        "video": ["video"],
+        "file": ["file"],
+        "voice": ["voice"],
+        "forward": ["forward", "forward_json"],
+    }
+
+    def _flat_kinds(self, kind: str):
+        """None = 不过滤；[] = 这一类没有扁平文件（纯文本）。"""
+        k = str(kind or "").strip()
+        if not k:
+            return None
+        return list(self._FLAT_KIND_MAP.get(k, []))
+
+    def _flat_summary(self, *, kinds=None, group=None, q="") -> dict:
+        """索引库的行数/总字节（同过滤条件）—— 页面顶部数字用这个，别数一页。"""
+        index = getattr(self.plugin, "_index", None)
+        if index is None:
+            return {"total": 0, "bytes": 0}
+        try:
+            return index.summary(kinds=kinds, group_id=group or None, q=q)
+        except Exception:
+            return {"total": 0, "bytes": 0}
+
     def _flat_rows(self, *, kinds=None, group=None, q="", limit=500) -> list:
         """索引库里的扁平落盘资产（图片/动图/视频/文档）—— 没有索引时返回空。"""
         index = getattr(self.plugin, "_index", None)
@@ -97,7 +126,9 @@ class RecordPageApi:
 
     async def get_stats(self):
         data = record_admin.stats(self._root)
-        data["flat_total"] = len(self._flat_rows(limit=2000))
+        flat = self._flat_summary()
+        data["flat_total"] = int(flat["total"])
+        data["flat_bytes"] = int(flat["bytes"])
         return {"status": "ok", "data": data}
 
     async def list_records(self):
@@ -105,14 +136,22 @@ class RecordPageApi:
         kind = request.query.get("kind", "") or ""
         group = request.query.get("group", "") or ""
         q = request.query.get("q", "") or ""
-        flat_kinds = [kind] if kind in ("image", "gif", "video", "file", "voice") else None
+        # 过滤必须在 SQL 里做：以前先取一页（500 行）再在 Python 里筛类型，
+        # 于是「聊天记录」只出最新窗口里那几条、「图片」永远显示 500。
+        flat_kinds = self._flat_kinds(kind)
+        have_flat = flat_kinds is None or bool(flat_kinds)
+        flat_rows = (self._flat_rows(kinds=flat_kinds, group=group, q=q, limit=2000)
+                     if have_flat else [])
+        flat_total = (self._flat_summary(kinds=flat_kinds, group=group, q=q)["total"]
+                      if have_flat else 0)
         data = record_admin.scan_items(
             self._root,
             q=q, group=group, kind=kind,
             source=request.query.get("source", "") or "",
             limit=request.query.get("limit", "50", int) or 50,
             offset=request.query.get("offset", "0", int) or 0,
-            flat_rows=self._flat_rows(kinds=flat_kinds, group=group, q=q),
+            flat_rows=flat_rows,
+            flat_total=flat_total,
         )
         return {"status": "ok", "data": data}
 

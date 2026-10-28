@@ -72,6 +72,19 @@ def node_identity(node: dict) -> tuple[str, str]:
     return str(uin), str(name)
 
 
+def uin_reliable(nodes: list) -> bool:
+    """这条记录里的 uin 是否可信。
+
+    NapCat 的 get_forward_msg 在某些转发里给**每个节点同一个 user_id**
+    （实测：不同昵称的节点全是同一个号），那是转发创建者/占位值，不是发送者。
+    「一个 uin 对应多个昵称」就说明这个字段不可信 —— 页面不该把它当发送者
+    QQ 号显示，否则会看成「两个人共用一个号」。
+    """
+    uins = {str(n.get("uin") or "") for n in nodes if isinstance(n, dict)}
+    names = {str(n.get("name") or "") for n in nodes if isinstance(n, dict)}
+    return not (len(uins) == 1 and len(names) > 1)
+
+
 def image_ref(data: dict) -> Optional[str]:
     """段里能拿去下载的图片地址：优先 url，其次 file（偶尔只给 http）。"""
     url = data.get("url")
@@ -184,6 +197,7 @@ async def capture(
         "assets": assets,
         "missing": missing,
         "render": None,
+        "uin_reliable": uin_reliable(out_nodes),
         "origin_sha256": _canonical_sha256(out_nodes),
     }
     with open(os.path.join(root, "record.json"), "w", encoding="utf-8") as fh:

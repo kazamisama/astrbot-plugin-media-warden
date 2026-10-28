@@ -5474,6 +5474,118 @@ def test_record_admin_forward_returns_new_message_id():
     assert not bad["ok"] and "没权限" in bad["error"], bad
     print("  OK -> native/rebuild 都带回 new_message_id，failed 不再静默")
 
+def test_record_detail_render_and_uin_reliability():
+    banner("record_admin: 详情带 has_render / uin_reliable（渲染图能点开、假 uin 不显示）")
+    import asyncio
+    tmp = tempfile.mkdtemp(prefix="warden_detail_")
+
+    async def _no_png(_data):
+        return None
+
+    # 1) NapCat 的「所有节点同一个 user_id」—— 不可信
+    same = [
+        {"sender": {"user_id": 1094950020, "nickname": "甲"}, "time": 1,
+         "message": [{"type": "text", "data": {"text": "a"}}]},
+        {"sender": {"user_id": 1094950020, "nickname": "乙"}, "time": 2,
+         "message": [{"type": "text", "data": {"text": "b"}}]},
+    ]
+    rid = record_store.make_record_id("g1", "m1", ts=1720000000)
+    rec = asyncio.run(record_store.capture(
+        same, platform="aiocqhttp", group_id="g1", msg_id="m1",
+        storage_root=tmp, fetch_image=_no_png, ts=1720000000, record_id=rid))
+    assert rec["uin_reliable"] is False, rec.get("uin_reliable")
+    d = record_admin.record_detail(tmp, rid)
+    assert d["uin_reliable"] is False, d["uin_reliable"]
+    assert d["has_render"] is False and d["render"] == "", d
+    # 详情以前没有 has_render/render —— 列表标了「有渲染图」，点进去却没有切换标签
+    assert record_store.save_render(tmp, rid, b"\x89PNG\r\n\x1a\n00") == "render.png"
+    d2 = record_admin.record_detail(tmp, rid)
+    assert d2["has_render"] is True and d2["render"] == "render.png", d2
+
+    # 2) uin 不同 -> 可信；名字相同、uin 不同也算可信
+    diff = [
+        {"sender": {"user_id": 11, "nickname": "同名"}, "time": 1,
+         "message": [{"type": "text", "data": {"text": "a"}}]},
+        {"sender": {"user_id": 22, "nickname": "同名"}, "time": 2,
+         "message": [{"type": "text", "data": {"text": "b"}}]},
+    ]
+    rid2 = record_store.make_record_id("g1", "m2", ts=1720000010)
+    rec2 = asyncio.run(record_store.capture(
+        diff, platform="aiocqhttp", group_id="g1", msg_id="m2",
+        storage_root=tmp, fetch_image=_no_png, ts=1720000010, record_id=rid2))
+    assert rec2["uin_reliable"] is True, rec2.get("uin_reliable")
+    assert record_admin.record_detail(tmp, rid2)["uin_reliable"] is True
+
+    # 3) 纯文本条目：有渲染图时 has_render=True（单节点 uin 一律可信）
+    entry = asyncio.run(record_store.capture_text(
+        [{"type": "text", "data": {"text": "一句话"}}],
+        platform="aiocqhttp", group_id="g2", msg_id="m3", sender_id="u3",
+        sender_name="丙", storage_root=tmp, ts=1720000020))
+    etid = entry["record_id"]
+    ed = record_admin.record_detail(tmp, etid)
+    assert ed["kind"] == "text" and ed["has_render"] is False
+    record_store.save_render(tmp, etid, b"\x89PNG\r\n\x1a\n01")
+    assert record_admin.record_detail(tmp, etid)["has_render"] is True
+    print("  OK -> 同 uin 多昵称=不可信 / 有 render 才给标签 / 纯文本同理")
+
+
+def test_page_stats_and_kind_filter_use_real_counts():
+    banner("record_page: 统计与类型筛选用真实总数（不再是一页的行数）")
+    import asyncio
+    from warden.index import AssetIndex
+    tmp = tempfile.mkdtemp(prefix="warden_counts_")
+    base = os.path.join(tmp, "g1", "u1")
+    os.makedirs(base, exist_ok=True)
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+    total_bytes = 0
+
+    def _mk(name, kind, size, ts):
+        nonlocal total_bytes
+        path = os.path.join(base, name)
+        with open(path, "wb") as fh:
+            fh.write(b"x" * size)
+        total_bytes += size
+        index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                     msg_id="m" + name, idx=0, kind=kind, path=path, size=size,
+                     sha16="b" * 16)
+
+    # 700 张图（时间较新）+ 60 个转发 JSON（时间最老）: 老实现先取最新 500 行
+    # 再在 Python 里筛类型，于是「聊天记录」一条都出不来、「图片」永远 500。
+    for i in range(700):
+        _mk("i%04d.png" % i, "image", 4, 1720000000 + i)
+    for i in range(60):
+        _mk("f%04d_forward_json.json" % i, "forward_json", 8, 1719000000 + i)
+
+    class _Pl:
+        def __init__(self):
+            self._index = index
+
+        def _records_root(self):
+            return tmp
+
+    api = record_page.RecordPageApi(_Pl())
+    saved = sys.modules.pop("astrbot.api.web", None)
+    try:
+        _install_web_stub()
+        st = asyncio.run(api.get_stats())["data"]
+        assert st["flat_total"] == 760, st["flat_total"]
+        assert st["flat_bytes"] == total_bytes, (st["flat_bytes"], total_bytes)
+        _install_web_stub(query={"kind": "forward", "limit": "1000"})
+        fwd = asyncio.run(api.list_records())["data"]
+        assert fwd["total"] == 60, fwd["total"]
+        assert all(i["kind"] == "forward" for i in fwd["items"]), fwd["items"][:2]
+        _install_web_stub(query={"kind": "image", "limit": "1000"})
+        img = asyncio.run(api.list_records())["data"]
+        assert img["total"] == 700, img["total"]
+        _install_web_stub(query={"kind": "text"})
+        assert asyncio.run(api.list_records())["data"]["total"] == 0
+    finally:
+        if saved is not None:
+            sys.modules["astrbot.api.web"] = saved
+        index.close()
+    print("  OK -> stats 760 行 / forward 60 / image 700 / text 0")
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5489,6 +5601,8 @@ PHASE9 = [
     test_config_reads_nested_schema_groups,
     test_plugin_persist_config_writes_schema_group,
     test_record_admin_forward_returns_new_message_id,
+    test_record_detail_render_and_uin_reliability,
+    test_page_stats_and_kind_filter_use_real_counts,
 ]
 
 

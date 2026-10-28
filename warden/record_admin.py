@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from .record import (
     RENDER_FILENAME, load_entry, load_record, meta_filename, record_dir,
-    records_root,
+    records_root, uin_reliable,
 )
 
 # v1.14.0 分类管理:一条「保存物」要么是条目(_records/ 下的聊天记录/纯文本),
@@ -27,6 +27,19 @@ KIND_LABELS = {
 def _asset_bytes(rec: dict) -> int:
     return sum(int(a.get("bytes") or 0) for a in rec.get("assets") or []
                if isinstance(a, dict))
+
+
+def _dir_file_bytes(root: str, name: str, filenames) -> int:
+    """条目目录里这些文件的体积（render.png / entry.json）。"""
+    total = 0
+    base = record_dir(root, name)
+    for fname in filenames:
+        if not fname:
+            continue
+        full = os.path.join(base, fname)
+        if os.path.isfile(full):
+            total += os.path.getsize(full)
+    return total
 
 
 def _node_text(node: dict) -> str:
@@ -136,10 +149,14 @@ def flat_item(root: str, row: dict) -> Optional[dict]:
 
 def scan_items(root: str, *, q: str = "", group: str = "", kind: str = "",
                source: str = "", limit: int = 100, offset: int = 0,
-               flat_rows: Optional[list] = None) -> dict:
+               flat_rows: Optional[list] = None,
+               flat_total: Optional[int] = None) -> dict:
     """分类管理用的统一列表:条目 + 扁平文件,可再按类型/群/来源/关键词收窄.
 
     flat_rows 由调用方从索引库取(index.list_assets),这里保持纯函数、离线可测。
+    flat_total 是**同一套过滤条件下**的扁平文件总数:取数有上限（一页 2000 行），
+    而 total 必须是真数 —— 以前直接拿 len(取到的行) 当总数，页面上「图片」永远
+    显示 500、「聊天记录」也只出最新窗口里的几条。
     """
     needle = (q or "").strip().lower()
     want_group = str(group or "").strip()
@@ -187,7 +204,11 @@ def scan_items(root: str, *, q: str = "", group: str = "", kind: str = "",
             items.append(row)
 
     items.sort(key=lambda r: r["captured_ts"], reverse=True)
-    total = len(items)
+    # flat_total 由调用方按同样的过滤条件（kind/group/q）从索引库 COUNT 出来；
+    # 没给就退回「实际取到的行数」（离线测试与老调用方走这条）。
+    flat_seen = sum(1 for r in items if r.get("source") == "flat")
+    total = (len(items) - flat_seen)
+    total += int(flat_total) if flat_total is not None else flat_seen
     page = items[max(0, int(offset)):max(0, int(offset)) + max(1, int(limit))]
     return {"total": total, "items": page, "root": records_root(root),
             "kinds": list(KINDS), "labels": dict(KIND_LABELS)}
@@ -270,6 +291,8 @@ def stats(root: str) -> dict:
                 gid = str(entry.get("group_id") or "")
                 if gid:
                     out["groups"][gid] = out["groups"].get(gid, 0) + 1
+                out["bytes"] += _dir_file_bytes(root, name, ("entry.json",
+                                                                RENDER_FILENAME))
             continue
         out["records"] += 1
         out["kinds"]["forward"] = out["kinds"].get("forward", 0) + 1
@@ -277,6 +300,9 @@ def stats(root: str) -> dict:
         out["assets"] += len(rec.get("assets") or [])
         out["missing"] += len(rec.get("missing") or [])
         out["bytes"] += _asset_bytes(rec)
+        # 渲染图也算占用了：以前只数 assets 里的图片字节，页面上「占用 485 KB」
+        # 和磁盘上的实际体积差一个量级。
+        out["bytes"] += _dir_file_bytes(root, name, (str(rec.get("render") or ""),))
         gid = str(rec.get("group_id") or "")
         if gid:
             out["groups"][gid] = out["groups"].get(gid, 0) + 1
@@ -322,6 +348,8 @@ def _entry_detail(root: str, record_id: str, entry: dict) -> dict:
         "sender_id": str(entry.get("sender_id") or ""),
         "sender_name": str(entry.get("sender_name") or ""),
         "render": render,
+        "has_render": bool(render),
+        "uin_reliable": True,
         "nodes": [{
             "index": 0,
             "uin": str(entry.get("sender_id") or ""),
@@ -392,6 +420,11 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "missing": rec.get("missing") or [],
         "bytes": _asset_bytes(rec),
         "origin_sha256": str(rec.get("origin_sha256") or ""),
+        # 详情页要靠这两个决定「结构化 / 渲染图」两个标签显不显示（以前列表项有、
+        # 详情没有，于是渲染图在页面上根本点不到）。
+        "render": str(rec.get("render") or ""),
+        "has_render": bool(rec.get("render")),
+        "uin_reliable": uin_reliable(nodes_out),
         "nodes": nodes_out,
     }
 

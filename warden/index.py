@@ -276,15 +276,9 @@ class AssetIndex:
         )
         return _asset_rows(c.execute(sql, params))
 
-    def list_assets(self, *, limit: int = 100, offset: int = 0,
-                    kinds: Optional[list] = None, group_id: Optional[str] = None,
-                    q: str = "") -> dict:
-        """分类管理用的资产列表（v1.14.0）.
-
-        与 recent() 的区别:支持按 kind 过滤、按群过滤、按 path 模糊搜索,
-        并且返回 total —— 页面分页需要它,不能靠「拿一页再数」猜。
-        """
-        c = self._require()
+    @staticmethod
+    def _asset_filter(kinds=None, group_id=None, q="") -> tuple[str, list]:
+        """list_assets / summary 共用的 WHERE 片段（过滤语义只写一处）。"""
         where: list[str] = []
         params: list[Any] = []
         kinds = [k for k in (kinds or []) if k]
@@ -300,6 +294,18 @@ class AssetIndex:
             like = "%" + needle + "%"
             params.extend([like, like, like])
         clause = (" WHERE " + " AND ".join(where)) if where else ""
+        return clause, params
+
+    def list_assets(self, *, limit: int = 100, offset: int = 0,
+                    kinds: Optional[list] = None, group_id: Optional[str] = None,
+                    q: str = "") -> dict:
+        """分类管理用的资产列表（v1.14.0）.
+
+        与 recent() 的区别:支持按 kind 过滤、按群过滤、按 path 模糊搜索,
+        并且返回 total —— 页面分页需要它,不能靠「拿一页再数」猜。
+        """
+        c = self._require()
+        clause, params = self._asset_filter(kinds, group_id, q)
         total = c.execute("SELECT COUNT(*) FROM assets" + clause, params).fetchone()[0]
         rows = _asset_rows(c.execute(
             "SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
@@ -330,6 +336,15 @@ class AssetIndex:
     def count(self) -> int:
         c = self._require()
         return c.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+
+    def summary(self, *, kinds: Optional[list] = None,
+                group_id: Optional[str] = None, q: str = "") -> dict:
+        """同 list_assets 的过滤条件下:行数与总字节数（页面顶部统计用）。"""
+        c = self._require()
+        clause, params = self._asset_filter(kinds, group_id, q)
+        row = c.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM assets"
+                        + clause, params).fetchone()
+        return {"total": int(row[0] or 0), "bytes": int(row[1] or 0)}
 
     def prune_older_than(self, cutoff_ts: int) -> dict:
         """删除 ts < cutoff 的 assets 与 failures;不删文件,只删索引.

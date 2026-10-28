@@ -104,12 +104,16 @@
 
   function renderStats(s) {
     if (!s) { $("stats").textContent = ""; return; }
+    state.stats = s;
     var parts = [];
     if (s.records) parts.push(["聊天记录", s.records]);
     if (s.texts) parts.push(["纯文本", s.texts]);
-    if (s.flat_total) parts.push(["扁平文件", s.flat_total]);
-    parts.push(["图片资产", s.assets]);
-    parts.push(["占用", fmtBytes(s.bytes)]);
+    parts.push(["存档图片", s.assets]);
+    parts.push(["存档占用", fmtBytes(s.bytes)]);
+    // 扁平文件的行数与体积来自索引库的 COUNT/SUM（以前数的是「取了一页」的行，
+    // 于是永远显示 2000；占用也只算存档内的图片字节，和磁盘实际差一个量级）。
+    parts.push(["扁平文件", s.flat_total || 0]);
+    if (s.flat_bytes) parts.push(["扁平占用", fmtBytes(s.flat_bytes)]);
     if (s.missing) parts.push(["缺失", s.missing]);
     $("stats").innerHTML = parts.map(function (p) {
       return "<span>" + esc(p[0]) + " <b>" + esc(p[1]) + "</b></span>";
@@ -127,7 +131,7 @@
         state.kind = btn.getAttribute("data-kind") || "";
         if (state.kind === "all") state.kind = "";
         renderKinds();
-        loadList();
+        loadList();  // 换类型 = 从头取,state.items 会被 renderList 覆盖
       });
     });
   }
@@ -194,6 +198,18 @@
         '<div class="preview">' + esc(it.preview || "（无文本）") + "</div>" +
         '<div class="meta">' + badges.join("") + "</div></div>";
     }).join("");
+    // 一页 200 条,总数远不止时给「加载更多」(以前只写「显示前 N 条」,老文件根本
+    // 翻不到 —— 分类管理要看的是全部,不是最新一页)。
+    if (state.items.length < state.total) {
+      var rest = state.total - state.items.length;
+      list.innerHTML += '<div class="more-wrap"><button class="btn" id="btn-more">' +
+        "加载更多（还有 " + rest + " 条）</button></div>";
+      $("btn-more").addEventListener("click", function () {
+        this.disabled = true;
+        this.textContent = "加载中…";
+        loadList(state.items.length);
+      });
+    }
     Array.prototype.forEach.call(list.querySelectorAll(".item"), function (el) {
       el.addEventListener("click", function () {
         var key = el.getAttribute("data-key");
@@ -291,9 +307,11 @@
     } else {
       body = (d.nodes || []).map(function (n) {
         var segs = (n.segments || []).map(renderSegment).join("");
+        // uin 不可信时不显示：NapCat 有时给整条记录同一个 user_id（转发创建者），
+        // 照抄会看成「两个不同昵称共用一个 QQ 号」。
         return '<div class="node"><div class="node-head">' +
           '<span class="name">' + esc(n.name || n.uin || "?") + "</span>" +
-          (n.uin ? "<span>(" + esc(n.uin) + ")</span>" : "") +
+          (n.uin && d.uin_reliable !== false ? "<span>(" + esc(n.uin) + ")</span>" : "") +
           (n.time ? "<span>" + esc(fmtTs(n.time)) + "</span>" : "") +
           "</div>" + (segs || '<p class="seg-dim">（空节点）</p>') + "</div>";
       }).join("");
@@ -368,14 +386,21 @@
     } catch (e) { console.warn(e); }
   }
 
-  async function loadList() {
+  async function loadList(offset) {
     var params = { limit: 200 };
     if (state.q) params.q = state.q;
     if (state.group) params.group = state.group;
     if (state.kind) params.kind = state.kind;
+    if (offset) params.offset = offset;
     try {
       var data = unwrap(await api("records", params));
-      renderList(data);
+      if (offset) {
+        // 追加下一页:服务端的 total 是真实总数,前端只负责把页拼起来
+        state.items = state.items.concat(data.items || []);
+        renderList({ total: data.total, items: state.items, kinds: data.kinds, labels: data.labels });
+      } else {
+        renderList(data);
+      }
     } catch (e) {
       $("list").innerHTML = '<p class="hint">加载失败：' + esc(e.message) + "</p>";
     }
