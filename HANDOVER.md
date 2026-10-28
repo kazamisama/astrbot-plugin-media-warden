@@ -1,17 +1,53 @@
-# 交接文档 · astrbot-plugin-media-warden v1.13.0
+# 交接文档 · astrbot-plugin-media-warden v1.14.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.13.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.13.0 是 dashboard 存档页面，**变化见下面 §1.-2**；v1.12.0 是聊天记录存档/重发，见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.14.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.14.0 是按类型采集 + 分类管理 + 样式页，**变化见下面 §1.-3**；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
-- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 各单独一次提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3, total=130)`
+- Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 / v1.12.0（`7396611` + `f3368ca`）/ v1.13.0（八笔小步提交）/ v1.14.0（`ba83bbf` → `4ef1afe` → `b8cb445` → `18e8544`）各一批提交（显式路径，未用 `git add -A`）
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=12, total=142)`
 
 
-## 1.-2 v1.13.0（dashboard 存档页面，当前版本）
+## 1.-3 v1.14.0（按类型采集 + 分类管理 + 样式页，当前版本）
+
+目标（用户 m02240）：只存**特定群 / 特定人**发来的**特定类型** —— 图片 / 动图 / 视频 / 纯文本 / 聊天记录 / 文档；纯文本与聊天记录的「正常形式」都是 Pillow 渲染（这点要标清）；dashboard 按类型**分类管理**；聊天记录的两种形态共用一个条目；结构化条目能「去气泡重发」也能自动转发到别的群；渲染样式单独一页可改。
+
+### 升级前必读（语义反转）
+- 白名单模式下**空列表 = 不保存**：`target_groups` 空 → 一个群都不存，`target_users` 空 → 一个发送人都不存。旧版本把空列表当「不限」，所以留空的人升级后会突然什么都不存。要「这个群所有人都存」写 `["*"]`，要「不设任何限制」用 `match_mode: blacklist`。
+- 六类开关只有 `save_texts` 默认 `false`（纯文本以前完全不在流程里），其余默认 `true`，所以升级后的默认行为与 v1.13 一致。
+- **WebUI 配置这次是真的生效了**：v1.10.0～v1.13.0 里 `from_raw_lenient()` 只读顶层键，而宿主是按 schema 分组嵌套传的，于是所有分组配置都没进过 dataclass（默认值恰好等于用户配置，才一直没被发现）。v1.14.0 的 `_flatten_raw()` 摊平嵌套组后，`target_groups` / `target_users` 等第一次真正生效 —— 本机升级后日志从 `groups=0 users=0` 变成 `groups=1 users=1`，抓取范围也跟着变成「只这个群 + 只这个人」。如果以前靠「空 = 不限」全量抓，升级前先确认 WebUI 里的名单。
+- 纯文本 / 聊天记录都落在 `_records/`：`entry.json`（纯文本结构）/ `record.json` + `assets/`（聊天记录），都能再带一张 `render.png`。老的扁平 `…_forward_json_*.json` 不再新写，但页面与命令仍读、仍管。
+
+### 机制
+- **类型门控在下载之前**：`policy.media_kind(comp)` → `kind_allowed(cfg, kind)`，file 再叠 `cfg.doc_ext_allowed(扩展名或文件名)`（v1.14 起两种入参都收）；forward 关了就整类丢。全丢时日志写 `skip: nothing to save | dropped: image=1 …` —— 省带宽，也不再制造「下完才发现不该存」的失败记录。
+- **动图判定不靠 PIL**：`comp_is_animated`（扩展名）+ `blob_is_animated`（GIF 帧数 / WebP `ANIM` / APNG `acTL`），没装 Pillow 的宿主也准。
+- **纯文本**：`components.raw_segments(event)` 取原始段（text / at / face / reply）→ `record.capture_text()` 写 `entry.json` → 渲染一张 `render.png` 塞进同一目录 → 回执与媒体共用 `_emit_receipt()`。
+- **聊天记录**：`_save_forward` 顺序改成「先下节点图（`blob_by_url`）→ `record.capture()` → JSON → 渲染 → `save_render()`」；存档失败只记日志（不影响 JSON 与渲染），渲染失败照样经 `_failed()` 进 failures。
+- **分类管理**：`index.list_assets(kinds / group_id / q)` 查扁平文件，`record_admin.scan_items()` 把 `_records/` 条目与扁平行合成一页；类型标签同时覆盖两者。`page/thumb` 支持 `source=flat` 与 `render.png`；`page/reveal` → `os.startfile`（仅 Windows，且只对 `storage_root` 下的目录生效）。
+- **转发**：`record_admin.native_forward`（跨群原地同样保装扮）/ `rebuild_forward`（丢装扮），原地失败自动回退重建并在回执里说明；页面下拉 `page/groups` 带群名，默认这条记录的原群。自动转发在 `_save_forward` 末尾调 `_auto_forward()`，目标空或等于源群就跳过。
+- **样式**：`Forwarder.apply_style(**10 项)` 改 `_RenderCfg`；`main._apply_render_style()` 在 `initialize()` 与 `update_style()` 后都调；`pages/style/` 实时预览（debounce 180ms，含合成头像），保存写宿主配置（`_persist_config` → `config.save_config()`，失败只记日志）。`dark` 只替换仍是默认值的颜色。
+
+### 签名变化（改测试/改调用前先看这里）
+- `config.update_style(values) -> (snapshot, errors, persisted)` —— **三元组**（曾经返回二元组，测试把 `persisted` 当成 errors）
+- `config.doc_ext_allowed(ext_or_name)`、`save_type_flags()`、`forward_targets_set()`
+- `policy.media_kind` / `kind_allowed` / `comp_is_animated` / `blob_is_animated`；`ALL_SENDERS = "*"`
+- `record.capture_text(...) -> dict`、`load_entry`、`meta_filename`、`has_render`、`save_render`；常量 `ENTRY_FILENAME` / `RECORD_FILENAME` / `RENDER_FILENAME`；`list_records()` 混排 forward/text 并带 `kind`
+- `index.list_assets(*, limit, offset, kinds, group_id, q) -> {"total","items"}`、`forget_path(path) -> int`
+- `record_admin.KINDS` / `KIND_LABELS` / `scan_items` / `entry_item` / `flat_item` / `entry_file` / `resolve_flat` / `delete_flat`
+- `forwarder.apply_style(**kwargs)`、`_avatar_mask(size, shape)`、`_hex_rgb()`、`_fmt_time()`
+- 页面路由 8 → 12（新增 `reveal` / `style` / `style_save` / `style_preview`）
+
+### 配置组（schema 9 组）
+`filter` / `storage` / `download` / `logging` / `forward` / `reply` / **`save_types`** / **`auto_forward`** / **`render_style`**
+
+### 踩坑
+- 纯文本分支最初忘了把 `event` 传给回执 helper，整条消息一条都不 yield（`_drive_command` 收到空列表，看起来像「没处理」）。回执一律 `_emit_receipt(batch, msg_id, sender_id, event)`。
+- 白名单模式的空列表语义在 v1.14 反转过；写测试时用 `match_mode: blacklist` 的老用例不受影响，但任何依赖「whitelist + 空列表 = 全存」的旧断言都要改。
+
+## 1.-2 v1.13.0（dashboard 存档页面）
 
 目标：存档要能在 WebUI 里看、搜、删、发回去，而且浏览不需要 QQ 那种渲染（用户原话 m01757：保存 / dashboard 浏览管理 / 保装扮再发送）。
 
@@ -493,10 +529,31 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `main.py` | 导入 `RecordPageApi`；`initialize()` 里 try/except 注册（宿主没 `register_web_api` 只记一句日志）；启动日志加 `page=on|off` |
 | `_smoke.py`（130 项） | 新 Phase 8 三项：存档读侧、页面路由与处理函数、initialize 注册/跳过 |
 
+### 3.4 v1.14.0 主要修改文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `warden/config.py` | 六类 `save_*` 开关、`doc_ext_whitelist`、`auto_forward_*`、`style_*` 十项；`_flatten_raw()` 摊平宿主的分组嵌套配置（顶层优先）；`doc_ext_allowed()` 收扩展名与文件名；`update_style()` 返回三元组；`save_type_flags()` / `forward_targets_set()`；`VERSION = "1.14.0"` |
+| `warden/policy.py` | `media_kind()` / `kind_allowed()` / `comp_is_animated()` / `blob_is_animated()`；白名单空列表语义反转为「不保存」，`ALL_SENDERS = "*"` |
+| `warden/components.py` | `raw_segments(event)`：从 `raw_message` 取原始段（text/at/face/reply）给纯文本条目用 |
+| `warden/record.py` | `capture_text()` + `entry.json`；`save_render()` / `has_render()` / `load_entry()` / `meta_filename()`；`capture()` 增 `kind` / `render`；`list_records()` 混排两类条目 |
+| `warden/record_admin.py` | `KINDS` / `KIND_LABELS` / `scan_items()` / `entry_item()` / `flat_item()` / `entry_file()` / `resolve_flat()` / `delete_flat()`；`record_detail()` 支持纯文本 |
+| `warden/record_page.py` | 路由 8 → 12（新增 `reveal` / `style` / `style_save` / `style_preview`）；`source=flat` 取图与删除；纯文本条目「发回」给明确错误 |
+| `warden/index.py` | `list_assets(kinds / group_id / q)` + `forget_path(path)` |
+| `warden/forwarder.py` | `apply_style()` 十参数；`_avatar_mask(shape)` 支持方形圆角；`_fmt_time()`；`_hex_rgb()`；深色只替换默认色 |
+| `pages/dashboard/*` | 类型标签 + 带群名目标群下拉 + 结构化/渲染图切换 + 打开目录；`app.js` 重写（490 行） |
+| `pages/style/*`（新） | 样式编辑器 + 实时预览（样例里带合成头像，才看得出圆/方差别） |
+| `_conf_schema.json` | 6 组 → 9 组（`save_types` / `auto_forward` / `render_style`） |
+| `main.py` | 下载前类型门控、`_save_text()`、`_emit_receipt()`、`_auto_forward()`、`_apply_render_style()` / `style_snapshot()` / `update_style()` / `_persist_config()`（写进键所属的 schema 分组，不在顶层留重复键） |
+| `_smoke.py`（140 项） | 新 Phase 9 十项 |
+
 ## 4. 验证记录
 
 已验证：
 
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=12, total=142)`（v1.14.0）
+- v1.14.0 本机实测（2026-10-28）：重载后日志 `loaded: v1.14.0 | mode=whitelist | groups=1 users=1`、`page=on`（修复前同一条是 `groups=0 users=0` —— 配置根本没被读到）；`/api/plug/astrbot-plugin-media-warden/page/{stats,groups,style,records,style_preview}` 全部 200（stats：3 条存档 / 7 节点 / 4 资产 / flat 2000；groups：collect `961583271` 与 llm `256678737`，各 3 人；style_preview 返回 `data:image/png;base64,…`）；`/api/plugin/page/entry?name=…&page=style` 返回 `content_path`（标题由前端按 i18n 的 `pages.style.title` 解析）。**没做浏览器内点击验证**。
+- 本机插件配置在 `C:\Users\chiriu\.astrbot\data\config\astrbot-plugin-media-warden_config.json`（按 schema 分组嵌套）；当前值 `target_groups=["961583271"]`、`target_users=["2510536451"]`、`match_mode=whitelist` —— 修复配置读取后，抓取范围就是「collect 群 + 風見かずき」。
 - `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3, total=130)`（v1.13.0）
 - v1.13.0 页面链路在本机 AstrBot 上实测（2026-10-28）：插件重载后 `/api/plugin/page/entry?name=…&page=dashboard` 返回 `content_path`；页面 HTML 200（标题已被 i18n 换成「聊天记录存档」）；`app.js` / `styles.css` 以 `text/javascript` / `text/css` 200 返回；`/api/plug/<plugin>/page/stats` 与 `/page/records` 返回 3 条真实存档（群 961583271）。**没做浏览器内点击验证**（页面 DOM 只做了语法与 id 交叉检查）
 - v1.11.0 的 Windows 路径修复用临时脚本实测过：`BatchResult.storage_root` 从 `None` 变为 `C:/data/warden/g1/`，且 `format_batch()` 输出 `  路径: C:/data/warden/g1/`

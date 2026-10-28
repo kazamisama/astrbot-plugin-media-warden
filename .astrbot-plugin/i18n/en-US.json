@@ -6,6 +6,9 @@
   "pages": {
     "dashboard": {
       "title": "Chat records"
+    },
+    "style": {
+      "title": "Render style"
     }
   }
 }

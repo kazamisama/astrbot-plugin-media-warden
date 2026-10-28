@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.14.0
+
+「存什么 / 怎么存 / 怎么看」三件事一起做完：类型门控 + 六类开关，纯文本与聊天记录统一成「一个条目两种形态」，页面按类型分类管理并支持发到别的群，渲染样式搬进独立页面。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=12, total=142)`。
+
+### 升级前必读（语义变化）
+
+- **白名单模式下「空列表」= 不保存**：`match_mode: whitelist` 的 `target_groups` 为空即「一个群都不存」、`target_users` 为空即「一个发送人都不存」。旧版本把空列表当「不限」，所以这两项留空的用户升级后**会突然什么都不存**。要「这个群所有人都存」写 `target_users: ["*"]`；要「不设任何限制」把 `match_mode` 改成 `blacklist`（它的空列表仍是不限）。
+- 六类开关 `save_images` / `save_gifs` / `save_videos` / `save_files` / `save_forwards` / `save_texts` 新增，其中只有 `save_texts` 默认 `false`（纯文本以前完全不进流程），其余默认 `true` —— 升级后默认行为与 v1.13 一致。
+- 纯文本 / 聊天记录的落盘统一到 `_records/`：`entry.json`（纯文本结构）、`record.json` + `assets/`（聊天记录）、`render.png`（两者共用）。老的扁平 `…_forward_json_*.json` 不再新写，但页面与命令仍能读、能管。
+
+### Added
+
+- **六类保存开关**：在**下载之前**按类型丢弃（省带宽，也不再制造失败记录）；文档再叠一层 `doc_ext_whitelist`（扩展名白名单，可改）。空列表语义与白名单模式一致 —— 文档白名单为空即「不存文档」。
+- **动图判定**（`policy.comp_is_animated` / `blob_is_animated`）：扩展名 + 字节魔数（GIF 帧数、WebP `ANIM`、APNG `acTL`），不依赖 PIL，所以 `gif` 开关在没装 Pillow 的宿主上照样准。
+- **纯文本条目**：`record.capture_text()` 写 `entry.json`（保留 text / at / face / reply 原始段、发送者、时间），再用现有 Pillow 渲染器画一张 `render.png` 放进同一目录 —— 一个条目两种形态，页面里切换着看。
+- **聊天记录双形态**：`record.capture()` 的 `record.json` 增加 `kind: "forward"` 与 `render` 字段；渲染成功后把同一张 PNG 经 `save_render()` 放进条目。
+- **分类管理页**：类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）同时覆盖 `_records/` 条目与老的扁平落盘文件（`index.list_assets()` 按 `kind` 查，`record_admin.scan_items()` 合并两类）；右侧「结构化 / 渲染图」切换看同一张条目的两种形态；新增「打开目录」（`page/reveal` → `os.startfile`，仅 Windows，且只对 `storage_root` 下的目录生效）。
+- **跨群转发 + 目标群下拉**：页面「发回」旁多一个带群名的目标群下拉（`page/groups` 读 `get_group_list`，默认这条记录的原群），可选「原地（保装扮）」或「重建（丢装扮）」；原地失败自动回退重建，并在回执里说明走了哪条路。
+- **自动转发**：`auto_forward_enabled` + `auto_forward_mode: rebuild|native` + `forward_target_groups`（多群，默认空 = 不转发）。存档成功后自动发到各目标群：`native` 先试原地（跨群同样保装扮），失败回退重建；目标等于源群时跳过。
+- **渲染样式页**（`pages/style/`）：宽度 / 字号 / 圆角 / 背景·气泡·正文·次要用色 / 头像形状（圆 / 方）/ 时间格式 / 深色，右侧**实时预览**（含合成头像，才看得出圆形与方形圆角的差别）；保存写回插件配置并立刻 `Forwarder.apply_style()` 生效，不用重载。
+
+### Changed
+
+- `_conf_schema.json` 6 组 → 9 组：新增 `save_types` / `auto_forward` / `render_style`。
+- `Forwarder` 的渲染参数从写死常量变成 `_RenderCfg` 字段，新增 `apply_style()`；`_avatar_mask(size, shape)` 支持方形圆角头像；时间格式可配（默认 `%Y-%m-%d %H:%M`）；`dark` 只替换**仍是默认值**的颜色，用户自己挑过的色不会被深色模式改掉。
+- `record.list_records()` 现在混排 `forward` 与 `text` 两类条目，返回项统一带 `kind`。
+- 页面后端路由 8 → 12：新增 `reveal` / `style` / `style_save` / `style_preview`。
+- `main.on_group_message` 的类型判定提前到下载之前，日志会写 `dropped: image=1 gif=0 …`，全丢时写 `skip: nothing to save`（以前是「下完了才发现不该存」）。
+
+### Fixed
+
+- **WebUI 里改的配置从 v1.10.0 起一直被静默忽略**：AstrBot 是按 `_conf_schema.json` 顶层键**分组嵌套**把配置传给插件的（`{"filter": {...}, "storage": {...}}`），而 `MediaWardenConfig.from_raw_lenient()` 只读顶层键 —— 所有分组内的值都没进过 dataclass，一直跑在默认值上（v1.10.0～v1.13.0 各项默认值恰好等于当时的用户配置，所以没人发现）。v1.14.0 的白名单反转把它变成实伤：日志里 `groups=0 users=0`，插件会「什么都不存」。现在 `_flatten_raw()` 把嵌套组摊平（**顶层同名键优先**，样式页写顶层的调用方仍有效）。
+- 样式页保存写到顶层键会在配置文件里留下**同名的重复键**（分组里一份、顶层一份）；现在 `_persist_config()` 先把键定位到它所属的分组（如 `render_style`）再写。
+- 纯文本消息以前被整体忽略（走一句 `nothing to save`）；现在按 `save_texts` 决定存不存，存就同时有 `entry.json` 与 `render.png`。
+- 纯文本分支最初漏传 `event` 给回执，导致这条消息一条消息都不 yield（用户侧静默无回执）；现在两个分支统一走 `_emit_receipt(batch, msg_id, sender_id, event)`。
+- `Config.doc_ext_allowed()` 以前只认扩展名，传文件名（如 `doc.pdf`）一律被拒；现在两种入参都收（`os.path.splitext` 归一）。
+
+### Tests
+
+- 新增 Phase 9 共 10 项：类型门控与动图判定、纯文本条目往返、纯文本消息端到端落盘、禁用类型与坏扩展名被丢弃、聊天记录「一个条目两种形态」、分类扫描（含扁平文件）、自动转发到多群、`native` 模式失败回退 `rebuild`、`apply_style` 生效与头像形状、`update_style` 三元组与样式页路由。
+- 冒烟 130 → **142** 项（Phase 9: 12；多出的两项是「宿主分组嵌套配置能被读到」与「样式保存写进 schema 分组、不在顶层留重复键」）。
+
 ## v1.13.0
 
 ### Added

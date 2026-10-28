@@ -6,6 +6,9 @@
   "pages": {
     "dashboard": {
       "title": "聊天记录存档"
+    },
+    "style": {
+      "title": "渲染样式"
     }
   }
 }

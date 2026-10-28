@@ -26,6 +26,7 @@
 - v1.11.0：**第二轮审计修复** —— Windows 回执路径行（`reporter.py` 里的反斜杠字面量多转义了一层，Windows 路径永远算不出公共目录）、转发渲染失败入库、`/warden list` 显示 sha16、16-hex msg_id 可回退查询、file 段 http 链接兜底、落盘原子写入；冒烟 115 项
 - v1.12.0：**聊天记录存档 + 原地重发** —— 引用合并转发发 `/warden 存档` 存成自包含目录（节点结构 + 图片字节）；`/warden 重发` 默认原地转发（保气泡/挂件/头像），失败回退按存档重建；冒烟 127 项
 - v1.13.0：**dashboard 存档页面** —— 插件详情里的「页面」直接浏览/搜索/预览/重发/删除存档，图片走鉴权接口按需取；冒烟 130 项
+- v1.14.0：**按类型采集 + 分类管理 + 样式页** —— 六类保存开关（图片/动图/视频/纯文本/聊天记录/文档）与扩展名白名单，白名单空列表语义反转为「不保存」；纯文本与聊天记录都是「一个条目两种形态」（结构化 JSON + Pillow 渲染图）；dashboard 按类型分类管理（含老的扁平落盘文件），带群名的目标群下拉与两种转发；可选的自动转发；独立的渲染样式页（宽度/字号/圆角/主色/头像形状/时间格式/深色 + 实时预览）；冒烟 140 项
 
 ## 目录
 
@@ -35,7 +36,8 @@ astrbot-plugin-media-warden/
   _conf_schema.json          # 配置 schema（WebUI 编辑）
   requirements.txt           # Pillow>=10.0
   main.py                    # 入口（@register 类 + 钩子 + 8 个命令）
-  pages/dashboard/           # 插件页面（AstrBot 自动发现）：index.html / app.js / styles.css
+  pages/dashboard/           # 插件页面：存档分类管理（index.html / app.js / styles.css）
+  pages/style/               # 插件页面：渲染样式编辑 + 实时预览
   .astrbot-plugin/i18n/      # 页面标题与显示名（zh-CN / en-US）
   warden/
     __init__.py              # 公开符号
@@ -51,7 +53,7 @@ astrbot-plugin-media-warden/
     avatar.py                # 头像抓取 + 文件缓存
     record.py                # 聊天记录存档（自包含目录：节点 + 图片字节）
     record_admin.py          # 存档读侧（扫描/搜索/汇总/详情/取图/删除/还原节点）
-    record_page.py           # 插件页面后端（/<plugin>/page/* 六个接口）
+    record_page.py           # 插件页面后端（/<plugin>/page/* 十二个接口）
   README.md                  # 本文件
   CHANGELOG.md               # 变更记录
   HANDOVER.md                # 交接文档
@@ -74,7 +76,9 @@ pip install Pillow  # forwarder 自绘气泡
 
 ## 配置
 
-AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。schema 按 6 组组织：监听范围 / 保存与索引 / 下载与并发 / 日志 / 转发渲染 / 回复行为。
+AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。schema 按 9 组组织：监听范围 / 保存与索引 / 下载与并发 / 日志 / 转发渲染 / 回复行为 / **保存类型** / **自动转发** / **渲染样式**。
+
+> **v1.14.0 语义变化**：白名单模式下 **空列表 = 不保存**（以前是「不限」）。要「全存」请用 `match_mode=blacklist`（空列表 = 不限），或把 `target_users` 写成 `["*"]`。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
@@ -104,6 +108,26 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `reply_preview` | `true` | 是否附带第一张图作预览 |
 | `at_on_save_failure` | `true` | 保存失败时 @ 触发消息的监听对象 |
 | `log_to_stdout` | `true` | 是否把匹配消息打到日志 |
+| `save_images` | `true` | 保存静态图片（动图走 save_gifs） |
+| `save_gifs` | `true` | 保存动图（gif / apng / 动画 webp；按扩展名 + 字节特征判定，不依赖 PIL） |
+| `save_videos` | `true` | 保存视频 |
+| `save_files` | `true` | 保存文档文件（受 doc_ext_whitelist 约束） |
+| `save_forwards` | `true` | 保存合并转发（落 _records/<id>/，一个条目两种形态：record.json + render.png） |
+| `save_texts` | `false` | 保存纯文本消息（entry.json + render.png 共用一个条目） |
+| `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限制** |
+| `auto_forward_enabled` | `false` | 收到聊天记录后自动转发到目标群（可选功能） |
+| `auto_forward_mode` | `rebuild` | rebuild（重建，无装扮）/ native（跨群原地，失败自动回退重建） |
+| `forward_target_groups` | `[]` | 自动转发的目标群（可多个，空 = 不转发） |
+| `style_width` | `720` | 渲染画布宽度（200..3000） |
+| `style_bg_color` | `#f5f6f7` | 背景色 |
+| `style_bubble_color` | `#ffffff` | 气泡色 |
+| `style_text_color` | `#1c1f24` | 正文色 |
+| `style_dim_color` | `#8a9099` | 次要文字/时间色 |
+| `style_radius` | `12` | 气泡圆角（0..96） |
+| `style_font_size` | `15` | 正文字号（8..48） |
+| `style_avatar_shape` | `circle` | 头像形状 circle / square |
+| `style_time_format` | `%H:%M` | 时间格式（strftime） |
+| `style_dark` | `false` | 深色配色（只替换仍是默认值的颜色，不动你自己挑的色） |
 
 **默认命名模板**：
 
@@ -133,7 +157,9 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 ```
 <storage_root>/
   <group_id>/<sender_id>/<date>_<time>_<kind>_<short_id><ext>
-  _records/<record_id>/record.json  # 聊天记录存档
+  _records/<record_id>/record.json  # 聊天记录条目（结构化：节点 + 资产索引）
+  _records/<record_id>/entry.json   # 纯文本条目（结构化：段 + 元数据）
+  _records/<record_id>/render.png   # 条目的 Pillow 渲染图（两种条目共用字段）
   _records/<record_id>/assets/      # 该记录里的图片字节
   _warden.db                       # SQLite 资产索引
   _blake/<aa>/<bb>/<hex>.ptr       # blake2b 去重指针
@@ -148,7 +174,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 - **`_warden.db`** —— 每存一个文件记一条元数据，支撑 `/warden list|stats|lookup|export|prune`。删除只丢台账，已存文件不受影响。
 - **`_blake/`** —— 内容指纹指针，指向首存真实文件。命中则复用原路径，不重复写盘。
 - **`_avatars/`** —— 转发节点头像缓存，按容量 LRU 淘汰。
-- **`_records/`** —— 聊天记录存档（v1.12.0）：每条合并转发一个目录，`record.json` 原样保留每节点每段的结构，`assets/` 存节点内图片的**字节**（blake2b-16 命名，同字节只落一份）。它与 `<group>/<sender>/…_forward_json_*.json` 的区别是后者只留 url、rkey 一过期就废；`missing` 字段如实记录取不到的图。
+- **`_records/`** —— 条目存档（v1.12.0，v1.14.0 并入纯文本）：**聊天记录**一条合并转发一个目录（`record.json` 原样保留每节点每段的结构，`assets/` 存节点内图片的**字节**，blake2b-16 命名、同字节只落一份）；**纯文本**一条消息一个目录（`entry.json` 存段与元数据）。两者都能再写一张 `render.png`，页面里「结构化 / 渲染图」切换就是读这两样。老的 `<group>/<sender>/…_forward_json_*.json` 只留 url、rkey 一过期就废；`missing` 字段如实记录取不到的图。
 
 ## 命令
 
@@ -174,11 +200,22 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 3. 右侧详情：逐节点列出每段内容（文本 / 图片缩略图 / 表情 / @），缩略图点开看原图；取不到图的段会标出 `missing` 原因
 4. 三个按钮：**发回原群（原地·保装扮）** / **发回群（重建·丢装扮）** / **删除存档**（删整个 `_records/<id>/`，不可恢复）
 
-页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,resend,delete}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
+**v1.14.0 分类管理**：顶部类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）同时覆盖两类保存物 —— `_records/` 里的条目，以及老的扁平落盘文件（索引库里一行一条，按 `kind` 分类）。右侧「结构化 / 渲染图」切换看同一个条目的两种形态；「发回」旁的目标群下拉带群名（默认这条记录原来的群），可选**原地**（保装扮）或**重建**（丢装扮）；纯文本条目没有合并转发可发，只提供浏览/删除/打开目录。
+
+页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,groups,resend,delete,reveal,style,style_save,style_preview}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
 
 缩略图经 `page/thumb` 读成 base64 内联显示：`<img>` 直接指后端 URL 带不上 Authorization 头，而桌面版（Tauri）不一定留着 dashboard 的 cookie —— 桥接接口两边都通。单张 >8 MB 时只回错误、让用户走下载。
 
 > 页面**不做** QQ 那种气泡渲染 —— 浏览就是普通 HTML 列表 + 原图；想保留装扮只有「原地转发」一条路（见「已知边界」）。
+
+## 样式页（dashboard）
+
+dashboard → 插件 → `astrbot-plugin-media-warden` → 页面 `style`（标题「渲染样式」）：
+
+- 可调：画布宽度、正文字号、气泡圆角、背景/气泡/正文/次要用色、头像形状（圆/方）、时间格式（strftime）、深色配色
+- 右侧**实时预览**用当前参数渲染一张样例对话（含合成头像，才看得出圆形/方形差别）
+- 「保存到插件配置」写回宿主的插件配置文件，同时立刻灌进运行中的渲染器（不重启、不重载也生效）
+- 深色只替换**仍是默认值**的颜色：你自己挑过的主色不会被深色模式改掉
 
 ## 离线自测
 
@@ -188,9 +225,9 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **130 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **142 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 25 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 12），覆盖：
 
-- 配置加载 / 校验 / 非法字段按字段容错并保留有效值
+- 配置加载 / 校验 / 非法字段按字段容错并保留有效值；**宿主的 schema 分组嵌套配置**能被摊平读取（顶层同名键优先）
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
 - 组件识别与 raw_message URL 恢复
 - 落盘 roundtrip、blake2b 去重、路径越权防护、篡改/内容变更指针拒绝
@@ -204,6 +241,7 @@ python -m pytest -q _smoke.py
 - v1.10.0 补齐：`_conf_schema.json` 与配置字段双向对齐（漏配 / 多配都红）、组件 dict 与 object 两条路径归一化结果一致、`AvatarCache` 磁盘命中与 LRU 淘汰、旧库 schema 迁移（含幂等）、空转发记为失败、非 `pil` 引擎告警、`Reply` 引用、索引复用按 platform/group 隔离、raw_message 恢复链接按标识配对（顺序错位也不错领）
 - v1.11.0 补齐（Phase 6）：Windows 反斜杠路径算出公共目录且不切出半截目录、file 段把 http 链接放在 `file` 上仍可下载、转发渲染失败在 failures 表留下 `forward_render` 行、落盘后没有 `.part-` 残骸
 - v1.13.0 补齐（Phase 8）：存档读侧的扫描/搜索/汇总/详情/取图/删除（含路径越界与不存在的资产）、插件页面 6 条路由的注册与处理函数（含原地失败回退重建、鉴权取图）、`initialize()` 在有无 `register_web_api` 两种宿主下的行为
+- v1.14.0 补齐（Phase 9）：六类开关与动图判定、扩展名白名单（扩展名/文件名两种入参）、纯文本条目往返与端到端落盘、禁用类型与坏扩展名被丢弃、聊天记录「一个条目两种形态」、分类扫描（含老的扁平文件）、自动转发到多群、`native` 失败回退 `rebuild`、`apply_style` 与头像形状、样式保存写进 schema 分组、`update_style` 三元组与样式页路由
 - v1.12.0 补齐（Phase 7）：存档往返（`record.json` + `assets/` + `build_nodes` 还原）、同字节只落一份、单图失败只进 `missing`、列表倒序与坏目录容错、`image_ref` 规则、引用合并转发按 reply id 取节点、引用普通消息时 `get_msg` 找 forward 段、无引用时的可读提示、原地转发用 OneBot 短 id、老存档拒绝原地转发、默认先原地失败回退重建
 
 ## 已知边界
