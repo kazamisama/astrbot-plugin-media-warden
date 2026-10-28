@@ -3793,9 +3793,9 @@ def test_conf_schema_covers_all_config_fields():
     # v1.11.0: 枚举项给 WebUI 下拉选项,省得手敲字符串拼错
     for grp, key, want in (
         ("filter", "match_mode", ["whitelist", "blacklist"]),
-        ("render", "forward_render_mode", ["image", "json", "both"]),
+        ("forward", "forward_render_mode", ["image", "json", "both"]),
         # v1.15.0: 引擎只剩 pil 一个实现，下拉不再假装有三个选项
-        ("render", "forward_image_engine", ["pil"]),
+        ("forward", "forward_image_engine", ["pil"]),
         ("auto_forward", "auto_forward_mode", ["native", "rebuild"]),
     ):
         got = schema[grp]["items"][key].get("options")
@@ -3808,7 +3808,7 @@ def test_conf_schema_covers_all_config_fields():
     assert cfg.match_mode == "whitelist" and cfg.download_retries == 2
     # v1.15.0 schema 重排:顺序就是用户读的顺序(监听 → 存什么 → 存哪 → 下载 → 渲染 → 样式 → 转发 → 回执 → 日志)
     assert list(schema) == ["filter", "save_types", "storage", "download",
-                            "render", "render_style", "auto_forward",
+                            "forward", "render_style", "auto_forward",
                             "reply", "logging"], list(schema)
     # 画布宽度只有一个旋钮(旧的 forward_image_width 已删,它总被 style_width 覆盖)
     assert "forward_image_width" not in fields, "重复的宽度旋钮应已删除"
@@ -5764,46 +5764,29 @@ def test_record_admin_migrates_flat_forwards():
         index.close()
     print("  OK -> 迁移 1 条(2 节点/1 缺图/留底), 幂等, 坏文件保留")
 
-def test_plugin_migrates_old_config_group():
-    """v1.15.0 schema 重组:旧的 forward 组并进 render,旧宽度键丢弃。"""
-    banner("plugin: schema 重组后把旧 forward 组迁进 render")
+def test_plugin_promotes_auto_forward_default():
+    """v1.15.0 新默认 native:只有「没启用 + 无目标群 + 仍是旧默认」才跟着升级。"""
+    banner("plugin: auto_forward_mode 旧默认值跟着升级为 native")
     MediaWardenStar = main.MediaWardenStar
-    logs = []
 
-    class _Obj(dict):
-        def __init__(self, data):
-            super().__init__(data)
-            self.saved = 0
+    class _C:
+        def __init__(self, enabled=False, mode="rebuild", targets=None):
+            self.auto_forward_enabled = enabled
+            self.auto_forward_mode = mode
+            self.forward_target_groups = targets or []
 
-        def save_config(self):
-            self.saved += 1
-
-    class _Pl:
-        pass
-
-    obj = _Obj({
-        "forward": {"forward_render_mode": "both",
-                    "forward_image_width": 900,
-                    "enable_user_avatar": False},
-        "render": {"forward_render_max_nodes": 12},
-        "filter": {"target_groups": ["961583271"]},
-    })
-    pl = _Pl()
-    pl._config_obj = obj
-    pl._log = logs.append
-    MediaWardenStar._migrate_config_groups(pl)
-    assert "forward" not in obj, obj
-    render = obj["render"]
-    assert render["forward_render_mode"] == "both", render
-    assert render["enable_user_avatar"] is False, render
-    assert render["forward_render_max_nodes"] == 12, render  # 已有值不被覆盖
-    assert "forward_image_width" not in render, render
-    assert obj["filter"]["target_groups"] == ["961583271"], obj
-    assert obj.saved == 1, obj.saved
-    # 幂等:第二次没有 forward 组了,不再保存
-    MediaWardenStar._migrate_config_groups(pl)
-    assert obj.saved == 1, obj.saved
-    print("  OK -> forward 组并进 render(不覆盖已有值), 旧宽度键丢弃, 幂等")
+    c = _C()
+    assert MediaWardenStar._promote_auto_forward_default(c) is True
+    assert c.auto_forward_mode == "native", c.auto_forward_mode
+    # 已经启用了 / 有目标群 / 用户显式选了 native -> 都不改
+    c2 = _C(enabled=True)
+    assert MediaWardenStar._promote_auto_forward_default(c2) is False
+    assert c2.auto_forward_mode == "rebuild", c2.auto_forward_mode
+    c3 = _C(targets=["256678737"])
+    assert MediaWardenStar._promote_auto_forward_default(c3) is False
+    c4 = _C(mode="native")
+    assert MediaWardenStar._promote_auto_forward_default(c4) is False
+    print("  OK -> 未启用的旧默认升级为 native;启用/有目标/已显式选择都不动")
 
 def test_record_duplicate_dedupe_and_rerender():
     """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
@@ -6036,7 +6019,7 @@ PHASE9 = [
     test_page_stats_and_kind_filter_use_real_counts,
     test_page_native_failure_marks_stale,
     test_record_admin_migrates_flat_forwards,
-    test_plugin_migrates_old_config_group,
+    test_plugin_promotes_auto_forward_default,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
     test_record_admin_reconcile_flat_renders,

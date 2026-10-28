@@ -286,43 +286,32 @@ class MediaWardenStar(Star):
             f"| concurrent={self.cfg.max_concurrent}"
         )
 
-    def _migrate_config_groups(self) -> None:
-        """schema 重组后的一次性迁移：旧的 `forward` 组并进 `render`（v1.15.0）。
+    @staticmethod
+    def _promote_auto_forward_default(cfg) -> bool:
+        """v1.15.0 把默认值从 rebuild 改成 native:旧配置跟着升级。
 
-        AstrBot 按 `_conf_schema.json` 顶层键分组存配置，组改名后老值会留在没人
-        再读的组里（读端 `_flatten_raw` 还能捞到，但 WebUI 一保存就丢）。页面写
-        配置是「找键所在组」，所以这里把老组整组并过去，再保存一次。
-        幂等：迁移完 `forward` 组就没了，下次启动直接返回。
+        升级后 AstrBot 会把配置文件按新 schema 重写一遍,但**值仍在读** —— 存着
+        旧默认值 rebuild 的用户会一直用不明白为什么没按新默认为准。只在「功能没
+        启用、目标群为空、值就是旧默认」时静默改成 native:这三种条件下改了也不会
+        有任何行为变化;一旦用户真开过自动转发,那 rebuild 就是他自己的选择,不动。
+        返回是否改了(调用方负责写回配置)。
         """
-        obj = getattr(self, "_config_obj", None)
-        if not isinstance(obj, dict):
-            return
-        old = obj.get("forward")
-        if not isinstance(old, dict) or not old:
-            return
-        target = obj.get("render")
-        if not isinstance(target, dict):
-            target = obj["render"] = {}
-        moved = 0
-        for key, value in list(old.items()):
-            if key == "forward_image_width":
-                continue  # 与 style_width 重复，v1.15.0 删除
-            target.setdefault(key, value)
-            moved += 1
-        try:
-            obj.pop("forward", None)
-        except Exception:
-            pass
-        saver = getattr(obj, "save_config", None)
-        if callable(saver):
-            try:
-                saver()
-            except Exception as e:
-                self._log(f"config save failed after group migration: {e!r}")
-        self._log(f"config groups migrated: forward -> render ({moved} key(s))")
+        if getattr(cfg, "auto_forward_enabled", False):
+            return False
+        if getattr(cfg, "auto_forward_mode", "") != "rebuild":
+            return False
+        if getattr(cfg, "forward_target_groups", None):
+            return False
+        cfg.auto_forward_mode = "native"
+        return True
 
     async def initialize(self) -> None:
-        self._migrate_config_groups()
+        if self._promote_auto_forward_default(self.cfg):
+            # 静默升级默认值并写回配置:重启后不再反复提示
+            self._persist_config({"auto_forward_mode": self.cfg.auto_forward_mode})
+            self._log(
+                f"auto_forward_mode: rebuild -> {self.cfg.auto_forward_mode} "
+                f"(v1.15.0 新默认;想保留重建就把它改回 rebuild)")
         self._storage = Storage(
             root=self.cfg.storage_root,
             dedupe=self.cfg.dedupe,

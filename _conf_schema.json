@@ -170,7 +170,7 @@
       }
     }
   },
-  "render": {
+  "forward": {
     "description": "⑤ 聊天记录渲染",
     "type": "object",
     "hint": "合并转发画成图片时的行为与头像；颜色字号等在「⑥ 渲染样式」或 dashboard 样式页里调。",
