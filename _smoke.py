@@ -4665,11 +4665,12 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 8, routes
+    assert len(routes) == 9, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
     assert record_page.PAGE_PREFIX + "/groups" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
+    assert record_page.PAGE_PREFIX + "/reveal" in routes, routes
 
     class _NoReg:
         pass
@@ -4774,7 +4775,7 @@ def test_record_page_routes_and_handlers():
         sys.modules.pop("astrbot.api.web", None)
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK ->", "8 条路由 + stats/records/record/asset/thumb/groups/resend/delete")
+    print("  OK ->", "9 条路由 + stats/records/record/asset/thumb/groups/resend/delete/reveal")
 
 
 def test_plugin_initialize_registers_page_api():
@@ -4787,14 +4788,14 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 8, seen
+    assert len(seen) == 9, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
     pl2 = _build_plugin_for_command(tmp2, enable_index=False, log_to_stdout=False)
     asyncio.run(pl2.initialize())
     assert pl2._page_api is None, "宿主没有 register_web_api 时应安静跳过"
-    print("  OK ->", "8 条路由 / 无宿主支持时跳过")
+    print("  OK ->", "9 条路由 / 无宿主支持时跳过")
 
 
 PHASE7 = [
@@ -5092,6 +5093,171 @@ def test_plugin_forward_saved_as_single_entry():
         print("  OK -> 条目", rid, "| assets", len(assets))
 
 
+def test_record_admin_categories_and_flat():
+    import asyncio
+    banner("record_admin: 分类管理(条目 + 扁平文件), 详情/取图/删除")
+    tmp = tempfile.mkdtemp(prefix="wd_cat_")
+    nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1720000000,
+              "message": [{"type": "text", "data": {"text": "聊天记录内容"}}]}]
+    fwd_rid = record_store.make_record_id("g1", "m1", ts=1720000000)
+
+    async def _no_png(_data):
+        return None
+
+    asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="m1",
+        storage_root=tmp, fetch_image=_no_png, ts=1720000000,
+        record_id=fwd_rid))
+    text_entry = asyncio.run(record_store.capture_text(
+        [{"type": "text", "data": {"text": "一句纯文本"}}],
+        platform="aiocqhttp", group_id="g2", msg_id="m2",
+        sender_id="u2", sender_name="小八", storage_root=tmp,
+        ts=1720000002))
+    text_rid = text_entry["record_id"]
+    assert record_store.save_render(tmp, text_rid, b"\x89PNG\r\n\x1a\n01") == "render.png"
+
+    # 老的扁平落盘文件 + 索引行
+    flat_dir = os.path.join(tmp, "g1", "u1")
+    os.makedirs(flat_dir, exist_ok=True)
+    flat_path = os.path.join(flat_dir, "20260623_181908_image_abc.png")
+    with open(flat_path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n02")
+    from warden.index import AssetIndex
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                 msg_id="m3", idx=0, kind="image", path=flat_path, size=8,
+                 sha16="a" * 16)
+
+    rows = index.list_assets(limit=10)["items"]
+    assert rows and index.list_assets(kinds=["image"])["total"] == 1
+    assert index.list_assets(kinds=["video"])["total"] == 0
+
+    data = record_admin.scan_items(tmp, flat_rows=rows)
+    assert data["total"] == 3, data["items"]
+    kinds = sorted(i["kind"] for i in data["items"])
+    assert kinds == ["forward", "image", "text"], kinds
+
+    only_text = record_admin.scan_items(tmp, kind="text", flat_rows=rows)
+    assert only_text["total"] == 1 and only_text["items"][0]["record_id"] == text_rid
+    only_flat = record_admin.scan_items(tmp, source="flat", flat_rows=rows)
+    assert only_flat["total"] == 1 and only_flat["items"][0]["source"] == "flat"
+    by_group = record_admin.scan_items(tmp, group="g1", flat_rows=rows)
+    assert by_group["total"] == 2, by_group["items"]
+    assert record_admin.scan_items(tmp, q="纯文本", flat_rows=rows)["total"] == 1
+
+    st = record_admin.stats(tmp)
+    assert st["records"] == 1 and st["texts"] == 1, st
+    assert st["kinds"] == {"forward": 1, "text": 1}, st
+
+    detail = record_admin.record_detail(tmp, text_rid)
+    assert detail["kind"] == "text" and detail["render"] == "render.png"
+    assert detail["nodes"][0]["segments"][0]["text"] == "一句纯文本"
+    assert detail["nodes"][0]["name"] == "小八"
+
+    # 条目内的渲染图可取;扁平的其它文件不许被当条目资产读
+    assert record_admin.entry_file(tmp, text_rid, "render.png")
+    assert record_admin.entry_file(tmp, text_rid, "entry.json") is None
+    flat_rel = os.path.relpath(flat_path, tmp).replace(os.sep, "/")
+    assert record_admin.resolve_flat(tmp, flat_rel) == flat_path
+    assert record_admin.resolve_flat(tmp, "../escape.png") is None
+    assert record_admin.resolve_flat(tmp, "_records/" + text_rid + "/render.png") is None
+
+    res = record_admin.delete_flat(tmp, flat_rel)
+    assert res["deleted"] and not os.path.exists(flat_path), res
+    assert index.forget_path(flat_path) == 1
+    assert record_admin.scan_items(tmp, flat_rows=index.list_assets()["items"])["total"] == 2
+    index.close()
+    print("  OK -> 3 类混排 / kind+group+q 过滤 / 详情 / 取图白名单 / 删除+索引清理")
+
+
+def test_plugin_forward_auto_forward_to_target_groups():
+    import asyncio
+    banner("plugin: 自动转发(重建) -> send_group_forward_msg 逐目标群")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={
+                "storage_root": td,
+                "match_mode": "blacklist",
+                "forward_render_mode": "json",
+                "enable_index_db": False,
+                "reply_preview": False,
+                "auto_forward_enabled": True,
+                "auto_forward_mode": "rebuild",
+                "forward_target_groups": ["961583271", "256678737"],
+            },
+        )
+        asyncio.run(inst.initialize())
+        calls = []
+
+        class _Bot:
+            async def call_action(self, action, **kw):
+                calls.append((action, kw))
+                return {"status": "ok"}
+
+        inst._qq_bot = lambda: _Bot()
+        nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1718600000,
+                  "message": [{"type": "text", "data": {"text": "hi"}}]}]
+        ctx = SaveContext(platform="aiocqhttp", group_id="999",
+                          sender_id="u1", sender_name="alice",
+                          msg_id="mauto1", idx=0, ts=1718600000)
+        comp = Component(kind="forward", meta={"nodes": nodes})
+        results = asyncio.run(inst._save_forward(comp, ctx, None))
+        assert any(r.ok for r in results), results
+        actions = [c for c in calls if c[0] == "send_group_forward_msg"]
+        assert len(actions) == 2, calls
+        assert [c[1].get("group_id") for c in actions] == ["961583271", "256678737"]
+        assert actions[0][1].get("messages"), actions[0][1]
+
+        # 开关关掉 = 一条也不发
+        calls.clear()
+        inst.cfg.auto_forward_enabled = False
+        asyncio.run(inst._save_forward(comp, ctx, None))
+        assert calls == [], calls
+        print("  OK -> 2 个目标群各发一次; 关掉开关后 0 次")
+
+
+def test_plugin_auto_forward_native_falls_back_to_rebuild():
+    import asyncio
+    banner("plugin: 自动转发 native 失败 -> 回退重建")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={
+                "storage_root": td, "match_mode": "blacklist",
+                "forward_render_mode": "json", "enable_index_db": False,
+                "reply_preview": False, "auto_forward_enabled": True,
+                "auto_forward_mode": "native",
+                "forward_target_groups": ["961583271"],
+            },
+        )
+        asyncio.run(inst.initialize())
+        calls = []
+
+        class _Bot:
+            async def call_action(self, action, **kw):
+                calls.append(action)
+                if action == "get_msg":
+                    return {"message": [{"type": "forward",
+                                         "data": {"id": "FWD-1"}}]}
+                if action == "forward_group_single_msg":
+                    raise RuntimeError("跨群原地转发不可用")
+                return {"status": "ok"}
+
+        inst._qq_bot = lambda: _Bot()
+        nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1718600000,
+                  "message": [{"type": "text", "data": {"text": "hi"}}]}]
+        ctx = SaveContext(platform="aiocqhttp", group_id="999",
+                          sender_id="u1", sender_name="alice",
+                          msg_id="1481691615", idx=0, ts=1718600000)
+        comp = Component(kind="forward", meta={"nodes": nodes})
+        asyncio.run(inst._save_forward(comp, ctx, None))
+        assert "forward_group_single_msg" in calls, calls
+        assert "send_group_forward_msg" in calls, calls
+        print("  OK -> 原地失败后仍以重建送达")
+
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5099,6 +5265,9 @@ PHASE9 = [
     test_plugin_e2e_text_message_saved_as_entry,
     test_plugin_type_gating_drops_disabled_and_bad_ext,
     test_plugin_forward_saved_as_single_entry,
+    test_record_admin_categories_and_flat,
+    test_plugin_forward_auto_forward_to_target_groups,
+    test_plugin_auto_forward_native_falls_back_to_rebuild,
 ]
 
 

@@ -138,6 +138,25 @@ main {
 }
 .toast.show { opacity: 1; }
 .toast.bad { background: var(--danger); }
+
+/* v1.14.0: 分类管理 */
+.kinds {
+  display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  padding: 4px 10px; border-radius: 999px; cursor: pointer; font: inherit;
+  font-size: 12px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--dim);
+}
+.tab:hover { border-color: var(--accent); color: var(--accent); }
+.tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pill.kind-forward { color: var(--accent); border-color: var(--accent); }
+.pill.kind-text { color: var(--ok); border-color: var(--ok); }
+.detail-tabs { display: flex; gap: 6px; padding: 8px 16px 0; }
+.render-wrap { margin-top: 6px; }
+.render-img { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
+
 @media (max-width: 860px) {
   main { grid-template-columns: 1fr; }
   .list { max-height: 40vh; }

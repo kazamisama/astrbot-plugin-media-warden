@@ -276,6 +276,39 @@ class AssetIndex:
         )
         return _asset_rows(c.execute(sql, params))
 
+    def list_assets(self, *, limit: int = 100, offset: int = 0,
+                    kinds: Optional[list] = None, group_id: Optional[str] = None,
+                    q: str = "") -> dict:
+        """分类管理用的资产列表（v1.14.0）.
+
+        与 recent() 的区别:支持按 kind 过滤、按群过滤、按 path 模糊搜索,
+        并且返回 total —— 页面分页需要它,不能靠「拿一页再数」猜。
+        """
+        c = self._require()
+        where: list[str] = []
+        params: list[Any] = []
+        kinds = [k for k in (kinds or []) if k]
+        if kinds:
+            where.append("kind IN (" + ",".join("?" * len(kinds)) + ")")
+            params.extend(kinds)
+        if group_id:
+            where.append("group_id = ?")
+            params.append(str(group_id))
+        needle = (q or "").strip()
+        if needle:
+            where.append("(path LIKE ? OR msg_id LIKE ? OR sender_id LIKE ?)")
+            like = "%" + needle + "%"
+            params.extend([like, like, like])
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        total = c.execute("SELECT COUNT(*) FROM assets" + clause, params).fetchone()[0]
+        rows = _asset_rows(c.execute(
+            "SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
+            "kind, path, size, sha16, forward_meta FROM assets" + clause
+            + " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+            params + [max(1, int(limit)), max(0, int(offset))],
+        ))
+        return {"total": int(total), "items": rows}
+
     def find_by_sha(self, sha16: str) -> list[dict]:
         c = self._require()
         cur = c.execute(
@@ -284,6 +317,15 @@ class AssetIndex:
             (sha16,),
         )
         return _asset_rows(cur)
+
+    def forget_path(self, path: str) -> int:
+        """页面删掉一个扁平文件后,把对应的索引行也清掉(返回删除行数)。"""
+        if not path:
+            return 0
+        c = self._require()
+        cur = c.execute("DELETE FROM assets WHERE path = ?", (str(path),))
+        c.commit()
+        return int(cur.rowcount or 0)
 
     def count(self) -> int:
         c = self._require()

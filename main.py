@@ -1027,6 +1027,53 @@ class MediaWardenStar(Star):
                 return call
         return None
 
+    def _qq_bot(self):
+        """aiocqhttp 的 CQHttp 客户端（自动转发要用真正的机器人账号）。"""
+        try:
+            platform = self.context.get_platform("aiocqhttp")
+        except Exception:
+            platform = None
+        return getattr(platform, "bot", None)
+
+    async def _auto_forward(self, rec: dict, rid: str,
+                            ctx: SaveContext) -> list[str]:
+        """把刚存的聊天记录转发到配置的目标群（v1.14.0 可选功能）.
+
+        native 模式先试原地转发（保气泡），失败自动回退重建 —— 跨群原地
+        并非 QQ 永远允许，回退不算错误，只记日志。
+        """
+        if not self.cfg.auto_forward_enabled:
+            return []
+        targets = [t for t in self.cfg.forward_targets_set()
+                   if str(t) != str(ctx.group_id)]
+        if not targets:
+            return []
+        bot = self._qq_bot()
+        if bot is None:
+            self._log("auto forward skipped: 没有 aiocqhttp 实例")
+            return []
+        from .warden import record_admin
+        base = record_store.record_dir(self.cfg.storage_root, rid)
+        done: list[str] = []
+        for gid in targets:
+            res = None
+            if self.cfg.auto_forward_mode == "native":
+                res = await record_admin.native_forward(
+                    bot, gid, rec.get("root_msg_id") or "")
+                if not res.get("ok"):
+                    self._log(f"auto forward native failed for {gid}: "
+                              f"{res.get('error')} — fallback rebuild")
+                    res = None
+            if res is None:
+                res = await record_admin.rebuild_forward(bot, gid, rec, base)
+            if res.get("ok"):
+                done.append(f"{gid}({res.get('mode')})")
+            else:
+                self._log(f"auto forward failed for {gid}: {res.get('error')}")
+        if done:
+            self._log("auto forwarded: " + ", ".join(done))
+        return done
+
     def _store_dl(self, comp: Component, ctx: SaveContext, dl,
                   *, reuse: bool = False) -> AssetResult:
         if isinstance(dl, DownloadError):
@@ -1567,6 +1614,13 @@ class MediaWardenStar(Star):
                         failure_kind="save", kind="forward_render",
                         row_idx=ctx.idx + 100,
                     ))
+
+        # v1.14.0: 可选的自动转发（目标群为空/开关关掉时什么都不做）
+        if archived is not None and results:
+            try:
+                await self._auto_forward(archived, rid, ctx)
+            except Exception as e:
+                self._log(f"auto forward error: {type(e).__name__}: {e!r}")
 
         if not results:
             results.append(AssetResult(

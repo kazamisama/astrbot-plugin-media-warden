@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import base64
 import os
+from typing import Optional
 
 from . import record_admin
-from .record import load_record, record_dir
+from .record import load_entry, load_record, record_dir
 
 _MIME_BY_EXT = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -57,6 +58,8 @@ class RecordPageApi:
                  "media-warden 重发存档")
         register(f"{PAGE_PREFIX}/delete", self.delete, ["POST"],
                  "media-warden 删除存档")
+        register(f"{PAGE_PREFIX}/reveal", self.reveal, ["POST"],
+                 "media-warden 在资源管理器里打开目录")
         return True
 
     # ---------------- 内部 ----------------
@@ -75,17 +78,35 @@ class RecordPageApi:
 
     # ---------------- 处理函数 ----------------
 
+    def _flat_rows(self, *, kinds=None, group=None, q="", limit=500) -> list:
+        """索引库里的扁平落盘资产（图片/动图/视频/文档）—— 没有索引时返回空。"""
+        index = getattr(self.plugin, "_index", None)
+        if index is None:
+            return []
+        try:
+            return index.list_assets(limit=limit, kinds=kinds,
+                                     group_id=group or None, q=q)["items"]
+        except Exception:
+            return []
+
     async def get_stats(self):
-        return {"status": "ok", "data": record_admin.stats(self._root)}
+        data = record_admin.stats(self._root)
+        data["flat_total"] = len(self._flat_rows(limit=2000))
+        return {"status": "ok", "data": data}
 
     async def list_records(self):
         from astrbot.api.web import request
-        data = record_admin.scan_records(
+        kind = request.query.get("kind", "") or ""
+        group = request.query.get("group", "") or ""
+        q = request.query.get("q", "") or ""
+        flat_kinds = [kind] if kind in ("image", "gif", "video", "file", "voice") else None
+        data = record_admin.scan_items(
             self._root,
-            q=request.query.get("q", "") or "",
-            group=request.query.get("group", "") or "",
+            q=q, group=group, kind=kind,
+            source=request.query.get("source", "") or "",
             limit=request.query.get("limit", "50", int) or 50,
             offset=request.query.get("offset", "0", int) or 0,
+            flat_rows=self._flat_rows(kinds=flat_kinds, group=group, q=q),
         )
         return {"status": "ok", "data": data}
 
@@ -97,11 +118,20 @@ class RecordPageApi:
             return {"status": "error", "message": "存档不存在", "data": {}}
         return {"status": "ok", "data": detail}
 
+    def _resolve_file(self, rid: str, rel: str, source: str = "") -> Optional[str]:
+        """页面给 (id,path) 或 (source=flat,path) —— 两套保存物都要能取到。"""
+        if source == "flat" or (not rid and rel):
+            return record_admin.resolve_flat(self._root, rel)
+        if not rid:
+            return None
+        return (record_admin.entry_file(self._root, rid, rel)
+                or record_admin.resolve_asset(self._root, rid, rel))
+
     async def get_asset(self):
         from astrbot.api.web import file_response, request
         rid = str(request.query.get("id", "") or "")
         rel = str(request.query.get("path", "") or "")
-        full = record_admin.resolve_asset(self._root, rid, rel)
+        full = self._resolve_file(rid, rel, request.query.get("source", "") or "")
         if not full:
             return {"status": "error", "message": "资产不存在", "data": {}}
         return file_response(full)
@@ -151,7 +181,7 @@ class RecordPageApi:
         from astrbot.api.web import request
         rid = str(request.query.get("id", "") or "")
         rel = str(request.query.get("path", "") or "")
-        full = record_admin.resolve_asset(self._root, rid, rel)
+        full = self._resolve_file(rid, rel, request.query.get("source", "") or "")
         if not full:
             return {"status": "error", "message": "资产不存在", "data": {}}
         try:
@@ -177,6 +207,10 @@ class RecordPageApi:
         rid = str(body.get("id") or "")
         rec = load_record(self._root, rid)
         if not rec:
+            if load_entry(self._root, rid) is not None:
+                return {"status": "error",
+                        "message": "纯文本条目没有合并转发可重发（只有聊天记录能发回）",
+                        "data": {}}
             return {"status": "error", "message": "存档不存在", "data": {}}
         group_id = str(body.get("group_id") or rec.get("group_id") or "")
         if not group_id:
@@ -196,10 +230,59 @@ class RecordPageApi:
                     res = rb
         return {"status": "ok", "data": res}
 
+    async def reveal(self):
+        """在运行 AstrBot 的这台机器上打开文件所在目录。
+
+        桌面版用户看不到服务器路径,「打开目录」比给一串绝对路径有用。
+        只对 storage_root 之下的真实目录生效,非 Windows 直接说明不支持。
+        """
+        from astrbot.api.web import request
+        body = await request.json(default={}) or {}
+        if not isinstance(body, dict):
+            body = {}
+        rid = str(body.get("id") or "")
+        flat = str(body.get("path") or "")
+        target = ""
+        if flat:
+            full = record_admin.resolve_flat(self._root, flat)
+            if not full:
+                return {"status": "error", "message": "文件不存在", "data": {}}
+            target = os.path.dirname(full)
+        elif rid:
+            target = record_dir(self._root, rid)
+            if not os.path.isdir(target):
+                return {"status": "error", "message": "存档不存在", "data": {}}
+        else:
+            target = self._root
+        if not os.path.isdir(target):
+            return {"status": "error", "message": "目录不存在", "data": {}}
+        if os.name != "nt":
+            return {"status": "ok", "data": {"opened": False, "path": target,
+                                             "note": "非 Windows 平台不自动打开"}}
+        try:
+            os.startfile(target)  # noqa: S606 - 只打开 storage_root 下的目录
+        except OSError as e:
+            return {"status": "error", "message": f"打开失败: {e!r}", "data": {}}
+        return {"status": "ok", "data": {"opened": True, "path": target}}
+
     async def delete(self):
         from astrbot.api.web import request
         body = await request.json(default={}) or {}
-        rid = str((body or {}).get("id") or "")
+        if not isinstance(body, dict):
+            body = {}
+        if str(body.get("source") or "") == "flat":
+            res = record_admin.delete_flat(self._root,
+                                           str(body.get("path") or ""))
+            if res.get("deleted"):
+                index = getattr(self.plugin, "_index", None)
+                if index is not None:
+                    try:
+                        index.forget_path(res.get("path") or "")
+                    except Exception:
+                        pass
+            return {"status": "ok" if res.get("deleted") else "error",
+                    "message": res.get("reason", ""), "data": res}
+        rid = str(body.get("id") or "")
         if not rid:
             return {"status": "error", "message": "缺少 id", "data": {}}
         res = record_admin.delete_record(self._root, rid)
