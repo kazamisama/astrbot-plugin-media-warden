@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>聊天记录存档 · media-warden</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">MW</span>
+        <span class="title">聊天记录存档</span>
+        <span class="sub">浏览 · 管理 · 重发</span>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="tools">
+        <input id="q" type="search" placeholder="搜索发送者 / 文本 / 群号" />
+        <select id="group"><option value="">全部群</option></select>
+        <button id="refresh" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="list-pane">
+        <div class="list-head" id="list-head">还没有存档</div>
+        <div class="list" id="list"></div>
+      </section>
+      <aside class="detail-pane" id="detail">
+        <p class="hint">左侧选择一条存档查看内容</p>
+      </aside>
+    </main>
+
+    <div class="toast" id="toast"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

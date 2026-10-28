@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "display_name": "媒体守门人",
+    "short_desc": "群聊素材归档 + 聊天记录存档/重发"
+  },
+  "pages": {
+    "dashboard": {
+      "title": "聊天记录存档"
+    }
+  }
+}

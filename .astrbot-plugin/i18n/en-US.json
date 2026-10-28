@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "display_name": "Media Warden",
+    "short_desc": "Group media archiver with chat-record store & resend"
+  },
+  "pages": {
+    "dashboard": {
+      "title": "Chat records"
+    }
+  }
+}

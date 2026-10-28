@@ -45,6 +45,7 @@ from .warden.downloader import (
 from .warden.storage import Storage, SaveContext
 from .warden.index import failure_subject
 from .warden import record as record_store
+from .warden.record_page import RecordPageApi
 
 
 def _local_cache_candidates(comp: Component) -> list:
@@ -255,7 +256,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.12.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail, 预览回传 + 可选引用原消息, 命令仅管理员可用",
+    "群聊素材守门人 v1.13.0: 监听特定群/用户的非文字消息,按模板落盘,转发链 PIL 渲染/JSON 保存,并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 存档页面(浏览/搜索/取图/发回/删除), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -327,11 +328,22 @@ class MediaWardenStar(Star):
             except Exception as e:
                 self._log(f"index init failed: {e!r} — runs without index")
                 self._index = None
+        try:
+            # dashboard 插件页面(pages/dashboard)的后端:老版本 AstrBot 没有
+            # register_web_api 时安静跳过,页面本身也就不会被发现。
+            self._page_api = RecordPageApi(self)
+            if not self._page_api.register_routes():
+                self._log("page api unavailable (宿主没有 register_web_api) — 存档页面不可用")
+                self._page_api = None
+        except Exception as e:
+            self._log(f"page api init failed: {e!r} — 存档页面不可用")
+            self._page_api = None
         self._log(
             f"initialize: storage={self._storage.root} "
             f"forwarder={'on' if self._forwarder else 'off'} "
             f"index={'on' if self._index else 'off'} "
-            f"avatars={'on' if (self.cfg.enable_user_avatar and self._avatar_cache) else 'off'}"
+            f"avatars={'on' if (self.cfg.enable_user_avatar and self._avatar_cache) else 'off'} "
+            f"page={'on' if self._page_api else 'off'}"
         )
         return None
 
