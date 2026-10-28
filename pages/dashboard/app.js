@@ -122,7 +122,18 @@
     if (seg.type === "text") {
       return seg.text ? '<p class="seg-text">' + esc(seg.text) + "</p>" : "";
     }
-    var label = seg.raw || seg.type;
+    var label = seg.type;
+    if (seg.raw && typeof seg.raw === "object") {
+      var parts = [];
+      Object.keys(seg.raw).forEach(function (k) {
+        if (seg.raw[k] !== null && seg.raw[k] !== undefined && seg.raw[k] !== "") {
+          parts.push(k + "=" + seg.raw[k]);
+        }
+      });
+      if (parts.length) label = seg.type + " " + parts.join(" ");
+    } else if (typeof seg.raw === "string" && seg.raw) {
+      label = seg.raw;
+    }
     if (seg.type === "face" && seg.id != null) label = "表情 " + seg.id;
     if (seg.type === "at" && seg.qq) label = "@" + seg.qq;
     return '<p class="seg-dim">[' + esc(label) + "]</p>";
