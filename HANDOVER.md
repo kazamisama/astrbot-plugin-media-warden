@@ -8,7 +8,7 @@
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 / v1.12.0（`7396611` + `f3368ca`）/ v1.13.0（八笔小步提交）/ v1.14.0（`ba83bbf` → `4ef1afe` → `b8cb445` → `18e8544`）各一批提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=13, total=143)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=15, total=145)`
 
 
 ## 1.-3 v1.14.0（按类型采集 + 分类管理 + 样式页，当前版本）
@@ -27,6 +27,9 @@
 - **纯文本**：`components.raw_segments(event)` 取原始段（text / at / face / reply）→ `record.capture_text()` 写 `entry.json` → 渲染一张 `render.png` 塞进同一目录 → 回执与媒体共用 `_emit_receipt()`。
 - **聊天记录**：`_save_forward` 顺序改成「先下节点图（`blob_by_url`）→ `record.capture()` → JSON → 渲染 → `save_render()`」；存档失败只记日志（不影响 JSON 与渲染），渲染失败照样经 `_failed()` 进 failures。
 - **分类管理**：`index.list_assets(kinds / group_id / q)` 查扁平文件，`record_admin.scan_items()` 把 `_records/` 条目与扁平行合成一页；类型标签同时覆盖两者。`page/thumb` 支持 `source=flat` 与 `render.png`；`page/reveal` → `os.startfile`（仅 Windows，且只对 `storage_root` 下的目录生效）。
+- **统计/筛选必须走 SQL，不能先取一页再过滤**（v1.14.0 页面审计修的就是这个）：`record_page._FLAT_KIND_MAP` 把页面类型翻成索引 `kind`（image → `['image','forward_render']`、forward → `['forward','forward_json']`），`_flat_kinds()` 在 SQL 层过滤；总数用 `index.summary(...)` 的 `COUNT(*)` / `SUM(size)`，`scan_items(flat_total=...)` 只负责把「条目 + 扁平真实总数」拼成 `total`。占用口径含 `render.png` 与 `entry.json`（`_dir_file_bytes`）。
+- **uin 只在可信时显示**：`record.uin_reliable(nodes)` —— NapCat 的 `get_forward_msg` 会给整条转发的每个节点**同一个** `sender.user_id`（昵称却各不相同），这种记录写 `uin_reliable: false`，页面只显示昵称、不显示那个假号。
+- **详情字段**：`record_detail()` / `_entry_detail()` 都返回 `has_render` 与 `render`（文件名），页面靠它决定是否出「结构化 / 渲染图」标签；缺了标签就不出现（这正是审计里「render.png 点不开」的原因）。
 - **转发**：`record_admin.native_forward`（跨群原地同样保装扮）/ `rebuild_forward`（丢装扮），原地失败自动回退重建并在回执里说明；页面下拉 `page/groups` 带群名，默认这条记录的原群。自动转发在 `_save_forward` 末尾调 `_auto_forward()`，目标空或等于源群就跳过。
 - **样式**：`Forwarder.apply_style(**10 项)` 改 `_RenderCfg`；`main._apply_render_style()` 在 `initialize()` 与 `update_style()` 后都调；`pages/style/` 实时预览（debounce 180ms，含合成头像），保存写宿主配置（`_persist_config` → `config.save_config()`，失败只记日志）。`dark` 只替换仍是默认值的颜色。
 
@@ -36,7 +39,8 @@
 - `config.doc_ext_allowed(ext_or_name)`、`save_type_flags()`、`forward_targets_set()`
 - `policy.media_kind` / `kind_allowed` / `comp_is_animated` / `blob_is_animated`；`ALL_SENDERS = "*"`
 - `record.capture_text(...) -> dict`、`load_entry`、`meta_filename`、`has_render`、`save_render`；常量 `ENTRY_FILENAME` / `RECORD_FILENAME` / `RENDER_FILENAME`；`list_records()` 混排 forward/text 并带 `kind`
-- `index.list_assets(*, limit, offset, kinds, group_id, q) -> {"total","items"}`、`forget_path(path) -> int`
+- `index.list_assets(*, limit, offset, kinds, group_id, q) -> {"total","items"}`、`forget_path(path) -> int`、`index.summary(*, kinds, group_id, q) -> {"total","bytes"}`（`_asset_filter()` 静态方法被两者共用）
+- `record_admin.scan_items(..., flat_total: Optional[int] = None)`、`record_detail()` 多 `render` / `has_render` / `uin_reliable`、`record.uin_reliable(nodes)`
 - `record_admin.KINDS` / `KIND_LABELS` / `scan_items` / `entry_item` / `flat_item` / `entry_file` / `resolve_flat` / `delete_flat`
 - `forwarder.apply_style(**kwargs)`、`_avatar_mask(size, shape)`、`_hex_rgb()`、`_fmt_time()`
 - 页面路由 8 → 12（新增 `reveal` / `style` / `style_save` / `style_preview`）
@@ -546,16 +550,17 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 | `pages/style/*`（新） | 样式编辑器 + 实时预览（样例里带合成头像，才看得出圆/方差别） |
 | `_conf_schema.json` | 6 组 → 9 组（`save_types` / `auto_forward` / `render_style`） |
 | `main.py` | 下载前类型门控、`_save_text()`、`_emit_receipt()`、`_auto_forward()`、`_apply_render_style()` / `style_snapshot()` / `update_style()` / `_persist_config()`（写进键所属的 schema 分组，不在顶层留重复键） |
-| `_smoke.py`（143 项） | 新 Phase 9 十三项 |
+| `_smoke.py`（145 项） | 新 Phase 9 十五项 |
 
 ## 4. 验证记录
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=13, total=143)`（v1.14.0）
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=15, total=145)`（v1.14.0）
 - v1.14.0 本机实测（2026-10-28）：重载后日志 `loaded: v1.14.0 | mode=whitelist | groups=1 users=1`、`page=on`（修复前同一条是 `groups=0 users=0` —— 配置根本没被读到）；`/api/plug/astrbot-plugin-media-warden/page/{stats,groups,style,records,style_preview}` 全部 200（stats：3 条存档 / 7 节点 / 4 资产 / flat 2000；groups：collect `961583271` 与 llm `256678737`，各 3 人；style_preview 返回 `data:image/png;base64,…`）；`/api/plugin/page/entry?name=…&page=style` 返回 `content_path`（标题由前端按 i18n 的 `pages.style.title` 解析）。**没做浏览器内点击验证**。
 - 本机插件配置在 `C:\Users\chiriu\.astrbot\data\config\astrbot-plugin-media-warden_config.json`（按 schema 分组嵌套）；当前值 `target_groups=["961583271"]`、`target_users=["2510536451"]`、`match_mode=whitelist` —— 修复配置读取后，抓取范围就是「collect 群 + 風見かずき」。
 - v1.14.0 跨群转发实测（2026-10-28，pages API 走真实 bot）：对 2026-10-27 的存档做 `mode=native` → 目标群 `256678737`，`get_msg` 直接回 **「消息不存在」**（原消息已过期；插件先核验再转发，所以没有乱发）；同一条记录 `mode=rebuild` → `ok: true`，`send_group_forward_msg` 送 3 个节点进 llm 群。结论：跨群「原地」同样受「原消息还在」约束，`_auto_forward` 的 native 失败回退 rebuild 是必须的（llm 群里留了一条测试转发，可手动撤回）。
+- v1.14.0 页面审计实测（2026-10-28，用户截图驱动）：修复前 `stats` 的 `flat_total` 是 `_flat_rows(limit=2000)` 的长度（假 2000），`records?kind=forward` 只出 8 条、`kind=image` 恒 500；修复后同一批数据返回 `flat_total 7547` / `flat_bytes 5271692289`（≈4.9 GB）、`forward 60`、`image 7491`、`file 0`，条目侧 `bytes 789953`（含 render.png）；`record?id=20261028-141242-961583271-1576078598` → `has_render: true`、`render: "render.png"`、`uin_reliable: false`（该条 6 个节点共用一个 sender.user_id）。类型筛选现在由 `_FLAT_KIND_MAP` 决定（image 含 `forward_render`，forward 含 `forward_json`）。
 - `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3, total=130)`（v1.13.0）
 - v1.13.0 页面链路在本机 AstrBot 上实测（2026-10-28）：插件重载后 `/api/plugin/page/entry?name=…&page=dashboard` 返回 `content_path`；页面 HTML 200（标题已被 i18n 换成「聊天记录存档」）；`app.js` / `styles.css` 以 `text/javascript` / `text/css` 200 返回；`/api/plug/<plugin>/page/stats` 与 `/page/records` 返回 3 条真实存档（群 961583271）。**没做浏览器内点击验证**（页面 DOM 只做了语法与 id 交叉检查）
 - v1.11.0 的 Windows 路径修复用临时脚本实测过：`BatchResult.storage_root` 从 `None` 变为 `C:/data/warden/g1/`，且 `format_batch()` 输出 `  路径: C:/data/warden/g1/`

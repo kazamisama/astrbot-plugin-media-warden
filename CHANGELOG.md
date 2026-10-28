@@ -3,7 +3,7 @@
 ## v1.14.0
 
 「存什么 / 怎么存 / 怎么看」三件事一起做完：类型门控 + 六类开关，纯文本与聊天记录统一成「一个条目两种形态」，页面按类型分类管理并支持发到别的群，渲染样式搬进独立页面。
-冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=13, total=143)`。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3 phase9=15, total=145)`。
 
 ### 升级前必读（语义变化）
 
@@ -20,6 +20,7 @@
 - **分类管理页**：类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）同时覆盖 `_records/` 条目与老的扁平落盘文件（`index.list_assets()` 按 `kind` 查，`record_admin.scan_items()` 合并两类）；右侧「结构化 / 渲染图」切换看同一张条目的两种形态；新增「打开目录」（`page/reveal` → `os.startfile`，仅 Windows，且只对 `storage_root` 下的目录生效）。
 - **跨群转发 + 目标群下拉**：页面「发回」旁多一个带群名的目标群下拉（`page/groups` 读 `get_group_list`，默认这条记录的原群），可选「原地（保装扮）」或「重建（丢装扮）」；原地失败自动回退重建，并在回执里说明走了哪条路。
 - **自动转发**：`auto_forward_enabled` + `auto_forward_mode: rebuild|native` + `forward_target_groups`（多群，默认空 = 不转发）。存档成功后自动发到各目标群：`native` 先试原地（跨群同样保装扮），失败回退重建；目标等于源群时跳过。
+- **「加载更多」**：列表一页 200 条，底部按钮按页追加（`page/records` 本就支持 `offset`）；以前只写「显示前 N 条」，几千个老文件根本翻不到。
 - **渲染样式页**（`pages/style/`）：宽度 / 字号 / 圆角 / 背景·气泡·正文·次要用色 / 头像形状（圆 / 方）/ 时间格式 / 深色，右侧**实时预览**（含合成头像，才看得出圆形与方形圆角的差别）；保存写回插件配置并立刻 `Forwarder.apply_style()` 生效，不用重载。
 
 ### Changed
@@ -38,11 +39,16 @@
 - 纯文本消息以前被整体忽略（走一句 `nothing to save`）；现在按 `save_texts` 决定存不存，存就同时有 `entry.json` 与 `render.png`。
 - 纯文本分支最初漏传 `event` 给回执，导致这条消息一条消息都不 yield（用户侧静默无回执）；现在两个分支统一走 `_emit_receipt(batch, msg_id, sender_id, event)`。
 - `Config.doc_ext_allowed()` 以前只认扩展名，传文件名（如 `doc.pdf`）一律被拒；现在两种入参都收（`os.path.splitext` 归一）。
+- **页面统计是一页的行数，不是总数**：顶部「扁平文件 2000」= `_flat_rows(limit=2000)` 的长度，而索引里实际 7547 行、占用 4.9 GB。现在 `index.summary()` 用 `COUNT(*)` / `SUM(size)` 出真数，`get_stats` 分别返回条目侧与扁平侧的 `flat_total` / `flat_bytes`。
+- **类型筛选在取数截断之后才做**：`list_records` 先取 500 行再在 Python 里按 `kind` 过滤 —— 「聊天记录」只剩 8 条（真实 60）、「图片」永远是 500（真实 7491）。现在 `_flat_kinds()` 把类型翻成索引里的 `kind` 列表、在 SQL 里过滤，`scan_items(flat_total=…)` 用真实总数算 `total`。
+- **占用口径**：`stats.bytes` 只累加 `_records` 的图片字节，漏了 `render.png` / `entry.json`，与磁盘差一个量级；现在 `_dir_file_bytes()` 把这两个文件也算进去。
+- **详情缺 `has_render` / `render`**：列表项有「有渲染图」徽章，详情里却没有这两个键，页面的「结构化 / 渲染图」标签根本不出现、`render.png` 点不开；现在 `record_detail()` 与 `_entry_detail()` 都带上。
+- **不可信 uin 照抄**：NapCat 的 `get_forward_msg` 给整条转发的**每个节点同一个 `sender.user_id`**（昵称却是各节点的），页面会显示成「两个不同昵称共用一个 QQ 号」。`record.uin_reliable(nodes)` 在同一个 uin 对上多个昵称时判为不可信并写进 `record.json`，页面此时只显示昵称。
 
 ### Tests
 
 - 新增 Phase 9 共 10 项：类型门控与动图判定、纯文本条目往返、纯文本消息端到端落盘、禁用类型与坏扩展名被丢弃、聊天记录「一个条目两种形态」、分类扫描（含扁平文件）、自动转发到多群、`native` 模式失败回退 `rebuild`、`apply_style` 生效与头像形状、`update_style` 三元组与样式页路由。
-- 冒烟 130 → **143** 项（Phase 9: 13；多出的三项是「宿主分组嵌套配置能被读到」「样式保存写进 schema 分组、不在顶层留重复键」「转发结果带回新消息 id」）。
+- 冒烟 130 → **145** 项（Phase 9: 15；多出的五项是「宿主分组嵌套配置能被读到」「样式保存写进 schema 分组、不在顶层留重复键」「转发结果带回新消息 id」「详情带 has_render / uin_reliable」「统计与类型筛选用真实总数（700 图 + 60 个扁平 JSON，超出旧的 500 行窗口也能数对）」）。
 - 本机实测（2026-10-28）：跨群「原地」转发一条 2026-10-27 的存档回 `消息不存在`（原消息已过期，`get_msg` 先拦下并说明原因），回退「重建」到另一个群成功（`send_group_forward_msg` 3 个节点）—— 这正是「原消息还在就用原地，没了就重建」的设计预期。
 
 ## v1.13.0
