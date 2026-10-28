@@ -24,6 +24,17 @@ KIND_LABELS = {
 }
 
 
+def _can_native(rec: dict) -> bool:
+    """能不能「转发原消息」:要有短 msg id,且没有被打上「原消息已失效」。
+
+    失效标记由页面 resend 在 native 失败(消息不存在/取不到原消息)时写入元数据 ——
+    过期是**永久**的(QQ 那边不会复活),不记住的话每次打开都还是一个主按钮。
+    """
+    if not bool(str(rec.get("root_msg_id") or "").isdigit()):
+        return False
+    return not bool(rec.get("native_unavailable"))
+
+
 def _asset_bytes(rec: dict) -> int:
     return sum(int(a.get("bytes") or 0) for a in rec.get("assets") or []
                if isinstance(a, dict))
@@ -165,6 +176,9 @@ def flat_item(root: str, row: dict) -> Optional[dict]:
         kind = "forward"
     elif kind == "forward_render":
         kind = "image"
+    elif kind == "image" and path.lower().endswith(".gif"):
+        # 老索引把 GIF 也记成 image:列表里要显示「动图」,和 SQL 侧的扩展名切分一致
+        kind = "gif"
     return {
         "source": "flat",
         "kind": kind,
@@ -271,7 +285,8 @@ def _forward_item(root: str, rec: dict, name: str) -> dict:
         "missing_count": len(rec.get("missing") or []),
         "bytes": _entry_bytes(root, name, rec),
         "preview": preview[:80],
-        "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
+        "can_native": _can_native(rec),
+        "native_unavailable": bool(rec.get("native_unavailable")),
         "has_render": bool(rec.get("render")),
         "duplicate_of": str(rec.get("duplicate_of") or ""),
         "meta_file": "record.json",
@@ -307,7 +322,8 @@ def scan_records(root: str, *, q: str = "", group: str = "",
             "missing_count": len(rec.get("missing") or []),
             "bytes": _entry_bytes(root, name, rec),
             "preview": preview[:80],
-            "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
+            "can_native": _can_native(rec),
+            "native_unavailable": bool(rec.get("native_unavailable")),
         })
     items.sort(key=lambda r: r["captured_ts"], reverse=True)
     total = len(items)
@@ -455,7 +471,7 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "group_id": str(rec.get("group_id") or ""),
         "root_msg_id": str(rec.get("root_msg_id") or ""),
         "captured_ts": int(rec.get("captured_ts") or 0),
-        "can_native": bool(str(rec.get("root_msg_id") or "").isdigit()),
+        "can_native": _can_native(rec),
         "schema_version": int(rec.get("schema_version") or 0),
         "node_count": int(rec.get("node_count") or len(nodes_out)),
         "asset_count": len(rec.get("assets") or []),
@@ -467,6 +483,8 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "render": str(rec.get("render") or ""),
         "has_render": bool(rec.get("render")),
         "duplicate_of": str(rec.get("duplicate_of") or ""),
+        # 页面用它把「转发原消息」标成「原消息已失效」，而不是留一个点了必敗的主按钮
+        "native_unavailable": bool(rec.get("native_unavailable")),
         "uin_reliable": uin_reliable(nodes_out),
         "nodes": nodes_out,
     }

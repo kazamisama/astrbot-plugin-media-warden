@@ -5574,6 +5574,9 @@ def test_page_stats_and_kind_filter_use_real_counts():
         _mk("i%04d.png" % i, "image", 4, 1720000000 + i)
     for i in range(60):
         _mk("f%04d_forward_json.json" % i, "forward_json", 8, 1719000000 + i)
+    # 老索引把 GIF 也记成 kind=image:它们要出现在「动图」里,且不能同时算进「图片」
+    for i in range(3):
+        _mk("g%02d.gif" % i, "image", 4, 1719800000 + i)
 
     class _Pl:
         def __init__(self):
@@ -5587,7 +5590,7 @@ def test_page_stats_and_kind_filter_use_real_counts():
     try:
         _install_web_stub()
         st = asyncio.run(api.get_stats())["data"]
-        assert st["flat_total"] == 760, st["flat_total"]
+        assert st["flat_total"] == 763, st["flat_total"]
         assert st["flat_bytes"] == total_bytes, (st["flat_bytes"], total_bytes)
         _install_web_stub(query={"kind": "forward", "limit": "1000"})
         fwd = asyncio.run(api.list_records())["data"]
@@ -5596,13 +5599,84 @@ def test_page_stats_and_kind_filter_use_real_counts():
         _install_web_stub(query={"kind": "image", "limit": "1000"})
         img = asyncio.run(api.list_records())["data"]
         assert img["total"] == 700, img["total"]
+        _install_web_stub(query={"kind": "gif", "limit": "1000"})
+        gifs = asyncio.run(api.list_records())["data"]
+        assert gifs["total"] == 3, gifs
+        assert all(i["kind"] == "gif" for i in gifs["items"]), gifs["items"][:3]
         _install_web_stub(query={"kind": "text"})
         assert asyncio.run(api.list_records())["data"]["total"] == 0
     finally:
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
         index.close()
-    print("  OK -> stats 760 行 / forward 60 / image 700 / text 0")
+    print("  OK -> stats 763 行 / forward 60 / image 700 / gif 3 / text 0")
+
+def test_page_native_failure_marks_stale():
+    """原消息已失效要记住（页面不再把它当可点的主按钮）；偶发失败不记。"""
+    import asyncio
+    import json
+    banner("record_page: 原消息失效记为 stale / 网络抖动不记")
+    tmp = tempfile.mkdtemp(prefix="warden_stale_")
+
+    def _make(rid, msg_id):
+        rdir = os.path.join(record_store.records_root(tmp), rid)
+        os.makedirs(rdir, exist_ok=True)
+        rec = {"schema_version": 1, "record_id": rid, "kind": "forward",
+               "platform": "aiocqhttp", "group_id": "g1", "root_msg_id": msg_id,
+               "captured_ts": 1720000000, "node_count": 1, "assets": [], "missing": [],
+               "nodes": [{"index": 0, "uin": "", "name": "a", "time": 0,
+                          "segments": [{"type": "text", "data": {"text": "hi"}}]}]}
+        with open(os.path.join(rdir, "record.json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, ensure_ascii=False)
+        return rid
+
+    class _Pl:
+        def _records_root(self):
+            return tmp
+
+    api = record_page.RecordPageApi(_Pl())
+    rid = _make("20260101-000000-g1-1481691615", "1481691615")
+    d = record_admin.record_detail(tmp, rid)
+    assert d["can_native"] is True and d["native_unavailable"] is False, d
+
+    async def gone_native(bot, group_id, message_id):
+        return {"ok": False, "error": f"取不到原消息 {message_id}: 消息不存在"}
+
+    async def flaky_native(bot, group_id, message_id):
+        return {"ok": False, "error": "网络超时"}
+
+    async def ok_rebuild(bot, group_id, rec_, base):
+        return {"ok": True, "mode": "rebuild", "new_message_id": "9001"}
+
+    orig_native = record_admin.native_forward
+    orig_rebuild = record_admin.rebuild_forward
+    record_admin.native_forward = gone_native
+    record_admin.rebuild_forward = ok_rebuild
+    saved = sys.modules.pop("astrbot.api.web", None)
+    try:
+        _install_web_stub(body={"id": rid, "mode": "native", "fallback": True})
+        out = asyncio.run(api.resend())
+        assert out["status"] == "ok" and out["data"]["ok"] is True, out
+        assert "已改用重建转发" in out["data"].get("note", ""), out
+        # 元数据里落盘:刷新页面后按钮也不会再是「看起来能点的主操作」
+        assert float(record_store.load_record(tmp, rid).get("native_unavailable") or 0) > 0
+        d2 = record_admin.record_detail(tmp, rid)
+        assert d2["can_native"] is False and d2["native_unavailable"] is True, d2
+
+        rid2 = _make("20260101-000001-g1-777", "777")
+        record_admin.native_forward = flaky_native
+        _install_web_stub(body={"id": rid2, "mode": "native", "fallback": True})
+        out2 = asyncio.run(api.resend())
+        assert out2["status"] == "ok" and out2["data"]["ok"] is True, out2
+        rec2 = record_store.load_record(tmp, rid2)
+        assert not rec2.get("native_unavailable"), rec2
+        assert record_admin.record_detail(tmp, rid2)["can_native"] is True
+    finally:
+        record_admin.native_forward = orig_native
+        record_admin.rebuild_forward = orig_rebuild
+        if saved is not None:
+            sys.modules["astrbot.api.web"] = saved
+    print("  OK -> 失效记 stale(can_native 变 False) / 超时不记")
 
 def test_record_duplicate_dedupe_and_rerender():
     """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
@@ -5833,6 +5907,7 @@ PHASE9 = [
     test_record_admin_forward_returns_new_message_id,
     test_record_detail_render_and_uin_reliability,
     test_page_stats_and_kind_filter_use_real_counts,
+    test_page_native_failure_marks_stale,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
     test_record_admin_reconcile_flat_renders,

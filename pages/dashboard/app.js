@@ -117,6 +117,7 @@
     parts.push(["扁平文件", s.flat_total || 0]);
     if (s.flat_bytes) parts.push(["扁平占用", fmtBytes(s.flat_bytes)]);
     if (s.missing) parts.push(["缺失", s.missing]);
+    $("stats").title = "全库统计,不随下面的群/类型筛选变化";
     $("stats").innerHTML = parts.map(function (p) {
       return "<span>" + esc(p[0]) + " <b>" + esc(p[1]) + "</b></span>";
     }).join("");
@@ -180,8 +181,9 @@
     state.items = (data && data.items) || [];
     state.total = (data && data.total) || 0;
     var list = $("list");
-    $("list-head").textContent = state.total + " 条" +
-      (state.items.length < state.total ? "（显示前 " + state.items.length + " 条）" : "");
+    // 底部有「加载更多」,所以这里说的是「已加载多少」,不再写「显示前 N 条」
+    $("list-head").textContent = "共 " + state.total + " 条" +
+      (state.items.length < state.total ? " · 已加载 " + state.items.length : "");
     if (!state.items.length) {
       list.innerHTML = '<p class="hint">没有匹配的保存物。群里发图/文档会自动保存；' +
         '合并转发与纯文本需要先开启对应开关。</p>';
@@ -190,7 +192,7 @@
     list.innerHTML = state.items.map(function (it) {
       var badges = [kindPill(it)];
       if (it.source === "flat") {
-        badges.push('<span class="pill">文件</span>');
+        badges.push('<span class="pill" title="老的扁平落盘文件,不在 _records/ 条目里">磁盘文件</span>');
         badges.push('<span class="pill">' + esc(fmtBytes(it.bytes)) + "</span>");
       } else {
         badges.push('<span class="pill">' + esc(it.node_count) + " 节点</span>");
@@ -201,7 +203,11 @@
           badges.push('<span class="pill warn" title="与 ' + esc(it.duplicate_of) +
             ' 内容相同">内容重复</span>');
         }
-        if (it.kind === "forward" && !it.can_native) badges.push('<span class="pill warn">无原消息</span>');
+        if (it.kind === "forward" && !it.can_native) {
+          badges.push(it.native_unavailable
+            ? '<span class="pill warn" title="QQ 那边已经取不到这条原消息，只能用重建转发">原消息已失效</span>'
+            : '<span class="pill warn" title="没有可用的短原消息 id（嵌套转发只拿得到长 id）">无原消息 id</span>');
+        }
         if (it.missing_count) badges.push('<span class="pill warn">缺 ' + esc(it.missing_count) + " 图</span>");
       }
       return '<div class="item' + (itemKey(it) === state.selected ? " active" : "") +
@@ -288,7 +294,9 @@
       '<span class="pill">群 ' + esc(d.group_id || "-") + "</span>" +
       (d.sender_name ? '<span class="pill">' + esc(d.sender_name) + "</span>" : "") +
       (isForward ? '<span class="pill">' + esc(d.node_count) + " 节点</span>" : "") +
-      (isForward && d.root_msg_id ? '<span class="pill">原消息 ' + esc(d.root_msg_id) + "</span>" : "") +
+      (isForward && d.root_msg_id ? (d.can_native
+        ? '<span class="pill">原消息 ' + esc(d.root_msg_id) + "</span>"
+        : '<span class="pill warn" title="QQ 那边已经取不到这条原消息(过期/撤回),只能用重建转发">原消息已失效</span>') : "") +
       "</div>";
 
     var actions = '<div class="actions">';
@@ -314,10 +322,12 @@
         '<select id="target-group" class="target">' + opts + "</select>" +
         '<button class="btn primary" id="btn-native"' + (d.can_native ? "" : " disabled") +
         ' title="' + (d.can_native
-          ? "转发原消息本体:气泡、挂件、头像、原时间戳都保留;要求那条消息还在群里,过期会自动改用重建"
-          : "这条没有可用的原消息 id(不是真存档,或原消息已过期),只能用重建转发") + '">转发原消息</button>' +
-        '<button class="btn" id="btn-rebuild" title="按存档重新拼一条合并转发:内容一致,但没有气泡/挂件/原时间戳">重建转发</button>' +
-        '<p class="actions-note">「转发原消息」发的是原消息本体,气泡/挂件/头像/原时间戳都在 —— 要求那条消息还在群里,过期会失败并自动改用重建。「重建转发」按存档重拼,内容一致但没有装扮,随时可用。两者都发到左边选的群。</p>';
+          ? "转发原消息本体：气泡、挂件、头像、原时间戳都保留；要求那条消息还在群里，过期会自动改用重建"
+          : (d.root_msg_id
+            ? "这条的原消息已经失效（过期或撤回），只能用重建转发"
+            : "这条没有可用的原消息 id（多半是嵌套转发，只拿得到长 id），只能用重建转发")) + '">转发原消息</button>' +
+        '<button class="btn" id="btn-rebuild" title="按存档重新拼一条合并转发：内容一致，但没有气泡/挂件/原时间戳">重建转发</button>' +
+        '<p class="actions-note">「转发原消息」发的是原消息本体，气泡/挂件/头像/原时间戳都在 —— 要求那条消息还在群里，过期会失败并自动改用重建。「重建转发」按存档重拼，内容一致但没有装扮，随时可用。两者都发到左边选的群。</p>';
     }
     // 老存档(v1.14.0 之前)没有 render.png;改了样式之后旧图也还是旧样式 ——
     // 两者都靠这个按钮按**当前**样式重画(节点与图片字节都在条目目录里)。
@@ -490,8 +500,35 @@
     }
   }
 
+  // 删除确认:桌面版(Tauri)的 window.confirm 不一定弹得出来,弹不出来时「删除」
+  // 会静默什么都不做,所以自己在页面上做蒙层(和看原图的 lightbox 同一个思路)。
+  function askConfirm(text) {
+    return new Promise(function (resolve) {
+      var mask = document.createElement("div");
+      mask.className = "confirm-mask";
+      mask.innerHTML = '<div class="confirm-box" role="dialog" aria-modal="true">' +
+        '<p>' + esc(text) + "</p>" +
+        '<div class="confirm-actions">' +
+        '<button class="btn" id="confirm-no">取消</button>' +
+        '<button class="btn danger" id="confirm-yes">确认删除</button>' +
+        "</div></div>";
+      document.body.appendChild(mask);
+      function onKey(e) { if (e.key === "Escape") done(false); }
+      function done(v) {
+        mask.remove();
+        document.removeEventListener("keydown", onKey);
+        resolve(v);
+      }
+      mask.querySelector("#confirm-no").addEventListener("click", function () { done(false); });
+      mask.querySelector("#confirm-yes").addEventListener("click", function () { done(true); });
+      mask.addEventListener("click", function (e) { if (e.target === mask) done(false); });
+      document.addEventListener("keydown", onKey);
+      mask.querySelector("#confirm-no").focus();
+    });
+  }
+
   async function doDelete(body, question) {
-    if (!window.confirm(question)) return;
+    if (!(await askConfirm(question))) return;
     try {
       unwrap(await post("delete", body));
       toast("已删除");

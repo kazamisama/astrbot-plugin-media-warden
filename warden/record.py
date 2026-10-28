@@ -450,6 +450,28 @@ def save_render(storage_root: str, record_id: str, blob: bytes) -> Optional[str]
     return RENDER_FILENAME
 
 
+def set_meta(storage_root: str, record_id: str, **fields) -> bool:
+    """给条目元数据打标（record.json / entry.json 都适用），返回是否写到盘上。
+
+    用于记录「原消息已失效」这类**跨会话仍要记得**的事实：只放内存里的话，
+    刷新页面又变回一个看起来能点的按钮（原消息早就过期了）。
+    """
+    name = meta_filename(storage_root, record_id)
+    if name is None:
+        return False
+    meta = _load_meta(storage_root, record_id)
+    if meta is None:
+        return False
+    meta.update(fields)
+    try:
+        with open(os.path.join(record_dir(storage_root, record_id), name),
+                  "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        return False
+    return True
+
+
 def load_record(storage_root: str, record_id: str) -> Optional[dict]:
     path = os.path.join(record_dir(storage_root, record_id), "record.json")
     try:

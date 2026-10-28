@@ -283,8 +283,19 @@ class AssetIndex:
         params: list[Any] = []
         kinds = [k for k in (kinds or []) if k]
         if kinds:
-            where.append("kind IN (" + ",".join("?" * len(kinds)) + ")")
-            params.extend(kinds)
+            # v1.14.0 之前没有「动图」这个 kind,GIF 也记成 image —— 于是「动图」标签
+            # 一个老文件都筛不出来、「图片」里却混着一堆 gif。这里按扩展名再分一次,
+            # 两边互斥(同一行不会被两个标签都数一遍)。
+            plain = [k for k in kinds if k not in ("image", "gif")]
+            parts: list[str] = []
+            if "image" in kinds:
+                parts.append("(kind = 'image' AND lower(path) NOT LIKE '%.gif')")
+            if "gif" in kinds:
+                parts.append("(kind = 'gif' OR (kind = 'image' AND lower(path) LIKE '%.gif'))")
+            if plain:
+                parts.append("kind IN (" + ",".join("?" * len(plain)) + ")")
+                params.extend(plain)
+            where.append("(" + " OR ".join(parts) + ")")
         if group_id:
             where.append("group_id = ?")
             params.append(str(group_id))

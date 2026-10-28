@@ -7,11 +7,15 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
+import time
 from typing import Optional
 
+log = logging.getLogger(__name__)
+
 from . import record_admin
-from .record import load_entry, load_record, record_dir
+from .record import load_entry, load_record, record_dir, set_meta
 
 _MIME_BY_EXT = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -24,6 +28,16 @@ _THUMB_MAX_BYTES = 8 * 1024 * 1024
 def _mime_for(path: str) -> str:
     return _MIME_BY_EXT.get(os.path.splitext(path)[1].lower(),
                             "application/octet-stream")
+
+# native 转发失败的哪些原因算「原消息永久没了」:QQ 那边不会复活,值得记住;
+# 网络抖动/权限这类偶发错误不记,否则一次超时会把按钮永久禁用。
+_GONE_HINTS = ("取不到原消息", "消息不存在", "无法找到")
+
+
+def _native_gone(error) -> bool:
+    text = str(error or "")
+    return any(h in text for h in _GONE_HINTS)
+
 
 PLUGIN_NAME = "astrbot-plugin-media-warden"
 PAGE_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -294,6 +308,12 @@ class RecordPageApi:
         else:
             res = await record_admin.native_forward(
                 bot, group_id, rec.get("root_msg_id") or "")
+            if not res.get("ok") and _native_gone(res.get("error")):
+                # 原消息过期是永久的：记住这条，页面下次不再把它当可点的主按钮
+                try:
+                    set_meta(self._root, rid, native_unavailable=int(time.time()))
+                except Exception as e:  # 标记失败不影响这次回退
+                    log.warning("mark native_unavailable failed: %r", e)
             if not res.get("ok") and bool(body.get("fallback", True)):
                 rb = await record_admin.rebuild_forward(bot, group_id, rec, base)
                 if rb.get("ok"):
