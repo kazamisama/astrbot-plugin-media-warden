@@ -137,7 +137,7 @@ main {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
   background: #222; color: #fff; padding: 9px 16px; border-radius: 10px;
   font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s;
-  max-width: 70vw;
+  max-width: 70vw; white-space: pre-line; line-height: 1.5;
 }
 .toast.show { opacity: 1; }
 .toast.bad { background: var(--danger); }

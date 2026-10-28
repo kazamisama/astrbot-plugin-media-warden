@@ -280,7 +280,7 @@ class RecordPageApi:
         if not rec:
             if load_entry(self._root, rid) is not None:
                 return {"status": "error",
-                        "message": "纯文本条目没有合并转发可重发（只有聊天记录能发回）",
+                        "message": "纯文本条目没有可转发的合并转发（只有聊天记录条目能转发）",
                         "data": {}}
             return {"status": "error", "message": "存档不存在", "data": {}}
         group_id = str(body.get("group_id") or rec.get("group_id") or "")
@@ -297,7 +297,7 @@ class RecordPageApi:
             if not res.get("ok") and bool(body.get("fallback", True)):
                 rb = await record_admin.rebuild_forward(bot, group_id, rec, base)
                 if rb.get("ok"):
-                    rb["note"] = f"原地转发不可用（{res.get('error')}），已回退重建"
+                    rb["note"] = f"转发原消息不可用（{res.get('error')}），已改用重建转发"
                     res = rb
         return {"status": "ok", "data": res}
 

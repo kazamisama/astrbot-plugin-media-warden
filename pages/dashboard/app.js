@@ -142,6 +142,12 @@
     return g.name ? (g.name + " (" + g.group_id + ")") : g.group_id;
   }
 
+  // 发完之后说「发到哪儿」:优先用后端回传的 group_id 反查群名
+  function groupName(id) {
+    var hit = state.groups.filter(function (g) { return String(g.group_id) === String(id); })[0];
+    return hit ? groupLabel(hit) : String(id || "");
+  }
+
   function renderGroups() {
     var sel = $("group");
     var cur = sel.value;
@@ -460,7 +466,10 @@
       if (groupId) body.group_id = groupId;
       var r = unwrap(await post("resend", body));
       if (r && r.ok) {
-        toast((r.mode === "native" ? "已原地转发" : "已重建发送") + (r.note ? "（" + r.note + "）" : ""));
+        // 文案与按钮一致:转发原消息 / 重建转发;两个都说清发到了哪个群
+        var where = groupName((r && r.group_id) || groupId);
+        toast((r.mode === "native" ? "已转发原消息" : "已重建转发") +
+          (where ? " → " + where : "") + (r.note ? "\n" + r.note : ""));
       } else {
         toast("发送失败：" + ((r && r.error) || "未知原因"), true);
       }

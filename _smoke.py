@@ -4758,7 +4758,7 @@ def test_record_page_routes_and_handlers():
             _install_web_stub(body={"id": rid, "mode": "native", "fallback": True})
             r2 = asyncio.run(api.resend())
             assert r2["data"]["ok"] is True, r2
-            assert "已回退重建" in r2["data"].get("note", ""), r2
+            assert "已改用重建转发" in r2["data"].get("note", ""), r2
             assert calls[-1] == ("rebuild", "g1", rid), calls
 
             _install_web_stub(body={"id": rid, "mode": "native", "fallback": False})
