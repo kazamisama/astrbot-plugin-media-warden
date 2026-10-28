@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from .record import (
     RENDER_FILENAME, load_entry, load_record, meta_filename, record_dir,
-    records_root, uin_reliable,
+    records_root, save_render, uin_reliable,
 )
 
 # v1.14.0 分类管理:一条「保存物」要么是条目(_records/ 下的聊天记录/纯文本),
@@ -470,6 +470,150 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "uin_reliable": uin_reliable(nodes_out),
         "nodes": nodes_out,
     }
+
+
+def _file_sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def reconcile_flat_renders(root: str, index) -> dict:
+    """把「聊天记录的渲染图」收进条目，不再作为独立的扁平图片存在。
+
+    v1.14.0 之前每次存档都会经 Storage 再落一份 `forward_image_*.png`：同一张
+    渲染图在磁盘上两份，页面「图片」分类里还单独成一条 —— 与「一个条目两种形态」
+    自相矛盾。新存档已经不落扁平副本了，这个函数整理旧数据：
+
+    - 条目**已有** render.png：字节相同的扁平副本 → 删行（无人引用的文件一起删）；
+    - 条目**还没有** render.png：把旧的扁平副本**收进条目**（复制成 render.png），
+      再删行 —— 老条目立刻有渲染图，不用手动点「重渲染」；
+    - 那批行指向多份不同字节（说不清哪张才是）时不动，留给「重渲染」。
+
+    文件可能被别的行共享（Storage 去重），那时只删行、不删文件。
+    """
+    out = {"rows": 0, "files": 0, "adopted": 0}
+    if index is None:
+        return out
+    base = records_root(root)
+    if not os.path.isdir(base):
+        return out
+    entries = {}
+    for name in os.listdir(base):
+        rec = load_record(root, name) or {}
+        msg_id = str(rec.get("root_msg_id") or "")
+        if not msg_id:
+            continue
+        render = rec.get("render") if isinstance(rec.get("render"), str) else ""
+        sha = ""
+        if render:
+            sha = _file_sha256(os.path.join(record_dir(root, name), render))
+        entries[msg_id] = (str(rec.get("record_id") or name), sha)
+    if not entries:
+        return out
+    try:
+        rows = index.list_assets(kinds=["forward_render"], limit=100000)["items"]
+    except Exception:
+        return out
+    path_count: dict = {}
+    by_msg: dict = {}
+    for row in rows:
+        path = str(row.get("path") or "")
+        path_count[path] = path_count.get(path, 0) + 1
+        by_msg.setdefault(str(row.get("msg_id") or ""), []).append(row)
+
+    def _drop(row) -> None:
+        path = str(row.get("path") or "")
+        try:
+            index.delete_row(int(row.get("id") or 0))
+        except Exception:
+            return
+        out["rows"] += 1
+        left = path_count.get(path, 1) - 1
+        path_count[path] = max(0, left)
+        if left <= 0 and path:
+            try:
+                os.remove(path)
+                out["files"] += 1
+            except OSError:
+                pass
+
+    for msg_id, (rid, render_sha) in entries.items():
+        group = [r for r in by_msg.get(msg_id) or []
+                 if str(r.get("path") or "") and os.path.isfile(str(r.get("path") or ""))]
+        if not group:
+            continue
+        if render_sha:
+            for row in group:
+                if _file_sha256(str(row["path"])) == render_sha:
+                    _drop(row)
+            continue
+        shas = {_file_sha256(str(r["path"])) for r in group}
+        if len(shas) != 1 or "" in shas:
+            continue
+        try:
+            with open(str(group[0]["path"]), "rb") as fh:
+                blob = fh.read()
+        except OSError:
+            continue
+        if not blob or not save_render(root, rid, blob):
+            continue
+        out["adopted"] += 1
+        for row in group:
+            _drop(row)
+    return out
+    out = {"rows": 0, "files": 0}
+    if index is None:
+        return out
+    base = records_root(root)
+    if not os.path.isdir(base):
+        return out
+    renders = {}
+    for name in os.listdir(base):
+        rec = load_record(root, name) or {}
+        render = rec.get("render")
+        msg_id = str(rec.get("root_msg_id") or "")
+        if not (isinstance(render, str) and render and msg_id):
+            continue
+        full = os.path.join(record_dir(root, name), render)
+        sha = _file_sha256(full)
+        if sha:
+            renders[msg_id] = sha
+    if not renders:
+        return out
+    try:
+        rows = index.list_assets(kinds=["forward_render"], limit=100000)["items"]
+    except Exception:
+        return out
+    path_rows: dict = {}
+    for row in rows:
+        path_rows.setdefault(str(row.get("path") or ""), 0)
+        path_rows[str(row.get("path") or "")] += 1
+    for row in rows:
+        msg_id = str(row.get("msg_id") or "")
+        path = str(row.get("path") or "")
+        if msg_id not in renders or not path:
+            continue
+        if _file_sha256(path) != renders[msg_id]:
+            continue
+        try:
+            index.delete_row(int(row.get("id") or 0))
+        except Exception:
+            continue
+        out["rows"] += 1
+        if path_rows.get(path, 0) <= 1:
+            try:
+                os.remove(path)
+                out["files"] += 1
+            except OSError:
+                pass
+    return out
 
 
 def resolve_asset(root: str, record_id: str, rel_path: str) -> Optional[str]:

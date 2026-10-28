@@ -333,6 +333,14 @@ class AssetIndex:
         c.commit()
         return int(cur.rowcount or 0)
 
+    def delete_row(self, asset_id: int) -> int:
+        """按行 id 删一条索引(页面清理派生文件用:同一 path 可能被多行共享,
+        不能用 forget_path 把别人的行也带走)。"""
+        c = self._require()
+        cur = c.execute("DELETE FROM assets WHERE id = ?", (int(asset_id),))
+        c.commit()
+        return int(cur.rowcount or 0)
+
     def count(self) -> int:
         c = self._require()
         return c.execute("SELECT COUNT(*) FROM assets").fetchone()[0]

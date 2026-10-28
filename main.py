@@ -335,6 +335,21 @@ class MediaWardenStar(Star):
             except Exception as e:
                 self._log(f"index init failed: {e!r} — runs without index")
                 self._index = None
+        if self._index is not None:
+            try:
+                # 旧数据里每次存档都会多落一份扁平 forward_image_*.png,而渲染图
+                # 其实已经住在条目里。字节完全相同的副本收掉(只删行/无人引用的文件)。
+                from .warden import record_admin as _radmin
+                fixed = _radmin.reconcile_flat_renders(
+                    self.cfg.storage_root, self._index)
+                if fixed["rows"]:
+                    self._log(
+                        f"flat forward renders reconciled: {fixed['rows']} row(s), "
+                        f"{fixed['files']} file(s) removed, {fixed['adopted']} adopted "
+                        f"into entries"
+                    )
+            except Exception as e:
+                self._log(f"flat render cleanup failed: {e!r}")
         try:
             # v1.14.0 之前存的条目没有 duplicate_of,这里补一次(只写需要变的文件)
             n = record_store.backfill_duplicates(self.cfg.storage_root)
@@ -1773,31 +1788,43 @@ class MediaWardenStar(Star):
                     png = await self._forwarder.render_with_images(
                         nodes, node_imgs=node_imgs,
                     )
-                    comp_png = Component(
-                        kind="forward_image", name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
-                        raw=comp.raw,
-                    )
-                    sr = self._storage.save(png, comp_png, ctx, mime="image/png")
                     if archived is not None:
-                        try:
+                        # 渲染图就住在条目目录里(render.png)。以前还会再经 Storage
+                        # 落一份扁平的 forward_image_*.png —— 同一张图在磁盘上两份、
+                        # 在分类管理里还单独成一条「图片」，与「一个条目两种形态」
+                        # 自相矛盾。现在只有存档失败(拿不到条目)时才走扁平落盘。
+                        render_path = os.path.join(
+                            record_store.record_dir(self.cfg.storage_root, rid),
                             record_store.save_render(self.cfg.storage_root, rid, png)
-                        except OSError as e:
-                            self._log(f"entry render write failed: {e!r}")
-                    if self._index is not None:
-                        try:
-                            self._index.record(
-                                platform=ctx.platform, group_id=ctx.group_id,
-                                sender_id=ctx.sender_id, msg_id=ctx.msg_id,
-                                idx=ctx.idx + 100,
-                                kind="forward_render", path=sr.path, size=sr.size,
-                                sha16=sr.blake16,
-                            )
-                        except Exception as e:
-                            self._log(f"index record failed: {e!r}")
-                    results.append(AssetResult(
-                        kind="forward_render", ok=True, path=sr.path, size=sr.size,
-                        preview_path=sr.path, reused=sr.reused,
-                    ))
+                            or record_store.RENDER_FILENAME,
+                        )
+                        results.append(AssetResult(
+                            kind="forward_render", ok=True, path=render_path,
+                            size=len(png), preview_path=render_path,
+                            reused=bool(archived.get("reused")),
+                        ))
+                    else:
+                        comp_png = Component(
+                            kind="forward_image",
+                            name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
+                            raw=comp.raw,
+                        )
+                        sr = self._storage.save(png, comp_png, ctx, mime="image/png")
+                        if self._index is not None:
+                            try:
+                                self._index.record(
+                                    platform=ctx.platform, group_id=ctx.group_id,
+                                    sender_id=ctx.sender_id, msg_id=ctx.msg_id,
+                                    idx=ctx.idx + 100,
+                                    kind="forward_render", path=sr.path,
+                                    size=sr.size, sha16=sr.blake16,
+                                )
+                            except Exception as e:
+                                self._log(f"index record failed: {e!r}")
+                        results.append(AssetResult(
+                            kind="forward_render", ok=True, path=sr.path,
+                            size=sr.size, preview_path=sr.path, reused=sr.reused,
+                        ))
                 except Exception as e:
                     results.append(self._failed(
                         comp, ctx, "forward_image", f"render: {e}", e,

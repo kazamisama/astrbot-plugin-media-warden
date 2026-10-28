@@ -1534,13 +1534,22 @@ def test_plugin_e2e_forward_both_modes():
                     jsons += 1
         assert pngs >= 1, "no PNG rendered"
         assert jsons >= 1, "no JSON sidecar"
-        # 索引里有数据
+        # v1.14.1: 渲染图住在条目目录里,不再多落一份扁平 forward_image_*.png ——
+        # 所以索引里只有 JSON 那一行(以前是 forward + forward_render 两行)。
+        assert not [f for _r, _d, fs in os.walk(td) for f in fs
+                    if "forward_image" in f], "不该再有扁平渲染图副本"
         s = inst._index.stats()
-        assert s["total"] >= 2, s
+        assert s["total"] >= 1, s
+        assert "forward_render" not in (s.get("by_kind") or {}), s
+        entry = record_store.list_records(td)
+        assert len(entry) == 1 and entry[0]["kind"] == "forward", entry
+        assert entry[0].get("has_render") or record_store.has_render(
+            td, entry[0]["record_id"]) == "render.png"
         if inst._index is not None:
             inst._index.close()
             inst._index = None
-        print("  OK -> PNG=%d JSON=%d, index=%d" % (pngs, jsons, s["total"]))
+        print("  OK -> PNG=%d JSON=%d, index=%d(仅 JSON), 渲染图在条目里"
+              % (pngs, jsons, s["total"]))
 
 
 def test_plugin_e2e_forward_too_large_falls_back_to_json():
@@ -2190,9 +2199,11 @@ def test_plugin_forward_render_takes_precedence_over_image():
         # 第一条回执 + 第二条 image_result 预览(应是 forward_render 的 PNG)
         assert len(out) == 2
         assert out[1].kind == "image"
-        # 预览路径应以 .png 结尾,且是 forward_*.png 而非 forward_*.json
+        # 预览路径应以 .png 结尾;v1.14.1 起渲染图就在条目目录里(render.png),
+        # 不再落扁平 forward_image_*.png,所以按「条目里的 render.png」断言。
         assert out[1].text.endswith(".png")
-        assert "forward" in os.path.basename(out[1].text)
+        assert os.path.basename(out[1].text) == "render.png", out[1].text
+        assert os.path.isfile(out[1].text), out[1].text
         if inst._index is not None:
             inst._index.close()
             inst._index = None
@@ -5093,7 +5104,13 @@ def test_plugin_forward_saved_as_single_entry():
         assets = rec.get("assets") or []
         assert assets and all(os.path.isfile(
             os.path.join(rdir, a["path"].replace("/", os.sep))) for a in assets), assets
-        print("  OK -> 条目", rid, "| assets", len(assets))
+        # 渲染图只住在条目里:不再多落一份扁平 forward_image_*.png
+        flat_renders = [
+            os.path.join(dp, fn) for dp, _dn, fns in os.walk(td) for fn in fns
+            if "forward_image" in fn
+        ]
+        assert flat_renders == [], flat_renders
+        print("  OK -> 条目", rid, "| assets", len(assets), "| 无扁平副本")
 
 
 def test_record_admin_categories_and_flat():
@@ -5726,6 +5743,79 @@ def test_plugin_forward_dedupe_reuses_entry():
         print("  OK -> 两条转发一个条目", rid)
 
 
+def test_record_admin_reconcile_flat_renders():
+    """扁平转发渲染图收进条目:已有图的删副本,没有图的直接收编,共享文件不误删。"""
+    import asyncio
+    banner("record_admin: 扁平转发渲染图收进条目（删副本 / 收编）")
+    tmp = tempfile.mkdtemp(prefix="wd_flatrender_")
+    png = b"\x89PNG\r\n\x1a\n" + b"7" * 32
+    png2 = b"\x89PNG\r\n\x1a\n" + b"8" * 40
+
+    async def fetch_png(_data):
+        return png2
+
+    nodes_a = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1720000000,
+                "message": [{"type": "text", "data": {"text": "甲"}},
+                             {"type": "image", "data": {"url": "https://x/a.png"}}]}]
+    nodes_b = [{"sender": {"user_id": 8, "nickname": "阿八"}, "time": 1720000100,
+                "message": [{"type": "text", "data": {"text": "乙"}}]}]
+    rid_a = record_store.make_record_id("g1", "m1", ts=1720000000)
+    rid_b = record_store.make_record_id("g1", "m2", ts=1720000100)
+    asyncio.run(record_store.capture(
+        nodes_a, platform="aiocqhttp", group_id="g1", msg_id="m1",
+        storage_root=tmp, fetch_image=fetch_png, ts=1720000000, record_id=rid_a))
+    assert record_store.save_render(tmp, rid_a, png) == "render.png"
+    # 条目 B 还没有渲染图:旧的扁平副本应该被收编成它的 render.png
+    asyncio.run(record_store.capture(
+        nodes_b, platform="aiocqhttp", group_id="g1", msg_id="m2",
+        storage_root=tmp, fetch_image=fetch_png, ts=1720000100, record_id=rid_b))
+
+    from warden.index import AssetIndex
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+    flat_dir = os.path.join(tmp, "g1", "u1")
+    os.makedirs(flat_dir, exist_ok=True)
+    dup_path = os.path.join(flat_dir, "20250101_000000_forward_image_aaa.png")
+    with open(dup_path, "wb") as fh:
+        fh.write(png)
+    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                 msg_id="m1", idx=100, kind="forward_render",
+                 path=dup_path, size=len(png), sha16="b" * 16)
+    adopt_path = os.path.join(flat_dir, "20250101_000002_forward_image_ccc.png")
+    with open(adopt_path, "wb") as fh:
+        fh.write(png2)
+    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                 msg_id="m2", idx=100, kind="forward_render",
+                 path=adopt_path, size=len(png2), sha16="d" * 16)
+    # 被另一条消息共享(Storage 去重)的文件:行删了但文件要留
+    shared_path = os.path.join(flat_dir, "20250101_000003_forward_image_ddd.png")
+    with open(shared_path, "wb") as fh:
+        fh.write(b"not-a-render")
+    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                 msg_id="m1", idx=101, kind="forward_render",
+                 path=shared_path, size=12, sha16="c" * 16)
+    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                 msg_id="other", idx=100, kind="forward_render",
+                 path=shared_path, size=12, sha16="c" * 16)
+
+    out = record_admin.reconcile_flat_renders(tmp, index)
+    assert out == {"rows": 2, "files": 2, "adopted": 1}, out
+    assert not os.path.exists(dup_path), "条目已有渲染图 -> 副本删掉"
+    assert not os.path.exists(adopt_path), "收编后扁平原件删掉"
+    assert os.path.exists(shared_path), "被多行共享的文件不该删"
+    assert record_store.has_render(tmp, rid_b) == "render.png"
+    with open(os.path.join(record_store.record_dir(tmp, rid_b), "render.png"), "rb") as fh:
+        assert fh.read() == png2, "收编的应该就是那张旧渲染图"
+    # 剩下共享文件那两条行(内容与条目渲染图不同 -> 不是副本,该留)
+    left = index.list_assets(kinds=["forward_render"], limit=100)["items"]
+    assert len(left) == 2, left
+    assert {r["path"] for r in left} == {shared_path}, left
+    # 第二遍幂等
+    assert record_admin.reconcile_flat_renders(tmp, index) == {
+        "rows": 0, "files": 0, "adopted": 0}
+    index.close()
+    print("  OK -> 删 2 行 + 2 文件,收编 1 张,共享文件保留")
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -5745,6 +5835,7 @@ PHASE9 = [
     test_page_stats_and_kind_filter_use_real_counts,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
+    test_record_admin_reconcile_flat_renders,
 ]
 
 
