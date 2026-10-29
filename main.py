@@ -262,7 +262,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.17.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除/旧渲染图清理) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
+    "群聊素材守门人 v1.17.1: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除/旧渲染图清理) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -290,21 +290,23 @@ class MediaWardenStar(Star):
 
     @staticmethod
     def _promote_auto_forward_default(cfg) -> bool:
-        """v1.17.0 把默认值从 native 改回 rebuild:旧配置跟着升级。
+        """v1.17.1 把默认值恢复成 native:旧配置跟着升级。
 
-        自动转发的目标群按定义都是「别的群」，而原地转发(native)是 QQ 按**原群**
-        找消息的 —— 跨群实测必回「消息不存在」，每次都要白打一次请求再回退重建。
-        只在「功能没启用、目标群为空、值还是旧默认 native」时静默改回 rebuild:
-        这三种条件下改了没有任何行为变化；用户真开过自动转发就尊重他的选择。
+        v1.17.0 曾把默认改成 rebuild,理由是「跨群原地转发必失败」—— 那是误判:
+        QQ 的原地转发是按 **NapCat 内存里的短 id 缓存** 找消息的,与目标群无关,
+        缓存里有(机器人启动后收到/发过、且没被 5000 条 LRU 挤掉)就能保装扮地
+        发到任何群,缓存里没有才失败。既然能成功,默认就该先试 native。
+        只在「功能没启用、目标群为空、值还是 rebuild」时静默改回 native:
+        这三种条件下改了没有任何行为变化;用户真开过自动转发就尊重他的选择。
         返回是否改了(调用方负责写回配置)。
         """
         if getattr(cfg, "auto_forward_enabled", False):
             return False
-        if getattr(cfg, "auto_forward_mode", "") != "native":
+        if getattr(cfg, "auto_forward_mode", "") != "rebuild":
             return False
         if getattr(cfg, "forward_target_groups", None):
             return False
-        cfg.auto_forward_mode = "rebuild"
+        cfg.auto_forward_mode = "native"
         return True
 
     async def initialize(self) -> None:
@@ -312,8 +314,8 @@ class MediaWardenStar(Star):
             # 静默升级默认值并写回配置:重启后不再反复提示
             self._persist_config({"auto_forward_mode": self.cfg.auto_forward_mode})
             self._log(
-                f"auto_forward_mode: native -> {self.cfg.auto_forward_mode} "
-                f"(v1.17.0 新默认;跨群原地转发必失败,想保留就把它改回 native)")
+                f"auto_forward_mode: rebuild -> {self.cfg.auto_forward_mode} "
+                f"(v1.17.1 恢复 native 默认;想省掉那一次失败尝试就改回 rebuild)")
         self._storage = Storage(
             root=self.cfg.storage_root,
             dedupe=self.cfg.dedupe,
@@ -1284,10 +1286,10 @@ class MediaWardenStar(Star):
                             ctx: SaveContext) -> list[str]:
         """把刚存的聊天记录转发到配置的目标群（v1.14.0 可选功能）.
 
-        **自动转发恒用重建**（v1.17.0）：目标群按定义就不是原群，而 QQ 的原地
-        转发是按原群找消息的 —— 跨群实测必回「消息不存在」。以前 native 默认会让
-        每个目标群白打一次 get_msg + forward_group_single_msg 再回退，日志里全是
-        假失败。配置里的 native 仍然受理（用户可能手动指定过），只记一条说明。
+        native 优先（v1.17.1）：原消息还在 NapCat 的短 id 缓存里时，跨群也能
+        保气泡/挂件/头像发出去；缓存丢了（机器人重启、5000 条 LRU 挤掉、消息
+        过期）才回退重建。v1.17.0 曾误判「跨群必失败」而恒用重建，导致用户
+        明明手动 native 成功过的装扮被丢掉。
         """
         if not self.cfg.auto_forward_enabled:
             return []
@@ -1301,11 +1303,19 @@ class MediaWardenStar(Star):
             return []
         from .warden import record_admin
         base = record_store.record_dir(self.cfg.storage_root, rid)
-        if str(self.cfg.auto_forward_mode or "").lower() == "native":
-            self._log("auto forward: 目标是别的群,原地转发不可用 → 改用重建")
+        mode = str(self.cfg.auto_forward_mode or "native").lower()
         done: list[str] = []
         for gid in targets:
-            res = await record_admin.rebuild_forward(bot, gid, rec, base)
+            res = None
+            if mode == "native":
+                res = await record_admin.native_forward(
+                    bot, gid, str(rec.get("root_msg_id") or ""))
+                if not res.get("ok"):
+                    self._log(f"auto forward native failed for {gid}: "
+                              f"{res.get('error')} → rebuild")
+                    res = None
+            if res is None:
+                res = await record_admin.rebuild_forward(bot, gid, rec, base)
             if res.get("ok"):
                 done.append(f"{gid}({res.get('mode')})")
             else:

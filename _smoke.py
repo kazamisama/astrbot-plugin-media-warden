@@ -5291,9 +5291,9 @@ def test_plugin_forward_auto_forward_to_target_groups():
         print("  OK -> 2 个目标群各发一次; 关掉开关后 0 次")
 
 
-def test_plugin_auto_forward_cross_group_uses_rebuild():
+def test_plugin_auto_forward_native_first_then_rebuild():
     import asyncio
-    banner("plugin: 自动转发即使配 native 也走重建(跨群原地必失败)")
+    banner("plugin: 自动转发先试 native(保装扮),缓存失效才回退重建")
     with tempfile.TemporaryDirectory() as td:
         inst = plugin_main.MediaWardenStar(
             plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
@@ -5307,6 +5307,7 @@ def test_plugin_auto_forward_cross_group_uses_rebuild():
         )
         asyncio.run(inst.initialize())
         calls = []
+        fail_native = [False]
 
         class _Bot:
             async def call_action(self, action, **kw):
@@ -5315,21 +5316,30 @@ def test_plugin_auto_forward_cross_group_uses_rebuild():
                     return {"message": [{"type": "forward",
                                          "data": {"id": "FWD-1"}}]}
                 if action == "forward_group_single_msg":
-                    raise RuntimeError("跨群原地转发不可用")
+                    if fail_native[0]:
+                        raise RuntimeError("消息不存在")
+                    return {"status": "ok", "data": {"message_id": 5}}
                 return {"status": "ok"}
 
         inst._qq_bot = lambda: _Bot()
-        nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1718600000,
-                  "message": [{"type": "text", "data": {"text": "hi"}}]}]
+        rec = {"root_msg_id": "1481691615", "nodes": [
+            {"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1718600000,
+             "message": [{"type": "text", "data": {"text": "hi"}}]}]}
         ctx = SaveContext(platform="aiocqhttp", group_id="999",
                           sender_id="u1", sender_name="alice",
                           msg_id="1481691615", idx=0, ts=1718600000)
-        comp = Component(kind="forward", meta={"nodes": nodes})
-        asyncio.run(inst._save_forward(comp, ctx, None))
-        # v1.17.0: 目标是别的群,原地转发按原群找消息必失败 —— 不再白打
-        # get_msg + forward_group_single_msg,直接重建。
-        assert calls == ["send_group_forward_msg"], calls
-        print("  OK -> 跳过跨群原地转发,直接重建送达")
+        # 缓存里还有原消息 -> 原地转发到别的群也能保装扮
+        done = asyncio.run(inst._auto_forward(rec, "rid", ctx))
+        assert done == ["961583271(native)"], done
+        assert calls == ["get_msg", "forward_group_single_msg"], calls
+        # 缓存失效(重启/过期/LRU) -> 回退重建,不重复上报成功
+        calls.clear()
+        fail_native[0] = True
+        done = asyncio.run(inst._auto_forward(rec, "rid", ctx))
+        assert done == ["961583271(rebuild)"], done
+        assert calls == ["get_msg", "forward_group_single_msg",
+                         "send_group_forward_msg"], calls
+        print("  OK -> 先 native,失败才 rebuild")
 
 
 def test_forwarder_apply_style_and_avatar_shape():
@@ -5808,29 +5818,29 @@ def test_record_admin_migrates_flat_forwards():
         index.close()
     print("  OK -> 迁移 1 条(2 节点/1 缺图/留底), 幂等, 坏文件保留")
 
-def test_plugin_demotes_auto_forward_default():
-    """v1.17.0 默认改回 rebuild:只有「没启用 + 无目标群 + 仍是旧默认 native」才改。"""
-    banner("plugin: auto_forward_mode 旧默认值跟回 rebuild")
+def test_plugin_promotes_auto_forward_default():
+    """v1.17.1 默认恢复 native:只有「没启用 + 无目标群 + 仍是旧默认 rebuild」才改。"""
+    banner("plugin: auto_forward_mode 旧默认值跟回 native")
     MediaWardenStar = main.MediaWardenStar
 
     class _C:
-        def __init__(self, enabled=False, mode="native", targets=None):
+        def __init__(self, enabled=False, mode="rebuild", targets=None):
             self.auto_forward_enabled = enabled
             self.auto_forward_mode = mode
             self.forward_target_groups = targets or []
 
     c = _C()
     assert MediaWardenStar._promote_auto_forward_default(c) is True
-    assert c.auto_forward_mode == "rebuild", c.auto_forward_mode
-    # 已经启用了 / 有目标群 / 用户显式选了 rebuild -> 都不改
+    assert c.auto_forward_mode == "native", c.auto_forward_mode
+    # 已经启用了 / 有目标群 / 显式选了 native -> 都不改
     c2 = _C(enabled=True)
     assert MediaWardenStar._promote_auto_forward_default(c2) is False
-    assert c2.auto_forward_mode == "native", c2.auto_forward_mode
+    assert c2.auto_forward_mode == "rebuild", c2.auto_forward_mode
     c3 = _C(targets=["256678737"])
     assert MediaWardenStar._promote_auto_forward_default(c3) is False
-    c4 = _C(mode="rebuild")
+    c4 = _C(mode="native")
     assert MediaWardenStar._promote_auto_forward_default(c4) is False
-    print("  OK -> 未启用的旧默认改回 rebuild;启用/有目标/已显式选择都不动")
+    print("  OK -> 未启用的旧默认改回 native;启用/有目标/已显式选择都不动")
 
 def test_record_duplicate_dedupe_and_rerender():
     """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
@@ -6265,9 +6275,9 @@ def test_record_admin_node_payloads_keep_time():
     print("  OK -> time 原样带回", payloads[0]["data"]["time"])
 
 
-def test_plugin_resend_cross_group_does_not_poison():
+def test_plugin_resend_native_failure_marks_unavailable():
     import asyncio
-    banner("record_page: 跨群转发失败不再把条目记成「原消息已失效」")
+    banner("record_page: 原地转发失败(短 id 缓存失效)记成「原消息已失效」")
     tmp = tempfile.mkdtemp(prefix="wd_resend_")
     nodes = [{"sender": {"user_id": 7, "nickname": "a"}, "time": 1,
               "message": [{"type": "text", "data": {"text": "x"}}]}]
@@ -6299,19 +6309,15 @@ def test_plugin_resend_cross_group_does_not_poison():
                                "mode": "native", "fallback": False})
         res = asyncio.run(api.resend())
         assert res["status"] == "ok" and res["data"]["ok"] is False, res
+        # 「消息不存在」= 短 id 已不在 NapCat 缓存里,发哪个群都一样,标记失效
         rec = record_store.load_record(tmp, rid)
-        assert not rec.get("native_unavailable"), "跨群失败不能毒化条目"
-        _install_web_stub(body={"id": rid, "group_id": "g1",
-                               "mode": "native", "fallback": False})
-        asyncio.run(api.resend())
-        rec2 = record_store.load_record(tmp, rid)
-        assert rec2.get("native_unavailable"), "发回原群失败才是真失效"
+        assert rec.get("native_unavailable"), "缓存失效就要记成原消息不可用"
     finally:
         if saved is None:
             sys.modules.pop("astrbot.api.web", None)
         else:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK -> 跨群失败不记失效, 原群失败才记")
+    print("  OK -> 失败即记失效(与目标群无关)")
 
 
 PHASE9 = [
@@ -6323,7 +6329,7 @@ PHASE9 = [
     test_plugin_forward_saved_as_single_entry,
     test_record_admin_categories_and_flat,
     test_plugin_forward_auto_forward_to_target_groups,
-    test_plugin_auto_forward_cross_group_uses_rebuild,
+    test_plugin_auto_forward_native_first_then_rebuild,
     test_forwarder_apply_style_and_avatar_shape,
     test_plugin_style_update_and_page,
     test_config_reads_nested_schema_groups,
@@ -6333,7 +6339,7 @@ PHASE9 = [
     test_page_stats_and_kind_filter_use_real_counts,
     test_page_native_failure_marks_stale,
     test_record_admin_migrates_flat_forwards,
-    test_plugin_demotes_auto_forward_default,
+    test_plugin_promotes_auto_forward_default,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
     test_record_admin_reconcile_flat_renders,
@@ -6345,7 +6351,7 @@ PHASE9 = [
     test_record_admin_purge_orphan_renders,
     test_plugin_style_preview_cleans_temp,
     test_record_admin_node_payloads_keep_time,
-    test_plugin_resend_cross_group_does_not_poison,
+    test_plugin_resend_native_failure_marks_unavailable,
     test_forwarder_emoji_mixed_layout,
     test_recover_raw_url_overrides_local_jpeg,
     test_recover_raw_no_http_keeps_local,

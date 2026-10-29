@@ -332,12 +332,10 @@ class RecordPageApi:
         else:
             res = await record_admin.native_forward(
                 bot, group_id, rec.get("root_msg_id") or "")
-            # v1.17.0: 只有「发回原群」失败才可能是原消息真的失效。跨群 native
-            # 也会回「消息不存在」（QQ 按原群找消息），以前同样被记成永久失效 ——
-            # 原消息明明还在，页面却再也不给「转发原消息」了。
-            same_group = str(group_id) == str(rec.get("group_id") or "")
-            if (not res.get("ok") and same_group
-                    and _native_gone(res.get("error"))):
+            # 失败回「消息不存在/取不到原消息」= 这个短 id 已经从 NapCat 的
+            # 内存缓存里消失（重启、LRU 挤掉、消息过期），跟目标群无关 ——
+            # v1.17.1 起不再按「是否发回原群」区别对待。
+            if not res.get("ok") and _native_gone(res.get("error")):
                 try:
                     set_meta(self._root, rid, native_unavailable=int(time.time()))
                 except Exception as e:  # 标记失败不影响这次回退

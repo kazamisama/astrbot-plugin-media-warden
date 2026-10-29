@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
@@ -43,12 +43,12 @@ class MediaWardenConfig:
     ])
     # ---- v1.14.0 聊天记录自动转发（可选，默认关） ----
     auto_forward_enabled: bool = False
-    # native  = 转发原消息（保气泡/挂件，但只对**原群**可靠）。
+    # native  = 转发原消息（保气泡/挂件/头像/原时间戳）。能否成功只看 NapCat 的
+    #           进程内短 id 缓存（LRU 5000，重启清空），与目标群无关。
     # rebuild = 用存档重拼合并转发（无装扮，永远可用）
-    # v1.15.0 曾把默认改成 native；v1.17.0 改回 rebuild —— 自动转发的目标群按定义
-    # 就是「别的群」，而 QQ 的原地转发是按原群找消息的（2026-10-28 实测跨群必回
-    # 「消息不存在」），native 在自动转发里永远只是白打一次请求再回退。
-    auto_forward_mode: str = "rebuild"
+    # v1.17.0 曾误判「跨群原地转发必失败」而把默认改成 rebuild，v1.17.1 恢复 native；
+    # 缓存里没有原消息时会自动回退 rebuild。
+    auto_forward_mode: str = "native"
     forward_target_groups: List[str] = field(default_factory=list)
     # ---- v1.14.0 Pillow 渲染样式（样式页可改） ----
     style_width: int = 720
