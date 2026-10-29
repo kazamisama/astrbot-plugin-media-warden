@@ -1,9 +1,9 @@
-# 交接文档 · astrbot-plugin-media-warden v1.17.1
+# 交接文档 · astrbot-plugin-media-warden v1.17.2
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.17.1（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.17.2（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.2 是存档页布局修正 —— 整页固定、左右面板各自滚动，见 §1.-9；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
@@ -11,7 +11,29 @@
 - 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`
 
 
-## 1.-8 v1.17.1（更正「跨群原地转发必失败」，当前版本）
+## 1.-9 v1.17.2（存档页整页固定，当前版本）
+
+用户的反馈（m05137）：「最外面多了一个滚动条，应该是单固定页面内嵌两个边距相同的框（目前就是这样，但是边距不一样，右边下面有空白），框内带滚动条」。
+
+### 根因
+
+- 页面高度靠内容撑开：`main` 只有 `padding: 14px 18px 28px`、`align-items: start`；两个面板各自用 `max-height: calc(100vh - 190px)`（列表）/ `calc(100vh - 230px)`（详情正文）—— 两个不同的常量，一旦内容多就把 body 顶出滚动条，同时右栏正文比面板短、底下留白，左右底边也不齐。
+
+### 改法（纯 `pages/dashboard/styles.css`）
+
+- `html, body { height: 100% }`；`body { display:flex; flex-direction:column; overflow:hidden }`。
+- `.topbar`：去掉 `position: sticky / top / z-index`，改 `flex: 0 0 auto`（页面本身不滚了）。
+- `main { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 14px 18px; }` —— 四边同距（去掉原来的底部 28px），`align-items: start` 删掉（默认 stretch，两栏同高）。
+- `.list-pane`, `.detail-pane`：`display:flex; flex-direction:column; min-height:0`；`.kinds` / `.list-head` / `.detail-head` / `.detail-tabs` 全部 `flex: 0 0 auto`；`.list` 与 `.detail-body` 改 `flex: 1 1 auto; min-height: 0; overflow: auto`（删掉 `max-height`）。
+- `.detail-pane` 的 `min-height: 240px` 删除（会顶破固定高度）；`.hint` 加 `overflow: auto`。
+- 窄屏 `@media (max-width: 860px)`：`grid-template-columns: 1fr; grid-template-rows: minmax(0,40%) minmax(0,1fr)`，仍然各自内部滚动。
+
+### 验证
+
+- 用 Chrome headless（`--headless=new --window-size=1600,900 --screenshot`）加载一份内联同结构 + 同 `styles.css` 的测试页：截图显示外层无滚动条，左右面板同高、上下留白一致，滚动条只出现在两个面板内部（`%TEMP%\wd_layout\` 已清理）。
+- 冒烟不受影响，仍 164 项。
+
+## 1.-8 v1.17.1（更正「跨群原地转发必失败」，提交 57d4d01 + dd9e0d1）
 
 用户的反馈（m05019：「我之前手动 native 转发时可是生效了的，没有丢渲染重建」）直接推翻了 v1.17.0 的一条核心结论。读了 NapCat 源码（`napcat.mjs`）确认：
 

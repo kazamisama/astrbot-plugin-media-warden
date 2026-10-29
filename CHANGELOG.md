@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.17.2
+
+存档页（dashboard）布局修正：整页固定，滚动只在左右两个面板内部。
+
+### Fixed
+
+- **外层多出一条整页滚动条**：页面高度以前由内容撑开（`main` 只给 `padding`，列表/详情各自 `max-height: calc(100vh - 190px / 230px)`），只要内容多一点就顶出 body 滚动条，而两个面板的 `max-height` 又不一样 —— 右栏下方留出一截空白，左右边距看起来也不一致。现在 `html, body { height: 100% }` + `body { display:flex; flex-direction:column; overflow:hidden }`，`main` 用 `flex:1; min-height:0; overflow:hidden` 吃掉剩余高度，`.list-pane` / `.detail-pane` 都是 `display:flex; flex-direction:column; min-height:0`，列表与详情正文用 `flex:1; min-height:0; overflow:auto` —— 两块面板同高、同边距（`main` 的 `padding: 14px 18px` 四边一致，去掉了原来底部的 28px），滚动条只出现在列表 / 详情正文里。
+- 顶栏不再 `position: sticky`（页面本身不滚了，sticky 没有意义），改成 `flex: 0 0 auto`。
+- 窄屏（<860px）由「两栏堆叠 + 列表 `40vh`」改为 `grid-template-rows: minmax(0,40%) minmax(0,1fr)`，两栏仍然各自内部滚动。
+
+### Tests
+
+- 冒烟仍是 **164 项**（纯静态样式改动；用 Chrome headless 在 1600×900 下截图核对：外层无滚动条，左右面板底边齐平、上下留白一致）。
+
 ## v1.17.1
 
 更正 v1.17.0 的一个误判：**跨群「原地转发」并非必然失败**。
