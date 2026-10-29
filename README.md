@@ -31,6 +31,7 @@
 - v1.16.0：**渲染开关布尔化** —— 三态 `forward_render_mode`(image/json/both) 收成一个开关 `forward_render_image`（开 = 条目里画 `render.png`，关 = 只留 `record.json`）；旧配置的 `json` 自动映射成关闭，`image`/`both` 映射成开启。条目里本来总有 `record.json`，所以不再产生「扁平的额外 JSON 副本」，一条转发只回一个结果；顺手修了内联节点（`{"type":"node","data":{…}}` 包装形态）存档成空壳的问题；冒烟 152 项
 - v1.17.0：**审计修复** —— 删共享扁平文件不再连坐（按行删 + 引用归零才删字节）；`resolve_flat` 先 normpath 再判 `_records` 前缀（`./_records/…` 绕不过去了）；纯文本去重按发送人收窄（不同人发同一句话各存一条）；语音补上 `save_voice` 开关、未知类型默认不存；857 张老的扁平转发渲染图单列「旧渲染图」并可一键清理；分页能翻到第 2000 条之后；`/warden stats` 纳入存档、`prune --records` 才删存档；重建转发带原时间戳；纯文本回执带渲染图预览；样式预览不再泄漏临时目录、下载闸门不再被迟到缓存占住；冒烟 164 项。**注：本版「自动转发恒用重建 / 跨群 native 必失败」两条结论是误判，已在 v1.17.1 更正**
 - v1.18.0：**去补丁化（一次性归一化）** —— 按「不为旧数据长期留着补丁」的结论，升级时跑**一次** `warden/upgrade.py`（闸门 `<storage_root>/.schema_version` + 索引 `PRAGMA user_version=2`）：条目补 `kind`、删 `legacy_forward.json` 与 `legacy_*` 字段、老 GIF 行 `kind=image` 改成 `gif`、删迁移失败的空壳行；v1.16 之前多存的扁平渲染图（`kind=forward_render`）**先打包成 zip 备份再删**。同时删掉全部兼容分支：`migrate_flat_forwards` / `reconcile_flat_renders` / `purge_orphan_renders` +「清理旧渲染图」按钮 / `backfill_duplicates` / 按扩展名猜类型 / 旧配置键派生 / `_promote_auto_forward_default` / 引擎旧值告警（playwright/wkhtml 现在直接算配置错误）。冒烟 162 项
+- v1.18.1：**去补丁化之后的纯重构（行为不变）** —— 三个装不下一屏的函数拆开：`_save_forward`（305 行/六层嵌套）拆成「取节点 / 决定画不画 / 抓头像 / 下载节点图 / 存档 / 渲染 / JSON / 索引写入」八个方法，`on_group_message`（133 行）拆出类型门控、事件身份、media 落盘三块（用 `_Gated` / `_EventIds` 传值），`_recover_original_urls`（83 行）拆出「先按标识、再按顺序」的配对与回填；`main.py` 最后两处 `except: pass` 改为记日志，宿主 getter 的吞咽收拢到 `policy._try_call` 一处；索引类型过滤不再按扩展名二次分类（v1.18.0 归一化后 `kind` 就是真实类型），`upgrade` 里重复的 `except` 合并；冒烟 162 项全绿
 - v1.17.3：**样式页同一套固定布局**（不再有外层滚动条、面板各自滚动）+ **复用条目不再重复自动转发**（同内容在源群再发一次时跳过）；冒烟 165 项
 - v1.17.2：**存档页整页固定** —— 外层不再出现整页滚动条，左右两块面板同高同边距、各自内部滚动（列表 / 详情正文），窄屏改为上下两段各自滚动；纯样式改动，冒烟仍 164 项
 - v1.17.1：**纠正「跨群原地转发必失败」的误判** —— NapCat 的 `get_msg` 与 `forward_group_single_msg` 都按**进程内短 id 缓存**（LRU 5000 条，重启清空）找消息，跟目标群无关：缓存里有就能保气泡/挂件/头像发到任何群，缓存丢了（重启 / 被挤掉 / 消息过期）才回「消息不存在」。所以自动转发恢复「先 native、失败回退 rebuild」，`auto_forward_mode` 默认回到 `native`，页面「转发原消息」不再限定原群；失败仍会记成原消息失效（缓存丢了就是丢了）。冒烟 164 项
@@ -309,7 +310,7 @@ python -m pytest -q _smoke.py
 ## 已知边界
 
 - 主力验证平台为 OneBot/QQ 系（`aiocqhttp`、`qq_official`），其他平台的消息组件 schema 未逐一验证
-- `playwright` / `wkhtml` 渲染引擎未实现：选了会在启动日志明确告警并继续用 PIL 渲染（v1.10.0 起不再静默降级 JSON）
+- `playwright` / `wkhtml` 渲染引擎从未实现：v1.18.0 起这两个值直接算**配置错误**（回落默认 `pil` 并在日志里说明）；v1.10.0–v1.17.x 的行为是「受理 + 告警，实际仍用 PIL」
 - 私聊 / 系统消息默认跳过
 - 透明 GIF / WebP 动画按首帧处理，未做帧动画合成
 - 命令权限、头像网络抓取、`image_result` 协议差异需要真实 AstrBot runtime 验证
@@ -326,6 +327,5 @@ python -m pytest -q _smoke.py
 ## 后续可选
 
 - 其他平台 adapter 的消息组件扩展
-- HTML 模板 + playwright 渲染，提升转发图样式自由度
 - 媒体分类子目录 + `metadata.json` 索引
 - 头像 URL 模板配置，按平台自定义头像源

@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.18.1
+
+纯重构，行为不变：把三个装不下一屏的函数拆开，并把最后一处「吞异常」收进一个边界。没有新增/删除功能，没有配置项变化，不需要数据迁移。
+
+### Changed
+
+- `main._save_forward`（305 行、六层嵌套）拆成 `_forward_nodes`（拉取 + 展开节点）/ `_forward_render_enabled`（画不画）/ `_fetch_forward_avatars` / `_download_forward_images`（返回 `blob_by_url` / `node_imgs` / url 数与失败数）/ `_archive_forward`（条目目录，返回 `rid` 与 `archived`）/ `_save_forward_render` / `_save_forward_json` / `_index_asset`（统一写索引行），主流程只剩「取节点 → 决定画不画 → 下载 → 存档 → 落盘 → 自动转发」。
+- `main.on_group_message`（133 行）拆出 `_gate_components`（类型开关门控，仍在下单之前，免得「类型没开」被记成下载失败）、`_event_identity`（platform/group/sender/msg_id/ts 收一处）、`_save_media`（索引复用 + 并发下载 + 落盘），用两个 `NamedTuple`（`_Gated` / `_EventIds`）传值。
+- `main._recover_original_urls`（83 行）拆出 `_match_raw_ref`（先按标识配对、配不上再按顺序）与 `_apply_raw_ref`（回填 url/fileid/raw_file/name/size）；键归一化成模块级 `_media_keys` / `_ref_keys` / `_comp_keys`。
+- `policy` 里四处「宿主 getter 取不到就静默跳过」收成一个 `_try_call` —— 吞咽只留这一个边界，且写明了为什么可以吞（拿不到就回退 `message_obj`）。
+- `main._local_cache_names` 的 `urlparse` 失败落成显式「空候选」（不再 `pass`）；`_build_previews` 里回执预览发不出去时记日志。
+- `index._asset_filter` 不再按扩展名二次分类：v1.18.0 归一化后 `kind` 就是落盘真实类型，类型过滤只看 `kind` 字段。
+- `upgrade._drop_junk_forwards` 合并重复的两层 `except`（一行脏数据不该中止整次清扫）。
+
+### Verified
+
+- 冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=31, total=162)`，与 v1.18.0 同数 —— 纯重构，断言一条没改。
+
 ## v1.18.0
 
 去补丁化：历史遗留形态收敛成**一次**启动归一化，之后代码里不再有「为旧数据兜底」的分支。

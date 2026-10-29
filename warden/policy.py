@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .config import MediaWardenConfig
@@ -27,55 +27,49 @@ def _key(platform: Optional[str], gid: Optional[str]) -> str:
     return f"{(platform or 'unknown').lower()}:{gid}" if gid else ""
 
 
+def _try_call(fn) -> Any:
+    """调一个宿主提供的事件访问器:缺失或抛异常都算「拿不到」。
+
+    这些 getter 来自平台适配器,不同平台/版本可能没有或者抛错 —— 拿不到就回退到
+    message_obj,不该因为一次取值失败丢掉整条消息。这里是**唯一**的吞咽点。
+    """
+    if not callable(fn):
+        return None
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
 def event_platform(event) -> str:
-    fn = getattr(event, "get_platform_name", None)
-    if callable(fn):
-        try:
-            v = fn()
-            if v:
-                return str(v)
-        except Exception:
-            pass
+    v = _try_call(getattr(event, "get_platform_name", None))
+    if v:
+        return str(v)
     pm = getattr(event, "platform_meta", None)
     return str(getattr(pm, "name", None) or "unknown") if pm else "unknown"
 
 
 def event_group_id(event) -> str:
-    fn = getattr(event, "get_group_id", None)
-    if callable(fn):
-        try:
-            v = fn()
-            if v:
-                return str(v)
-        except Exception:
-            pass
+    v = _try_call(getattr(event, "get_group_id", None))
+    if v:
+        return str(v)
     obj = getattr(event, "message_obj", None)
     return str(getattr(obj, "group_id", "") or "") if obj else ""
 
 
 def event_sender_id(event) -> str:
-    fn = getattr(event, "get_sender_id", None)
-    if callable(fn):
-        try:
-            v = fn()
-            if v:
-                return str(v)
-        except Exception:
-            pass
+    v = _try_call(getattr(event, "get_sender_id", None))
+    if v:
+        return str(v)
     obj = getattr(event, "message_obj", None)
     sender = getattr(obj, "sender", None) if obj else None
     return str(getattr(sender, "user_id", "") or "") if sender else ""
 
 
 def event_sender_name(event) -> str:
-    fn = getattr(event, "get_sender_name", None)
-    if callable(fn):
-        try:
-            v = fn()
-            if v:
-                return str(v)
-        except Exception:
-            pass
+    v = _try_call(getattr(event, "get_sender_name", None))
+    if v:
+        return str(v)
     obj = getattr(event, "message_obj", None)
     sender = getattr(obj, "sender", None) if obj else None
     if sender:

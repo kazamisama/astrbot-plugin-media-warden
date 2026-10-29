@@ -125,9 +125,9 @@ def _drop_junk_forwards(index) -> dict:
         asset_id = row.get("asset_id") or row.get("id")
         try:
             index.delete_row(int(asset_id))
-        except (TypeError, ValueError):
-            continue
         except Exception:
+            # asset_id 不是整数 / 行已经被别处删掉:跳过这一行继续扫,
+            # 一次清扫不该因为一行脏数据整批中止(返回值里只有计数)。
             continue
         dropped += 1
         if not index.count_path(path):

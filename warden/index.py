@@ -285,21 +285,13 @@ class AssetIndex:
         """list_assets / summary 共用的 WHERE 片段（过滤语义只写一处）。"""
         where: list[str] = []
         params: list[Any] = []
-        kinds = [k for k in (kinds or []) if k]
+        # v1.18.0 起 kind 就是落盘时的真实类型(动图按字节判,见 _store_dl),
+        # 老库里 kind=image 的 gif 由 upgrade.backfill_gif_kind 一次性改掉 ——
+        # 查询不再按扩展名二次分类,类型过滤只看 kind 字段。
+        kinds = list(dict.fromkeys(k for k in (kinds or []) if k))
         if kinds:
-            # v1.14.0 之前没有「动图」这个 kind,GIF 也记成 image —— 于是「动图」标签
-            # 一个老文件都筛不出来、「图片」里却混着一堆 gif。这里按扩展名再分一次,
-            # 两边互斥(同一行不会被两个标签都数一遍)。
-            plain = [k for k in kinds if k not in ("image", "gif")]
-            parts: list[str] = []
-            if "image" in kinds:
-                parts.append("(kind = 'image' AND lower(path) NOT LIKE '%.gif')")
-            if "gif" in kinds:
-                parts.append("(kind = 'gif' OR (kind = 'image' AND lower(path) LIKE '%.gif'))")
-            if plain:
-                parts.append("kind IN (" + ",".join("?" * len(plain)) + ")")
-                params.extend(plain)
-            where.append("(" + " OR ".join(parts) + ")")
+            where.append("kind IN (" + ",".join("?" * len(kinds)) + ")")
+            params.extend(kinds)
         if group_id:
             where.append("group_id = ?")
             params.append(str(group_id))

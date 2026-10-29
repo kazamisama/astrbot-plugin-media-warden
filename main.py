@@ -9,11 +9,12 @@ v1.3 增量:
 """
 from __future__ import annotations
 import asyncio
+from collections import defaultdict
 import hashlib
 import json
 import os
 import time
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from astrbot.api.star import Star, register, Context
 from astrbot.api.event import filter, AstrMessageEvent
@@ -70,10 +71,12 @@ def _local_cache_candidates(comp: Component) -> list:
         try:
             from urllib.parse import urlparse
             last = urlparse(url).path.rsplit("/", 1)[-1]
-            if last:
-                out.append(last)
-        except Exception:
-            pass
+        except ValueError:
+            # 畸形 URL(非法 IPv6 字面量之类)没有可用的 path 段:这一路候选跳过,
+            # raw_file / file_id 那几条候选仍然有效。
+            last = ""
+        if last:
+            out.append(last)
     seen = set()
     uniq: list = []
     for v in out:
@@ -90,7 +93,7 @@ def _url_fileid(url: str) -> Optional[str]:
     try:
         from urllib.parse import parse_qs, urlparse
         q = parse_qs(urlparse(url).query)
-    except Exception:
+    except ValueError:
         return None
     for key in ("fileid", "file_id"):
         vals = q.get(key)
@@ -119,7 +122,7 @@ def _b64_payload(raw: str) -> Optional[bytes]:
     s = raw.split(",", 1)[-1] if raw.startswith("data:") else raw
     try:
         return base64.b64decode(s + "=" * (-len(s) % 4), validate=False)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -226,14 +229,6 @@ def _format_asset_row(r: dict) -> str:
     )
 
 
-def _failure_subject_for(comp: Component) -> str:
-    """稳定去重键:优先 fileid（rkey 换了也能对上同一张图）,否则 host+path。"""
-    fid = (comp.meta or {}).get("fileid") or comp.file_id or ""
-    if fid and "://" not in str(fid):
-        return f"fileid:{fid}"
-    return failure_subject(comp.url)
-
-
 # v1.9.9: 网络全败后「等客户端把图下载下来再查本地缓存」的等待点(秒)。
 # 线上实测(2026-10-11): 消息刚到的那一瞬间客户端还没落盘 —— 插件第一次查必 miss,
 # 而 napcat 给的那条 url 又已经失效(http 400); 客户端随后(几秒~几分钟)才下载。
@@ -259,12 +254,58 @@ def _upgrade_qq_image_url(url: str) -> str:
     return url
 
 
+class _Gated(NamedTuple):
+    """类型门控结果:过了开关的那部分,以及各类被丢掉的计数(只用于日志)。"""
+
+    components: list
+    media: list
+    forwards: list
+    text_segments: list
+    dropped: dict
+    wants_text: bool
+
+
+class _EventIds(NamedTuple):
+    """一条事件的身份字段 —— 落盘路径、索引主键、回执都从这里取。"""
+
+    platform: str
+    group_id: str
+    sender_id: str
+    sender_name: str
+    msg_id: str
+    ts: int
+
+
+def _media_keys(*values) -> set:
+    """把若干候选标识(文件名 / id / url 尾段)归一成可比较的集合。"""
+    keys: set = set()
+    for v in values:
+        if isinstance(v, str) and v.strip():
+            keys.add(v.strip())
+            keys.add(os.path.basename(v.strip()))
+    return keys
+
+
+def _ref_keys(ref: dict) -> set:
+    """raw_message 里一个段的可配对标识。"""
+    return _media_keys(ref.get("file"), ref.get("name"))
+
+
+def _comp_keys(comp: Component) -> set:
+    """组件自身的可配对标识 —— 与 _ref_keys 用同一套归一化才配得上。"""
+    url = (comp.url or "").strip()
+    tail = url.rsplit("/", 1)[-1] if url and "://" in url else ""
+    meta = comp.meta or {}
+    return _media_keys(meta.get("raw_file"), meta.get("path"),
+                       comp.file_id, comp.name, tail)
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.18.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), 命令仅管理员可用",
+    "群聊素材守门人 v1.18.1: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), 命令仅管理员可用",
     VERSION,
 )
+
+
 class MediaWardenStar(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
@@ -279,6 +320,8 @@ class MediaWardenStar(Star):
         self._avatar_cache = None
         # 迟到缓存重查的等待倍率(测试里置 0 以免真等)
         self._sleep_scale = 1.0
+        # 下载并发闸门(首次下载时按配置创建)
+        self._dl_sem: Optional[asyncio.Semaphore] = None
         self._log(
             f"loaded: v{VERSION} | mode={self.cfg.match_mode} "
             f"| groups={len(self.cfg.target_groups)} "
@@ -476,10 +519,7 @@ class MediaWardenStar(Star):
 
     async def terminate(self) -> None:
         if self._index is not None:
-            try:
-                self._index.close()
-            except Exception:
-                pass
+            self._index.close()
         self._log("terminate: ok")
 
     # ----------------- 钩子 -----------------
@@ -492,11 +532,61 @@ class MediaWardenStar(Star):
                 self._log(f"skip: {decision.reason}")
             return
 
-        components = extract_components(event)
+        gated = self._gate_components(event)
+        if not gated.media and not gated.forwards and not gated.wants_text:
+            if self.cfg.log_to_stdout:
+                extra = "".join(f" {k}={v}" for k, v in sorted(gated.dropped.items()))
+                self._log(
+                    f"skip: nothing to save{(' | dropped:' + extra) if extra else ''} "
+                    f"| msg={getattr(event, 'message_id', '?')} "
+                    f"| segments={summarize(gated.components)}"
+                )
+            return
 
-        # v1.14.0 类型门控:六类各自开关 + 文档扩展名白名单.
-        # 门控放在这里(而不是下载之后),是为了让「类型没开」和「下载失败」在日志里
-        # 分得清 —— 前者不是错误,不该进 failures 表。
+        ids = self._event_identity(event)
+        if self.cfg.log_to_stdout:
+            self._log(
+                f"matched | msg={ids.msg_id} sender={ids.sender_id} "
+                f"media={len(gated.media)} forward={len(gated.forwards)}"
+            )
+
+        # 纯文本走独立分支:一条消息就是一个条目,没有下载/落盘的并发问题
+        if gated.wants_text:
+            t0 = time.time()
+            text_item = await self._save_text(
+                gated.text_segments, platform=ids.platform, group_id=ids.group_id,
+                sender_id=ids.sender_id, sender_name=ids.sender_name,
+                msg_id=ids.msg_id, ts=ids.ts,
+            )
+            text_batch = BatchResult(items=[text_item],
+                                     duration_s=time.time() - t0)
+            async for ev in self._emit_receipt(text_batch, ids.msg_id,
+                                              ids.sender_id, event=event):
+                yield ev
+            return
+
+        t0 = time.time()
+        batch = BatchResult(items=await self._save_media(gated.media, ids, event))
+        # 转发节点(顺序,因渲染需要前序 json)
+        for idx, comp in enumerate(gated.forwards, start=len(gated.media)):
+            ctx = SaveContext(
+                platform=ids.platform, group_id=ids.group_id,
+                sender_id=ids.sender_id, sender_name=ids.sender_name,
+                msg_id=ids.msg_id, idx=idx, ts=ids.ts,
+            )
+            batch.items.extend(await self._save_forward(comp, ctx, event))
+        batch.duration_s = time.time() - t0
+        async for ev in self._emit_receipt(batch, ids.msg_id, ids.sender_id,
+                                           event=event):
+            yield ev
+
+    def _gate_components(self, event) -> _Gated:
+        """按类型开关把消息段分成要存的 media / forwards / 纯文本。
+
+        门控放在下载之前(而不是之后),是为了让「类型没开」和「下载失败」在日志里
+        分得清 —— 前者不是错误,不该进 failures 表。
+        """
+        components = extract_components(event)
         media: list[Component] = []
         dropped: dict[str, int] = {}
         for c in components:
@@ -523,68 +613,44 @@ class MediaWardenStar(Star):
             bool(text_segments) and not media and not forwards
             and kind_allowed(self.cfg, "text")
         )
+        return _Gated(components, media, forwards, text_segments, dropped,
+                      wants_text)
 
-        if not media and not forwards and not wants_text:
-            if self.cfg.log_to_stdout:
-                extra = "".join(f" {k}={v}" for k, v in sorted(dropped.items()))
-                self._log(
-                    f"skip: nothing to save{(' | dropped:' + extra) if extra else ''} "
-                    f"| msg={getattr(event, 'message_id', '?')} "
-                    f"| segments={summarize(components)}"
-                )
-            return
-
-        platform = (event_platform(event) or "unknown").lower()
-        group_id = event_group_id(event) or "unknown"
-        sender_id = event_sender_id(event) or "anon"
-        sender_name = event_sender_name(event) or sender_id
+    @staticmethod
+    def _event_identity(event) -> _EventIds:
+        """把散在 event / message_obj 上的身份字段收成一处 —— 少一层 getattr。"""
         msg_obj = getattr(event, "message_obj", None)
-        msg_id = (
-            getattr(event, "message_id", None)
-            or (getattr(msg_obj, "message_id", None) if msg_obj else None)
-            or "nomsg"
+        sender_id = event_sender_id(event) or "anon"
+        return _EventIds(
+            platform=(event_platform(event) or "unknown").lower(),
+            group_id=event_group_id(event) or "unknown",
+            sender_id=sender_id,
+            sender_name=event_sender_name(event) or sender_id,
+            msg_id=(getattr(event, "message_id", None)
+                    or (getattr(msg_obj, "message_id", None) if msg_obj else None)
+                    or "nomsg"),
+            ts=int(getattr(event, "timestamp", None)
+                   or (getattr(msg_obj, "timestamp", None) if msg_obj else None)
+                   or time.time()),
         )
-        ts = int(
-            getattr(event, "timestamp", None)
-            or (getattr(msg_obj, "timestamp", None) if msg_obj else None)
-            or time.time()
-        )
 
-        if self.cfg.log_to_stdout:
-            self._log(
-                f"matched | msg={msg_id} sender={sender_id} "
-                f"media={len(media)} forward={len(forwards)}"
-            )
+    async def _save_media(self, media: list[Component], ids: _EventIds,
+                          event) -> list[AssetResult]:
+        """存这一条消息里的 media 段(图片/视频/文件等)。
 
-        # 纯文本走独立分支:一条消息就是一个条目,没有下载/落盘的并发问题
-        if wants_text:
-            t0 = time.time()
-            text_item = await self._save_text(
-                text_segments, platform=platform, group_id=group_id,
-                sender_id=sender_id, sender_name=sender_name,
-                msg_id=msg_id, ts=ts,
-            )
-            text_batch = BatchResult(items=[text_item],
-                                     duration_s=time.time() - t0)
-            async for ev in self._emit_receipt(text_batch, msg_id, sender_id,
-                                              event=event):
-                yield ev
-            return
-
-        t0 = time.time()
-        batch = BatchResult()
-
+        v1.9: 先看索引库有没有同一条消息的旧成果(index_reuse_saved),
+        命中的直接复用,只下载没命中的那几条。
+        """
         # 0) 先从 raw_message 恢复原始 http url.
         #    AstrBot 4.26+ 的 PreProcessStage 会把 Image 组件转成 jpeg 静帧,
         #    并覆盖 component.url/file/path; raw_message 里 napcat 保留原始引用(例如 gif).
         #    这里只恢复 http(s) url, 避免把本地缓存路径降级成 jpeg 静帧.
         self._recover_original_urls(event, media)
 
-        # 1) 并发下载所有 media
-        #    v1.9: 先看索引库有没有同一条消息的旧成果(index_reuse_saved)。
-        save_contexts = [
-            SaveContext(platform=platform, group_id=group_id, sender_id=sender_id,
-                        sender_name=sender_name, msg_id=msg_id, idx=idx, ts=ts)
+        contexts = [
+            SaveContext(platform=ids.platform, group_id=ids.group_id,
+                        sender_id=ids.sender_id, sender_name=ids.sender_name,
+                        msg_id=ids.msg_id, idx=idx, ts=ids.ts)
             for idx in range(len(media))
         ]
         reuse: list[tuple[Optional[AssetResult], Optional[str]]] = [
@@ -592,32 +658,22 @@ class MediaWardenStar(Star):
         ]
         if self.cfg.index_reuse_saved and self._index is not None:
             for i, comp in enumerate(media):
-                hit = self._find_saved_asset(msg_id, i, platform=platform,
-                                             group_id=group_id)
+                hit = self._find_saved_asset(ids.msg_id, i,
+                                             platform=ids.platform,
+                                             group_id=ids.group_id)
                 if hit is not None:
-                    reuse[i] = self._reuse_saved(comp, save_contexts[i], hit)
+                    reuse[i] = self._reuse_saved(comp, contexts[i], hit)
         missing = [i for i, (r, _) in enumerate(reuse) if r is None]
         fresh = await self._download_all([media[i] for i in missing], event)
         for slot, dl in zip(missing, fresh):
             reuse[slot] = (None, dl)
-        for comp, ctx, (reused, dl) in zip(media, save_contexts, reuse):
+        items: list[AssetResult] = []
+        for comp, ctx, (reused, dl) in zip(media, contexts, reuse):
             if reused is not None:
-                batch.items.append(reused)
+                items.append(reused)
                 continue
-            batch.items.append(self._store_dl(comp, ctx, dl))
-
-        # 2) 转发节点(顺序,因渲染需要前序 json)
-        for idx, comp in enumerate(forwards, start=len(media)):
-            ctx = SaveContext(
-                platform=platform, group_id=group_id, sender_id=sender_id,
-                sender_name=sender_name, msg_id=msg_id, idx=idx, ts=ts,
-            )
-            for r in await self._save_forward(comp, ctx, event):
-                batch.items.append(r)
-
-        batch.duration_s = time.time() - t0
-        async for ev in self._emit_receipt(batch, msg_id, sender_id, event=event):
-            yield ev
+            items.append(self._store_dl(comp, ctx, dl))
+        return items
 
     async def _emit_receipt(self, batch: BatchResult, msg_id: str,
                             sender_id: str, event: AstrMessageEvent | None = None):
@@ -842,86 +898,66 @@ class MediaWardenStar(Star):
     def _recover_original_urls(self, event, media: list[Component]) -> None:
         """从 raw_message 恢复被 PreProcessStage 覆盖的原始 http url.
 
-        只恢复 http(s) url, 并按 kind 顺序回填到对应 media 组件;
+        只恢复 http(s) url, 并按 kind 分桶回填到对应 media 组件;
         没有原始 http 引用时保持组件原样(兼容非 OneBot 平台).
         """
         try:
             refs = recover_raw_media_refs(event)
         except Exception as e:
-            if self.cfg.log_to_stdout:
-                self._log(f"recover raw urls failed: {e!r}")
+            self._log(f"recover raw urls failed: {e!r}")
             return
         if not refs:
             return
-        from collections import defaultdict
         buckets: dict[str, list[dict]] = defaultdict(list)
         for r in refs:
             buckets[r["kind"]].append(r)
-        # v1.10: 先按「标识」配对,配不上再按顺序取。
-        # 只按顺序时,raw_message 与组件列表只要有一边多/少一段(表情被转成别的类型、
-        # 某段没有 url),后面所有图都会领到别人的 url —— 那比不恢复更糟。
-        def _ref_keys(ref: dict) -> set:
-            keys: set = set()
-            for k in ("file", "name"):
-                v = ref.get(k)
-                if isinstance(v, str) and v.strip():
-                    keys.add(v.strip())
-                    keys.add(os.path.basename(v.strip()))
-            return keys
-
-        def _comp_keys(comp: Component) -> set:
-            keys: set = set()
-            for v in ((comp.meta or {}).get("raw_file"), (comp.meta or {}).get("path"),
-                      comp.file_id, comp.name):
-                if isinstance(v, str) and v.strip():
-                    keys.add(v.strip())
-                    keys.add(os.path.basename(v.strip()))
-            url = (comp.url or "").strip()
-            if url and "://" in url:
-                keys.add(url.rsplit("/", 1)[-1])
-            return keys
-
         used: set = set()
         for comp in media:
-            lst = buckets.get(comp.kind) or []
-            want = _comp_keys(comp)
-            ref = None
-            if want:
-                for j, cand in enumerate(lst):
-                    if j in used:
-                        continue
-                    if want & _ref_keys(cand):
-                        ref = cand
-                        used.add(j)
-                        break
-            if ref is None:
-                for j, cand in enumerate(lst):
-                    if j in used:
-                        continue
-                    ref = cand
+            ref = self._match_raw_ref(comp, buckets.get(comp.kind) or [], used)
+            if ref is not None:
+                self._apply_raw_ref(comp, ref)
+
+    @staticmethod
+    def _match_raw_ref(comp: Component, candidates: list[dict],
+                       used: set) -> Optional[dict]:
+        """先按「标识」配对,配不上再按顺序取。
+
+        只按顺序时,raw_message 与组件列表只要有一边多/少一段(表情被转成别的类型、
+        某段没有 url),后面所有图都会领到别人的 url —— 那比不恢复更糟。
+        """
+        want = _comp_keys(comp)
+        if want:
+            for j, cand in enumerate(candidates):
+                if j not in used and want & _ref_keys(cand):
                     used.add(j)
-                    break
-            if ref is None:
-                continue
-            url = ref.get("url")
-            if url:
-                comp.url = url
-                fid = _url_fileid(url)
-                if fid:
-                    # 记下 fileid: rkey 会过期,fileid 是 OneBot get_image 的重取键
-                    comp.meta["fileid"] = fid
-                # 记下 segment 原始的 file: napcat 的图片 id。PreProcessStage 会把
-                # component.file_id 覆盖成 jpeg 静帧文件名,那个值 get_image 查不到
-                # (retcode=1200 file not found) —— 补救时必须优先用这个原值。
-                raw_file = ref.get("file")
-                if isinstance(raw_file, str) and raw_file:
-                    comp.meta["raw_file"] = raw_file
-                if ref.get("name") and not comp.name:
-                    comp.name = ref["name"]
-                if ref.get("size") and not comp.size:
-                    comp.size = ref["size"]
-                if self.cfg.log_to_stdout:
-                    self._log(f"recovered original url for {comp.kind}: {url[:60]}...")
+                    return cand
+        for j, cand in enumerate(candidates):
+            if j not in used:
+                used.add(j)
+                return cand
+        return None
+
+    def _apply_raw_ref(self, comp: Component, ref: dict) -> None:
+        """把 raw_message 里的原始引用回填到组件上。"""
+        url = ref.get("url")
+        if not url:
+            return
+        comp.url = url
+        # 记下 fileid: rkey 会过期,fileid 是 OneBot get_image 的重取键
+        fid = _url_fileid(url)
+        if fid:
+            comp.meta["fileid"] = fid
+        # 记下 segment 原始的 file: napcat 的图片 id。PreProcessStage 会把
+        # component.file_id 覆盖成 jpeg 静帧文件名,那个值 get_image 查不到
+        # (retcode=1200 file not found) —— 补救时必须优先用这个原值。
+        raw_file = ref.get("file")
+        if isinstance(raw_file, str) and raw_file:
+            comp.meta["raw_file"] = raw_file
+        if ref.get("name") and not comp.name:
+            comp.name = ref["name"]
+        if ref.get("size") and not comp.size:
+            comp.size = ref["size"]
+        self._log(f"recovered original url for {comp.kind}: {url[:60]}...")
 
     async def _download_all(self, media: list[Component], event=None) -> list:
         """并发下载所有 media 组件.
@@ -1007,11 +1043,9 @@ class MediaWardenStar(Star):
         sleep —— n 张死链图最坏 ceil(n/max_concurrent)*25s 才出回执。等本地缓存
         不占网络并发,不该挤占名额。
         """
-        sem = getattr(self, "_dl_sem", None)
-        if sem is None:
-            sem = asyncio.Semaphore(max(1, int(self.cfg.max_concurrent)))
-            self._dl_sem = sem
-        return sem
+        if self._dl_sem is None:
+            self._dl_sem = asyncio.Semaphore(max(1, int(self.cfg.max_concurrent)))
+        return self._dl_sem
 
     async def _download_one(self, comp: Component, event=None):
         """单个组件的下载回退链;全失败时抛首个(最对症的)下载错误。
@@ -1184,12 +1218,9 @@ class MediaWardenStar(Star):
             return []
         try:
             from astrbot.api.message_components import Reply  # type: ignore
-        except Exception:
+        except ImportError:
             return []
-        try:
-            return [Reply(id=str(msg_id))]
-        except Exception:
-            return []
+        return [Reply(id=str(msg_id))]
 
     async def _refetch_via_message(self, comp: Component, event, trace: list):
         """用 `get_msg` 重取:napcat 会用当前 rkey 重新生成这条消息里的图片链接。"""
@@ -1295,8 +1326,7 @@ class MediaWardenStar(Star):
             self._log("auto forwarded: " + ", ".join(done))
         return done
 
-    def _store_dl(self, comp: Component, ctx: SaveContext, dl,
-                  *, reuse: bool = False) -> AssetResult:
+    def _store_dl(self, comp: Component, ctx: SaveContext, dl) -> AssetResult:
         if isinstance(dl, DownloadError):
             return self._failed(comp, ctx, "download", f"download: {dl}",
                                 dl, url=comp.url)
@@ -1322,14 +1352,11 @@ class MediaWardenStar(Star):
             except Exception as e:
                 self._log(f"index record failed: {e!r}")
         preview = sr.path if true_kind in ("image", "gif") else None
-        note = None
-        origin = getattr(dl, "origin", None)
-        if origin:
-            note = f"链接已重取: {origin[:60]}"
+        note = f"链接已重取: {dl.origin[:60]}" if dl.origin else None
         return AssetResult(
             kind=true_kind, ok=True, path=sr.path,
             size=dl.size, preview_path=preview,
-            reused=(True if reuse else sr.reused), note=note,
+            reused=sr.reused, note=note,
         )
 
     # ----------------- 内部:失败入库 / 索引复用 -----------------
@@ -1347,14 +1374,19 @@ class MediaWardenStar(Star):
         """
         out_kind = kind or comp.kind
         out_idx = row_idx if row_idx is not None else ctx.idx
-        note = getattr(err_obj, "fallback_error", None)
+        note = err_obj.fallback_error if isinstance(err_obj, DownloadError) else None
+        note = note or None
         if self._index is not None:
             try:
-                subj = subject or _failure_subject_for(comp)
+                if subject is None:
+                    # 稳定去重键: 优先 fileid(rkey 换了也能对上同一张图), 否则 host+path
+                    fid = (comp.meta or {}).get("fileid") or comp.file_id or ""
+                    subject = (f"fileid:{fid}" if fid and "://" not in str(fid)
+                               else failure_subject(comp.url))
                 _id, attempts, last_ts = self._index.record_failure(
                     platform=ctx.platform, group_id=ctx.group_id,
                     sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=out_idx,
-                    kind=out_kind, err=err, subject=subj, url=url,
+                    kind=out_kind, err=err, subject=subject, url=url,
                 )
                 if attempts > 1 and last_ts:
                     extra = (f"  [历史第 {attempts} 次,"
@@ -1591,29 +1623,7 @@ class MediaWardenStar(Star):
     async def _save_forward(self, comp: Component, ctx: SaveContext,
                             event: AstrMessageEvent | None = None
                             ) -> list[AssetResult]:
-        from .warden.forwarder import from_component
-        # napcat 等 OneBot 实现的合并转发只携带 forward id,
-        # 节点内容不在消息体里, 需要用 get_forward_msg 主动拉取。
-        inline_nodes = (comp.meta or {}).get("nodes")
-        fetched = None
-        if (
-            (comp.meta or {}).get("forward_id")
-            or self._forward_seg_id(comp.raw)
-            or not inline_nodes
-        ):
-            fetched = await self._fetch_forward_nodes(comp, event)
-        if fetched:
-            if inline_nodes:
-                self._log(
-                    "forward fetch: replace inline nodes with fetched nodes"
-                )
-            comp.meta["nodes"] = fetched
-        raw_nodes = (comp.meta or {}).get("nodes")
-        if raw_nodes:
-            comp.meta["nodes"] = await self._expand_forward_nodes(raw_nodes, event)
-        nodes = from_component(comp)
-        results: list[AssetResult] = []
-
+        nodes = await self._forward_nodes(comp, event)
         # v1.10: 节点内容真的空(既没有 inline 也没有 get_forward_msg 结果)时,
         # 落一个 nodes=null 的 JSON 只是"看起来成功"的垃圾 —— 明确报失败并入库。
         if not nodes:
@@ -1625,274 +1635,324 @@ class MediaWardenStar(Star):
                 failure_kind="fetch",
             )]
 
-        # v1.16.0: 三态 forward_render_mode 收成一个开关 —— 条目里总有 record.json,
-        # 所以「存不存结构化」不再需要配置;这里只决定「画不画渲染图」。
-        want_image = bool(getattr(self.cfg, "forward_render_image", True))
+        raw_nodes = (comp.meta or {}).get("nodes") or []
+        want_image = self._forward_render_enabled(nodes)
+        blob_by_url: dict[str, bytes] = {}
+        node_imgs: dict[int, list[bytes]] = {}
+        url_count = 0
+        failed_urls = 0
+        if want_image:
+            await self._fetch_forward_avatars(nodes, ctx)
+            blob_by_url, node_imgs, url_count, failed_urls = (
+                await self._download_forward_images(nodes)
+            )
+        rid, archived = await self._archive_forward(raw_nodes, ctx, blob_by_url)
+        if want_image:
+            result = await self._save_forward_render(
+                comp, ctx, nodes, node_imgs, url_count, failed_urls,
+                archived, rid,
+            )
+        else:
+            result = await self._save_forward_json(
+                comp, ctx, nodes, raw_nodes, archived, rid,
+            )
+        # v1.14.0: 可选的自动转发（目标群为空/开关关掉时什么都不做）
+        # v1.17.3: 复用旧条目时不要再转发一次 —— 同一段内容在源群被再发一遍，
+        # 存档会复用原目录（reused），但目标群没收到过「新」消息，转发过去就是重复。
+        if archived is not None and not archived.get("reused"):
+            try:
+                await self._auto_forward(archived, rid, ctx)
+            except Exception as e:
+                self._log(f"auto forward error: {type(e).__name__}: {e!r}")
+        return [result]
 
-        if want_image and (self._forwarder is None or not self._forwarder.can_handle(nodes)):
+    async def _forward_nodes(self, comp: Component,
+                             event: AstrMessageEvent | None) -> list:
+        """合并转发的节点:按需 get_forward_msg 拉取,再展开嵌套节点。
+
+        napcat 等 OneBot 实现的合并转发只携带 forward id, 节点内容不在消息体里。
+        """
+        from .warden.forwarder import from_component
+        inline_nodes = (comp.meta or {}).get("nodes")
+        fetched = None
+        if (
+            (comp.meta or {}).get("forward_id")
+            or self._forward_seg_id(comp.raw)
+            or not inline_nodes
+        ):
+            fetched = await self._fetch_forward_nodes(comp, event)
+        if fetched:
+            if inline_nodes:
+                self._log("forward fetch: replace inline nodes with fetched nodes")
+            comp.meta["nodes"] = fetched
+        raw_nodes = (comp.meta or {}).get("nodes")
+        if raw_nodes:
+            comp.meta["nodes"] = await self._expand_forward_nodes(raw_nodes, event)
+        return from_component(comp)
+
+    def _forward_render_enabled(self, nodes: list) -> bool:
+        """要不要画渲染图(v1.16.0: 结构化总是存,这里只管画不画)。"""
+        want_image = self.cfg.forward_render_image
+        if want_image and (self._forwarder is None
+                           or not self._forwarder.can_handle(nodes)):
             if self._forwarder is None:
                 self._log("forwarder unavailable — JSON only")
             elif nodes:
                 self._log(f"forward too large ({len(nodes)} nodes) — JSON only")
             want_image = False
+        return want_image
 
-        # v1.8.0: 仅在需要渲染图片时,按平台白名单并发抓节点发送者头像,失败静默跳过
-        if want_image and self.cfg.enable_user_avatar and self._avatar_cache is not None and nodes:
-            avatar_platforms = {p.lower() for p in self.cfg.avatar_platforms}
-            if (ctx.platform or "").lower() in avatar_platforms:
-                try:
-                    seen = set()
-                    pairs = []
-                    for nd in nodes:
-                        key = (ctx.platform, nd.sender_id)
-                        if nd.sender_id and key not in seen:
-                            seen.add(key)
-                            pairs.append(key)
-                    if pairs:
-                        avatar_map = await fetch_many_avatars(
-                            self._avatar_cache, pairs,
-                            concurrency=self.cfg.max_concurrent,
-                        )
-                        for nd in nodes:
-                            nd.avatar_path = avatar_map.get((ctx.platform, nd.sender_id))
-                except Exception as e:
-                    self._log(f"avatar fetch failed: {e!r} — proceed without")
+    async def _fetch_forward_avatars(self, nodes: list, ctx: SaveContext) -> None:
+        """v1.8.0: 按平台白名单并发抓节点发送者头像,失败只记日志。"""
+        if not (self.cfg.enable_user_avatar and self._avatar_cache is not None):
+            return
+        avatar_platforms = {p.lower() for p in self.cfg.avatar_platforms}
+        if (ctx.platform or "").lower() not in avatar_platforms:
+            return
+        try:
+            seen = set()
+            pairs = []
+            for nd in nodes:
+                key = (ctx.platform, nd.sender_id)
+                if nd.sender_id and key not in seen:
+                    seen.add(key)
+                    pairs.append(key)
+            if pairs:
+                avatar_map = await fetch_many_avatars(
+                    self._avatar_cache, pairs,
+                    concurrency=self.cfg.max_concurrent,
+                )
+                for nd in nodes:
+                    nd.avatar_path = avatar_map.get((ctx.platform, nd.sender_id))
+        except Exception as e:
+            self._log(f"avatar fetch failed: {e!r} — proceed without")
 
-        # url -> 已下载字节:渲染与存档共用(声明在 if 之外,存档要用到)
+    async def _download_forward_images(self, nodes: list) -> tuple[dict, dict, int, int]:
+        """并发下载节点内嵌图。返回 (url→字节, node_idx→字节列表, url 数, 失败数)。"""
         blob_by_url: dict[str, bytes] = {}
-        if want_image and nodes:
-            # 节点内图片也并发下载
-            all_urls: list[str] = []
-            all_refs: list[dict] = []  # 与 all_urls 一一对应:该图的 segment data(file/url/...)
-            url_to_node: list[int] = []  # 第 N 个 url 对应第几个 node
-            for ni, nd in enumerate(nodes):
-                refs = getattr(nd, "image_refs", None) or [
-                    {"url": u} for u in nd.image_urls
-                ]
-                for u in nd.image_urls:
-                    all_urls.append(u)
-                    url_to_node.append(ni)
-                for ref in refs:
-                    all_refs.append(ref if isinstance(ref, dict) else {"url": ref})
-            node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
-            failed_urls = 0
-            if all_urls:
-                sem = asyncio.Semaphore(self.cfg.max_concurrent)
+        all_urls: list[str] = []
+        all_refs: list[dict] = []  # 与 all_urls 一一对应:该图的 segment data(file/url/...)
+        url_to_node: list[int] = []  # 第 N 个 url 对应第几个 node
+        for ni, nd in enumerate(nodes):
+            refs = getattr(nd, "image_refs", None) or [
+                {"url": u} for u in nd.image_urls
+            ]
+            for u in nd.image_urls:
+                all_urls.append(u)
+                url_to_node.append(ni)
+            for ref in refs:
+                all_refs.append(ref if isinstance(ref, dict) else {"url": ref})
+        node_imgs: dict[int, list[bytes]] = {ni: [] for ni in range(len(nodes))}
+        failed_urls = 0
+        if not all_urls:
+            return blob_by_url, node_imgs, 0, 0
+        sem = asyncio.Semaphore(self.cfg.max_concurrent)
 
-                async def _fetch(url: str, ref: Optional[dict] = None) -> bytes:
-                    async with sem:
-                        # ⓪ QQ 本地缓存(节点图也有 file=MD5 时直接读盘,不碰网络)
-                        cached = await self._forward_local_cached(ref)
-                        if cached is not None:
-                            return cached
-                        hi = _upgrade_qq_image_url(url)
-                        candidates = [hi, url] if hi != url else [url]
-                        last: Optional[DownloadError] = None
-                        for ci, cand in enumerate(candidates):
-                            try:
-                                dl = await download(
-                                    Component(kind="image", url=cand),
-                                    fetcher=aiohttp_fetcher,
-                                    retries=self.cfg.download_retries,
-                                    timeout_s=self.cfg.download_timeout_s,
-                                    max_bytes=self.cfg.max_file_size_bytes,
-                                )
-                                return dl.data
-                            except DownloadError as e:
-                                last = e
-                                # v1.10.0: 本行起不再「用完即删」 ---- 候选序号/完整 url/败因是区分「url 死了」与「请求姿势不对」的唯一线索
-                                self._log(
-                                    f"fwd dl candidate {ci + 1}/{len(candidates)} "
-                                    f"failed: {e} | url={cand}"
-                                )
-                        # 等客户端落盘后再查一次本地缓存(见 _LATE_CACHE_DELAYS_S)
-                        ref_name = ref.get("file") if isinstance(ref, dict) else ref
-                        cached = await self._late_cache(
-                            lambda: self._forward_local_cached(ref),
-                            f"fwd late local cache ({_short(ref_name, 40)})",
+        async def _fetch(url: str, ref: Optional[dict] = None) -> bytes:
+            async with sem:
+                # ⓪ QQ 本地缓存(节点图也有 file=MD5 时直接读盘,不碰网络)
+                cached = await self._forward_local_cached(ref)
+                if cached is not None:
+                    return cached
+                hi = _upgrade_qq_image_url(url)
+                candidates = [hi, url] if hi != url else [url]
+                last: Optional[DownloadError] = None
+                for ci, cand in enumerate(candidates):
+                    try:
+                        dl = await download(
+                            Component(kind="image", url=cand),
+                            fetcher=aiohttp_fetcher,
+                            retries=self.cfg.download_retries,
+                            timeout_s=self.cfg.download_timeout_s,
+                            max_bytes=self.cfg.max_file_size_bytes,
                         )
-                        if cached is not None:
-                            return cached
-                        raise last if last is not None else DownloadError(
-                            f"no candidate url for {url!r}")
-
-                # 并发拉
-                results_dl = await asyncio.gather(
-                    *(_fetch(u, all_refs[pos] if pos < len(all_refs) else None)
-                      for pos, u in enumerate(all_urls)),
-                    return_exceptions=True,
-                )
-                for pos, r in enumerate(results_dl):
-                    if isinstance(r, BaseException):
-                        failed_urls += 1
-                        continue
-                    ni = url_to_node[pos]
-                    node_imgs[ni].append(r)
-                    blob_by_url[all_urls[pos]] = r
-
-        # v1.14.0: 一个条目 = record.json(结构化) + render.png(渲染) + assets/,
-        # 两种显示模式共用一个目录(聊天记录与纯文本同理)。
-        # 存档用的图片字节就是上面渲染下载的那一批,不再重复拉一遍网络。
-        rid = record_store.make_record_id(ctx.group_id, ctx.msg_id, ctx.ts)
-        archived: Optional[dict] = None
-        raw_nodes_for_archive = (comp.meta or {}).get("nodes") or []
-        if raw_nodes_for_archive:
-            async def _archive_image(data, _blobs=blob_by_url):
-                ref = record_store.image_ref(data)
-                return _blobs.get(ref) if ref else None
-            try:
-                archived = await record_store.capture(
-                    raw_nodes_for_archive,
-                    platform=ctx.platform, group_id=ctx.group_id,
-                    msg_id=ctx.msg_id, storage_root=self.cfg.storage_root,
-                    fetch_image=_archive_image, ts=ctx.ts, record_id=rid,
-                )
-            except Exception as e:
-                # 存档失败不该让整条消息判失败 —— 渲染图/JSON 仍能救场
-                self._log(f"forward archive failed: {type(e).__name__}: {e!r}")
-            else:
-                if archived is not None:
-                    if archived.get("reused"):
-                        # 同群同内容已经存过:不建新目录,后面直接写进原条目
+                        return dl.data
+                    except DownloadError as e:
+                        last = e
+                        # v1.10.0: 本行起不再「用完即删」 ---- 候选序号/完整 url/败因
+                        # 是区分「url 死了」与「请求姿势不对」的唯一线索
                         self._log(
-                            f"forward duplicate of entry {archived.get('record_id')} "
-                            f"(requested {archived.get('duplicate_of_requested')}) — no new dir"
+                            f"fwd dl candidate {ci + 1}/{len(candidates)} "
+                            f"failed: {e} | url={cand}"
                         )
-                    rid = str(archived.get("record_id") or rid)
+                # 等客户端落盘后再查一次本地缓存(见 _LATE_CACHE_DELAYS_S)
+                ref_name = ref.get("file") if isinstance(ref, dict) else ref
+                cached = await self._late_cache(
+                    lambda: self._forward_local_cached(ref),
+                    f"fwd late local cache ({_short(ref_name, 40)})",
+                )
+                if cached is not None:
+                    return cached
+                raise last if last is not None else DownloadError(
+                    f"no candidate url for {url!r}")
 
+        dl_results = await asyncio.gather(
+            *(_fetch(u, all_refs[pos] if pos < len(all_refs) else None)
+              for pos, u in enumerate(all_urls)),
+            return_exceptions=True,
+        )
+        for pos, r in enumerate(dl_results):
+            if isinstance(r, BaseException):
+                failed_urls += 1
+                continue
+            node_imgs[url_to_node[pos]].append(r)
+            blob_by_url[all_urls[pos]] = r
+        return blob_by_url, node_imgs, len(all_urls), failed_urls
 
-        if want_image and nodes:
-            if failed_urls:
-                # 节点内有图片全部重试后仍失败:整图判失败,不落盘
+    async def _archive_forward(self, raw_nodes: list, ctx: SaveContext,
+                               blob_by_url: dict) -> tuple[str, Optional[dict]]:
+        """v1.14.0: 一个条目 = record.json(结构化) + render.png(渲染) + assets/。
+
+        存档失败不该让整条消息判失败 —— 渲染图/JSON 仍能救场,所以只记日志。
+        """
+        rid = record_store.make_record_id(ctx.group_id, ctx.msg_id, ctx.ts)
+        if not raw_nodes:
+            return rid, None
+
+        async def _archive_image(data, _blobs=blob_by_url):
+            ref = record_store.image_ref(data)
+            return _blobs.get(ref) if ref else None
+
+        try:
+            archived: Optional[dict] = await record_store.capture(
+                raw_nodes,
+                platform=ctx.platform, group_id=ctx.group_id,
+                msg_id=ctx.msg_id, storage_root=self.cfg.storage_root,
+                fetch_image=_archive_image, ts=ctx.ts, record_id=rid,
+            )
+        except Exception as e:
+            self._log(f"forward archive failed: {type(e).__name__}: {e!r}")
+            return rid, None
+        if archived is not None:
+            if archived.get("reused"):
+                # 同群同内容已经存过:不建新目录,后面直接写进原条目
                 self._log(
-                    f"forward render aborted: {failed_urls}/{len(all_urls)} "
-                    f"node image(s) failed to download"
+                    f"forward duplicate of entry {archived.get('record_id')} "
+                    f"(requested {archived.get('duplicate_of_requested')}) — no new dir"
                 )
-                # v1.11.0: 这类失败以前绕过 _failed —— 不进 failures 表、没有 subject,
-                # 与 README 的"失败分类入库"自相矛盾,/warden fail 也查不到。
-                results.append(self._failed(
-                    comp, ctx, "forward_image",
-                    f"image download failed ({failed_urls}/{len(all_urls)})",
-                    subject=f"forward_render:{ctx.msg_id}#{ctx.idx + 100}",
-                    failure_kind="fetch", kind="forward_render",
-                    row_idx=ctx.idx + 100,
-                ))
-            else:
-                try:
-                    # render 仍走原来的 PIL 路径,但喂预下载的 bytes
-                    png = await self._forwarder.render_with_images(
-                        nodes, node_imgs=node_imgs,
-                    )
-                    if archived is not None:
-                        # 渲染图就住在条目目录里(render.png)。以前还会再经 Storage
-                        # 落一份扁平的 forward_image_*.png —— 同一张图在磁盘上两份、
-                        # 在分类管理里还单独成一条「图片」，与「一个条目两种形态」
-                        # 自相矛盾。现在只有存档失败(拿不到条目)时才走扁平落盘。
-                        render_path = os.path.join(
-                            record_store.record_dir(self.cfg.storage_root, rid),
-                            record_store.save_render(self.cfg.storage_root, rid, png)
-                            or record_store.RENDER_FILENAME,
-                        )
-                        results.append(AssetResult(
-                            kind="forward_render", ok=True, path=render_path,
-                            size=len(png), preview_path=render_path,
-                            reused=bool(archived.get("reused")),
-                        ))
-                    else:
-                        comp_png = Component(
-                            kind="forward_image",
-                            name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
-                            raw=comp.raw,
-                        )
-                        sr = self._storage.save(png, comp_png, ctx, mime="image/png")
-                        if self._index is not None:
-                            try:
-                                self._index.record(
-                                    platform=ctx.platform, group_id=ctx.group_id,
-                                    sender_id=ctx.sender_id, msg_id=ctx.msg_id,
-                                    idx=ctx.idx + 100,
-                                    kind="forward_render", path=sr.path,
-                                    size=sr.size, sha16=sr.blake16,
-                                )
-                            except Exception as e:
-                                self._log(f"index record failed: {e!r}")
-                        results.append(AssetResult(
-                            kind="forward_render", ok=True, path=sr.path,
-                            size=sr.size, preview_path=sr.path, reused=sr.reused,
-                        ))
-                except Exception as e:
-                    results.append(self._failed(
-                        comp, ctx, "forward_image", f"render: {e}", e,
-                        subject=f"forward_render:{ctx.msg_id}#{ctx.idx + 100}",
-                        failure_kind="save", kind="forward_render",
-                        row_idx=ctx.idx + 100,
-                    ))
+            rid = str(archived.get("record_id") or rid)
+        return rid, archived
 
-        if not want_image:
+    async def _save_forward_render(self, comp: Component, ctx: SaveContext,
+                                   nodes: list, node_imgs: dict, url_count: int,
+                                   failed_urls: int, archived: Optional[dict],
+                                   rid: str) -> AssetResult:
+        if failed_urls:
+            # 节点内有图片全部重试后仍失败:整图判失败,不落盘
+            self._log(
+                f"forward render aborted: {failed_urls}/{url_count} "
+                f"node image(s) failed to download"
+            )
+            # v1.11.0: 这类失败以前绕过 _failed —— 不进 failures 表、没有 subject,
+            # 与 README 的"失败分类入库"自相矛盾,/warden fail 也查不到。
+            return self._failed(
+                comp, ctx, "forward_image",
+                f"image download failed ({failed_urls}/{url_count})",
+                subject=f"forward_render:{ctx.msg_id}#{ctx.idx + 100}",
+                failure_kind="fetch", kind="forward_render",
+                row_idx=ctx.idx + 100,
+            )
+        try:
+            # render 仍走原来的 PIL 路径,但喂预下载的 bytes
+            png = await self._forwarder.render_with_images(
+                nodes, node_imgs=node_imgs,
+            )
             if archived is not None:
-                # 不画图:结构化数据已经在条目里,回执只需要说「存了」。
-                rec_path = os.path.join(
+                # 渲染图就住在条目目录里(render.png)。以前还会再经 Storage 落一份
+                # 扁平的 forward_image_*.png —— 同一张图在磁盘上两份、在分类管理里
+                # 还单独成一条「图片」,与「一个条目两种形态」自相矛盾。
+                render_name = record_store.save_render(
+                    self.cfg.storage_root, rid, png)
+                if render_name is None:
+                    # 条目元数据缺失(目录被外部清掉):当保存失败处理,
+                    # 别回一个磁盘上并不存在的路径。
+                    raise RuntimeError(f"no entry metadata for {rid}")
+                render_path = os.path.join(
                     record_store.record_dir(self.cfg.storage_root, rid),
-                    record_store.RECORD_FILENAME)
-                try:
-                    rec_size = os.path.getsize(rec_path)
-                except OSError:
-                    rec_size = 0
-                results.append(AssetResult(kind="forward", ok=True,
-                                           path=rec_path, size=rec_size,
-                                           reused=bool((archived or {}).get("reused"))))
-            else:
-                # 存档也失败了(PIL 缺失 / 目录不可写):退回扁平 JSON 兜底,至少留住内容。
-                comp_json = Component(
-                    kind="forward", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
-                    raw=comp.raw,
+                    render_name,
                 )
-                try:
-                    payload = json.dumps(
-                        {"forward": True, "node_count": len(nodes),
-                         "nodes": (comp.meta or {}).get("nodes")},
-                        ensure_ascii=False, indent=2,
-                    )
-                    sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
-                                             mime="application/json")
-                except (TypeError, ValueError, OSError, RuntimeError) as e:
-                    # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
-                    # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
-                    results.append(self._failed(
-                        comp, ctx, "json",
-                        f"json save: {type(e).__name__}: {e}", e,
-                        subject=f"forward:{ctx.msg_id}#{ctx.idx}",
-                        failure_kind="save",
-                    ))
-                else:
-                    if self._index is not None:
-                        try:
-                            self._index.record(
-                                platform=ctx.platform, group_id=ctx.group_id,
-                                sender_id=ctx.sender_id, msg_id=ctx.msg_id,
-                                idx=ctx.idx, kind="forward", path=sr.path,
-                                size=sr.size, sha16=sr.blake16,
-                                forward_meta={"node_count": len(nodes)},
-                            )
-                        except Exception as e:
-                            self._log(f"index record failed: {e!r}")
-                    results.append(AssetResult(kind="forward", ok=True,
-                                               path=sr.path, size=len(payload),
-                                               reused=sr.reused))
-        # v1.14.0: 可选的自动转发（目标群为空/开关关掉时什么都不做）
-        # v1.17.3: 复用旧条目时不要再转发一次 —— 同一段内容在源群被再发一遍，
-        # 存档会复用原目录（reused），但目标群没收到过「新」消息，转发过去就是重复。
-        if archived is not None and results and not archived.get("reused"):
-            try:
-                await self._auto_forward(archived, rid, ctx)
-            except Exception as e:
-                self._log(f"auto forward error: {type(e).__name__}: {e!r}")
+                return AssetResult(
+                    kind="forward_render", ok=True, path=render_path,
+                    size=len(png), preview_path=render_path,
+                    reused=bool(archived.get("reused")),
+                )
+            # 只有存档失败(拿不到条目)时才走扁平落盘
+            comp_png = Component(
+                kind="forward_image",
+                name=f"forward_{ctx.msg_id}_{ctx.idx}.png",
+                raw=comp.raw,
+            )
+            sr = self._storage.save(png, comp_png, ctx, mime="image/png")
+            self._index_asset(ctx, kind="forward_render",
+                              idx=ctx.idx + 100, sr=sr)
+            return AssetResult(
+                kind="forward_render", ok=True, path=sr.path,
+                size=sr.size, preview_path=sr.path, reused=sr.reused,
+            )
+        except Exception as e:
+            return self._failed(
+                comp, ctx, "forward_image", f"render: {e}", e,
+                subject=f"forward_render:{ctx.msg_id}#{ctx.idx + 100}",
+                failure_kind="save", kind="forward_render",
+                row_idx=ctx.idx + 100,
+            )
 
-        if not results:
-            results.append(AssetResult(
-                kind="forward", ok=False, err="empty forward or no mode enabled",
-            ))
-        return results
+    async def _save_forward_json(self, comp: Component, ctx: SaveContext,
+                                 nodes: list, raw_nodes: list,
+                                 archived: Optional[dict], rid: str) -> AssetResult:
+        if archived is not None:
+            # 不画图:结构化数据已经在条目里,回执只需要说「存了」。
+            rec_path = os.path.join(
+                record_store.record_dir(self.cfg.storage_root, rid),
+                record_store.RECORD_FILENAME)
+            try:
+                rec_size = os.path.getsize(rec_path)
+            except OSError:
+                rec_size = 0
+            return AssetResult(kind="forward", ok=True, path=rec_path,
+                               size=rec_size,
+                               reused=bool(archived.get("reused")))
+        # 存档也失败了(PIL 缺失 / 目录不可写):退回扁平 JSON 兜底,至少留住内容。
+        comp_json = Component(
+            kind="forward", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
+            raw=comp.raw,
+        )
+        try:
+            payload = json.dumps(
+                {"forward": True, "node_count": len(nodes), "nodes": raw_nodes},
+                ensure_ascii=False, indent=2,
+            )
+            sr = self._storage.save(payload.encode("utf-8"), comp_json, ctx,
+                                    mime="application/json")
+        except (TypeError, ValueError, OSError, RuntimeError) as e:
+            # v1.10: 以前只 catch ValueError —— json.dumps 的 TypeError、
+            # Storage.save 的 OSError 都会逃出去,整条消息没有回执。
+            return self._failed(
+                comp, ctx, "json",
+                f"json save: {type(e).__name__}: {e}", e,
+                subject=f"forward:{ctx.msg_id}#{ctx.idx}",
+                failure_kind="save",
+            )
+        self._index_asset(ctx, kind="forward", idx=ctx.idx, sr=sr,
+                          forward_meta={"node_count": len(nodes)})
+        return AssetResult(kind="forward", ok=True, path=sr.path,
+                           size=len(payload), reused=sr.reused)
+
+    def _index_asset(self, ctx: SaveContext, *, kind: str, idx: int, sr,
+                     forward_meta: Optional[dict] = None) -> None:
+        """写一条索引行;索引是旁路,写失败只记日志。"""
+        if self._index is None:
+            return
+        extra = {"forward_meta": forward_meta} if forward_meta else {}
+        try:
+            self._index.record(
+                platform=ctx.platform, group_id=ctx.group_id,
+                sender_id=ctx.sender_id, msg_id=ctx.msg_id, idx=idx,
+                kind=kind, path=sr.path, size=sr.size, sha16=sr.blake16,
+                **extra,
+            )
+        except Exception as e:
+            self._log(f"index record failed: {e!r}")
 
     # ----------------- 内部:预览回传(同 v1.2) -----------------
 
@@ -1923,8 +1983,9 @@ class MediaWardenStar(Star):
                 self._log(f"image_result failed: {e!r} — fall back to text")
         try:
             yield event.plain_result(f"预览: {path}")
-        except Exception:
-            pass
+        except Exception as e:
+            # 回执本身已经准备好,预览这一条发不出去只能放弃 —— 但要留痕
+            self._log(f"preview text fallback failed: {e!r}")
 
     def _resolve_export_path(self, arg: str) -> str:
         """把 export 参数解析为 storage_root 内的绝对路径,越界抛 ValueError."""

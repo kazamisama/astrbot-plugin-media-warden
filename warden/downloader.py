@@ -30,7 +30,9 @@ from .components import Component
 
 
 class DownloadError(Exception):
-    pass
+    """下载失败。fallback_error 只在补救链也失败时由调用方填写。"""
+
+    fallback_error: str = ""
 
 
 @dataclass
@@ -38,6 +40,8 @@ class Downloaded:
     data: bytes
     mime: Optional[str] = None
     size: int = 0
+    # 非直连来源时标注出处(localcache:/base64:/重取 url),用于失败回执与日志
+    origin: Optional[str] = None
 
 
 # fetcher 协议: (component, **kwargs) -> Downloaded
