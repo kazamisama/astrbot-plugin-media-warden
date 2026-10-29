@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.17.1
+
+更正 v1.17.0 的一个误判：**跨群「原地转发」并非必然失败**。
+
+### 升级前必读（行为/配置变化）
+
+- **`auto_forward_mode` 默认回到 `native`**：v1.17.0 依据「跨群实测必回『消息不存在』」把默认改成 `rebuild`，并让自动转发恒用重建 —— 结论是错的。读 NapCat 源码确认：`get_msg` 与 `forward_group_single_msg` 都走 `getMsgIdAndPeerByShortId()` 查**进程内短 id 缓存**（`msgIdMap` / `msgDataMap`，LRU 5000 条，重启清空），与目标群无关 —— 缓存里有就能保气泡/挂件/头像发到任何群，缓存里没有才回「消息不存在」。现在自动转发**先 native、失败自动回退 rebuild**；「没启用 + 无目标群 + 仍是 `rebuild`」的旧配置启动时静默改回 `native`（日志 `auto_forward_mode: rebuild -> native`）。
+- **页面「转发原消息」不再按目标群置灰**：能不能点只看这条有没有可用的原消息 id；跨群同样可以保装扮，失败时仍会自动回退重建并在回执里说明。
+- **`native_unavailable` 恢复「失败即标记」**：失败原因只与短 id 缓存有关（重启 / LRU 挤掉 / 消息过期），跟发去哪个群无关，所以不再区分「是否原群」。
+
+### Changed
+
+- `main._auto_forward`：`native` 优先（`get_msg` 核验 + `forward_group_single_msg`），失败才 `rebuild_forward`；成功日志分别记 `auto forwarded: <群>(native)` / `(rebuild)`。
+- `main._promote_auto_forward_default`：反向迁移 `rebuild → native`（条件与 v1.15.0 相同：未启用、无目标群、值仍是旧默认）。
+- `warden/record_page.py`：`resend` 去掉 `same_group` 判定。
+- `pages/dashboard/app.js`：`syncNative()` 只按 `can_native` 决定按钮状态，动作栏说明文案同步改写。
+
+### Tests
+
+- 冒烟仍是 **164 项**（改的是断言，不是数量）：`test_plugin_auto_forward_native_first_then_rebuild`（native 成功 → 只调 `get_msg` + `forward_group_single_msg`；native 失败 → 再调 `send_group_forward_msg`）、`test_plugin_promotes_auto_forward_default`（`rebuild → native` 的三种例外）、`test_plugin_resend_native_failure_marks_unavailable`（失败即标记，与目标群无关）。
+
 ## v1.17.0
 
 一次针对生产数据的审计修复轮：删文件不再连坐、文本去重不再认错人、跨群转发不再毒化条目、旧的扁平渲染图终于能看见也能清掉，外加几处口径/性能/UI 状态修正。
@@ -7,7 +28,7 @@
 
 ### 升级前必读（行为/配置变化）
 
-- **`auto_forward_mode` 默认改回 `rebuild`**：自动转发的目标群按定义就是别的群，而 QQ 的原地转发（native）按**原群**找消息 —— 跨群实测必回「消息不存在」。v1.15.0 把默认改成 native 后，每次自动转发都会白打一次 `get_msg` + `forward_group_single_msg` 再回退。现在自动转发**恒用重建**；配置里写 `native` 仍受理（只记一条说明），「没启用 + 无目标群 + 仍是 native」的旧配置会在启动时静默改回 `rebuild`。
+- **`auto_forward_mode` 默认改回 `rebuild`**（**v1.17.1 更正：误判，已恢复 native；原地转发与目标群无关，取决于 NapCat 短 id 缓存**）：自动转发的目标群按定义就是别的群，而 QQ 的原地转发（native）按**原群**找消息 —— 跨群实测必回「消息不存在」。v1.15.0 把默认改成 native 后，每次自动转发都会白打一次 `get_msg` + `forward_group_single_msg` 再回退。现在自动转发**恒用重建**；配置里写 `native` 仍受理（只记一条说明），「没启用 + 无目标群 + 仍是 native」的旧配置会在启动时静默改回 `rebuild`。
 - **新增 `save_voice`（默认 `false`）**：语音以前不在开关表里，而 `kind_allowed()` 对未知类型一律放行 —— 六个开关全关，语音照样落盘。现在它有独立开关；**认不出的类型默认不保存**（以后新增的类型不会再被静默存下）。
 - **纯文本去重按发送人收窄**：以前只比正文指纹 —— alice 发「666」、bob 也发「666」，第二条会复用 alice 的条目（发送者/时间全错，渲染图还写进 alice 的目录）。现在纯文本要求 `kind=text` **且同一发送人**才算重复；聊天记录仍按内容+群比对。
 - **老的扁平转发渲染图单列「旧渲染图」**：v1.16 之前每次转发额外落一张 `*_forward_image_*.png`（索引 `kind=forward_render`）。生产库 857 张 / 1.25 GB，与任何条目 msg_id 都不重叠，以前混在「图片」里既点不开也筛不掉。现在单独一类，统计栏有「清理旧渲染图 N 张」按钮（只删这批无条目的副本；条目里的 `render.png` 不动）。
@@ -17,8 +38,8 @@
 
 - **删一条共享图会连坐删别人 10 条记录**：`record_page.delete` 以前先 `os.remove`、再 `forget_path(该 path 全部行)`。Storage 按内容去重，生产库 284 个路径被多行共享（最多 11 行）—— 删一张图 = 文件没了 + 该路径全部索引行没了。现在按行 id 删，文件仅在「没有别的行引用」时才 unlink；页面提示「文件仍被 N 条记录引用，未删除」。
 - **`resolve_flat` 前缀可绕过**：`rel.startswith("_records/")` 对 `"./_records/<rid>/render.png"` 无效 → 页面能读、也能删存档内部文件。改为先 `os.path.normpath` 再判首段与 `..`。
-- **自动转发 native 永远失败**：见上（恒用重建）。
-- **跨群 native 失败永久毒化条目**：`record_page.resend` 只要错误含「消息不存在」就写 `native_unavailable` —— 而跨群失败也是这句。现在只有「发回原群」失败才记；原消息还在的条目不会再被标成「原消息已失效」。页面换目标群时「转发原消息」也会跟着置灰。
+- **自动转发 native 永远失败**：见上（恒用重建）。**v1.17.1 更正：不是永远失败，只是短 id 不在缓存里时失败。**
+- **跨群 native 失败永久毒化条目**：`record_page.resend` 只要错误含「消息不存在」就写 `native_unavailable` —— 而跨群失败也是这句。现在只有「发回原群」失败才记（**v1.17.1 更正：失败与目标群无关，恢复失败即标记**）；原消息还在的条目不会再被标成「原消息已失效」。页面换目标群时「转发原消息」也会跟着置灰。
 - **纯文本条目污染扁平索引**：`_save_text` 曾往索引写 `kind="text"` 行，页面以「磁盘文件」列出，而 `resolve_flat` 拒读 `_records/` → 点不开、删不掉，去重复用时同一路径再加一行。现在不写扁平行。
 - **纯文本回执没有预览**：`_build_previews` 只挑 `forward_render`/`image`，text 结果永远不出图。现在把 text（`render.png`）纳入，优先级 渲染图 > 纯文本 > 图片。
 - **回执印内部类型名**：`类型: forward_render×1` → 翻成「聊天记录渲染图×1」等中文标签（成功/失败明细同样）。
@@ -31,9 +52,9 @@
 
 ### Tests
 
-- 冒烟 152 → **164 项**（Phase 9: 21 → 33）。新增：共享文件按行删 + `resolve_flat` 防绕过；纯文本按发送人去重；纯文本回执预览；分页 offset 2050；旧渲染图清理（带条目的 msg_id 保留）；样式预览临时目录清理；`node_payloads` 带 time；跨群 native 失败不毒化条目。
+- 冒烟 152 → **164 项**（Phase 9: 21 → 33）。新增：共享文件按行删 + `resolve_flat` 防绕过；纯文本按发送人去重；纯文本回执预览；分页 offset 2050；旧渲染图清理（带条目的 msg_id 保留）；样式预览临时目录清理；`node_payloads` 带 time；~~跨群 native 失败不毒化条目~~（v1.17.1 已按新结论改写）。
 - 把 4 个「定义了却没注册」的用例接回 PHASE9（emoji 混排渲染、raw url 覆盖、raw 无 http、按身份配 ref），它们此前从未被执行。
-- 改：`test_plugin_auto_forward_native_falls_back_to_rebuild` → `..._cross_group_uses_rebuild`（断言不再发生 native 尝试）；`test_plugin_promotes_auto_forward_default` → `test_plugin_demotes_auto_forward_default`；回执类型断言由 `image×1` 改为 `图片×1` 等中文标签；路由数 13 → 14（`purge_legacy`）。
+- 改：`test_plugin_auto_forward_native_falls_back_to_rebuild` → `..._cross_group_uses_rebuild`（断言不再发生 native 尝试）；`test_plugin_promotes_auto_forward_default` → `test_plugin_demotes_auto_forward_default`（v1.17.1 又改回 promote 语义并按新断言重写）；回执类型断言由 `image×1` 改为 `图片×1` 等中文标签；路由数 13 → 14（`purge_legacy`）。
 ## v1.16.0
 
 渲染开关布尔化：三态 `forward_render_mode`（`image`/`json`/`both`）收成一个开关 `forward_render_image`。功能上只有一处变化：**不再落扁平 JSON 副本**。
@@ -67,7 +88,7 @@
 
 ### 升级前必读（行为/配置变化）
 
-- **`auto_forward_mode` 默认 `rebuild` → `native`**：开自动转发时优先「转发原消息」保气泡/挂件。注意实测结论：native **只对原群可靠**，而自动转发的目标群通常就是别的群 —— 每个跨群目标会先失败一次再自动回退 rebuild，回执里仍会说明。想省这一次请求就手动改回 `rebuild`。
+- **`auto_forward_mode` 默认 `rebuild` → `native`**：开自动转发时优先「转发原消息」保气泡/挂件。注意实测结论：native **只对原群可靠**（**v1.17.1 更正：这是误判 —— 跨群同样可用，取决于 NapCat 短 id 缓存**），而自动转发的目标群通常就是别的群 —— 每个跨群目标会先失败一次再自动回退 rebuild，回执里仍会说明。想省这一次请求就手动改回 `rebuild`。
 - **`forward_image_width` 删除**：它一直是死旋钮 —— `main.initialize()` 先按它构造 Forwarder，紧接着 `_apply_render_style()` 用 `style_width` 覆盖。画布宽度只有 `style_width` 一个真源。旧配置文件里留着这个键不会报错，只是不再被读。
 - **配置分组名保持不变**：组的中文标题改成了「⑤ 聊天记录渲染」，但 `_conf_schema.json` 的**内部键仍是 `forward`**。实测（2026-10-28）：把组键改名后重载，AstrBot 会按新 schema 重写配置文件，旧组里的值直接消失 —— 组键是配置的存储地址，改标题可以，改键就是丢配置。
 - **`auto_forward_mode` 旧默认值会跟着升级**：若「自动转发没启用 + 目标群为空 + 值仍是旧默认 `rebuild`」，启动时静默改成 `native` 并写回配置（这三种条件下改了没有任何行为变化）。一旦你真开过自动转发，那 `rebuild` 视为你的选择，不再动；日志 `auto_forward_mode: rebuild -> native`。
@@ -75,7 +96,7 @@
 ### Changed
 
 - **九组顺序**：① 监听范围（`filter`）→ ② 保存哪些类型（`save_types`）→ ③ 存储与索引（`storage`）→ ④ 下载与重试（`download`）→ ⑤ 聊天记录渲染（`forward`）→ ⑥ 渲染样式（`render_style`）→ ⑦ 自动转发（`auto_forward`）→ ⑧ 保存后的回执（`reply`）→ ⑨ 日志（`logging`）。每组标题直接写序号，扫一眼就知道从哪开始。
-- **hint 全部改成「这一项现在会怎样」**：删掉版本考古（`v1.9.0+` / `v1.7.1: 5 → 10` / 「关闭后行为回到 v1.8.x」）与实现细节，替成一句可判断后果的话（例：白名单空列表 = 不存；`native` 跨群基本必失败并自动回退）。
+- **hint 全部改成「这一项现在会怎样」**：删掉版本考古（`v1.9.0+` / `v1.7.1: 5 → 10` / 「关闭后行为回到 v1.8.x」）与实现细节，替成一句可判断后果的话（例：白名单空列表 = 不存；`native` 缓存里没有原消息时自动回退）。
 - **组内顺序按使用频率**：`reply_preview` 在 `reply_to_original` 之前（前者更常开）；下载组把超时/重试/并发放前面，补救链放最后；渲染组把「存成什么」放最前，头像参数在后。
 - **`forward_image_engine` 选项收成 `["pil"]`**：只有 PIL 实现，之前摆出 playwright/wkhtml 两个假选项只会让人白试。旧配置里的这两个值仍会被接受并打一条告警（不静默生效）。
 - **`save_types` 里文档白名单紧跟 `save_files`**：先「存不存文档」再「存哪些扩展名」，不再隔开。
@@ -108,7 +129,7 @@
 - **分类管理页**：类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）同时覆盖 `_records/` 条目与老的扁平落盘文件（`index.list_assets()` 按 `kind` 查，`record_admin.scan_items()` 合并两类）；右侧「结构化 / 渲染图」切换看同一张条目的两种形态；新增「打开目录」（`page/reveal` → `os.startfile`，仅 Windows，且只对 `storage_root` 下的目录生效）。
 - **跨群转发 + 目标群下拉**：页面「发回」旁多一个带群名的目标群下拉（`page/groups` 读 `get_group_list`，默认这条记录的原群），可选「原地（保装扮）」或「重建（丢装扮）」；原地失败自动回退重建，并在回执里说明走了哪条路。
 - **自动转发**：`auto_forward_enabled` + `auto_forward_mode: rebuild|native` + `forward_target_groups`（多群，默认空 = 不转发）。存档成功后自动发到各目标群：`native` 先试原地（跨群同样保装扮），失败回退重建；目标等于源群时跳过。
-- **跨群「原地」不可用（实测修正）**：同一条存档发回**原群** `native` 成功、发到**别的群**回「消息不存在」—— `forward_group_single_msg` 是按目标 peer 找消息的。所以「转发原消息」只对原群可靠，跨群请用「重建转发」；`auto_forward_mode=native` 时每个跨群目标都会白试一次再回退。页面上的说明文案也改成了这个说法。
+- **跨群「原地」不可用（实测修正）**：同一条存档发回**原群** `native` 成功、发到**别的群**回「消息不存在」—— `forward_group_single_msg` 是按目标 peer 找消息的。所以「转发原消息」只对原群可靠，跨群请用「重建转发」；`auto_forward_mode=native` 时每个跨群目标都会白试一次再回退。页面上的说明文案也改成了这个说法。**v1.17.1 更正：以上结论是误判（NapCat 源码按进程内短 id 缓存查找，与目标群无关），跨群原地可用。**
 - **转发按钮文案改正**：以前叫「原地发回（保装扮） / 重建转发（丢装扮）」—— 两个都不准确：下拉可以选**别的群**，所以不是「发回」；「丢装扮」像在描述缺陷。现在整条动作栏是「**发到** [目标群 ▾] + **转发原消息** + **重建转发**」，下面一行小字说明差别（转发原消息保留气泡/挂件/头像/原时间戳，但要求原消息还在，过期会自动改用重建；重建随时可用但没有装扮），原消息不可用的那条按钮 disabled 且 `title` 说明原因。发完的回执也一起改了：以前是「已原地转发 / 已重建发送」，现在是「已转发原消息 → 群名 (群号)」/「已重建转发 → 群名 (群号)」，回退时第二行写「转发原消息不可用（…），已改用重建转发」；纯文本条目的拒绝文案也从「只有聊天记录能发回」改成「只有聊天记录条目能转发」。
 - **老的扁平聊天记录迁成条目**：v1.12.0 之前聊天记录存成 `…_forward_json_*.json`，页面上只有一张文件卡片 —— 读不到节点、不能重渲染、也不能重建转发。启动时 `record_admin.migrate_flat_forwards()` 把它们迁进 `_records/`（本机实测 **55 条**）：节点结构照旧、图片 url 早已过期所以不下载、进 `missing` 并在页面显示「缺 N 图」，原始 JSON 复制成条目里的 `legacy_forward.json` 留底后删掉扁平文件与索引行。列表预览从 `.json` 文件名变成正文首句，详情里多一个「迁移自老存档」标签。幂等；坏 JSON（本机有 1 个 `nodes: null` 的旧 bug 产物）不迁不删。
 - **空列表说真话 + 类型标签标「关」**：空态原来写「群里发图/文档会自动保存；合并转发与纯文本需要先开启对应开关」—— 这是 v1.13 的话，v1.14.0 起**六类全部可开关**，没有哪类是「自动存」的。现在 `page/stats` 顺带返回 `save_types`，页面据此说话：选中关掉的类型 → 「这一类的保存开关是关的（配置项 save_gifs），打开后才会存」；全部为空 → 「当前关闭的类型：纯文本、聊天记录」；一个都没关 → 提示先查 `target_groups` / `target_users`（白名单空列表 = 不保存）。类型标签上关掉的那一类标「· 关」并淡化。

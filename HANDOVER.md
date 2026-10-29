@@ -1,9 +1,9 @@
-# 交接文档 · astrbot-plugin-media-warden v1.17.0
+# 交接文档 · astrbot-plugin-media-warden v1.17.1
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.17.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），**变化见下面 §1.-7**；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.17.1（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
@@ -11,7 +11,30 @@
 - 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`
 
 
-## 1.-7 v1.17.0（审计修复，当前版本，提交 0d36ee3 + b8988ac + 4261881）
+## 1.-8 v1.17.1（更正「跨群原地转发必失败」，当前版本）
+
+用户的反馈（m05019：「我之前手动 native 转发时可是生效了的，没有丢渲染重建」）直接推翻了 v1.17.0 的一条核心结论。读了 NapCat 源码（`napcat.mjs`）确认：
+
+- `get_msg`（`class vye`，napcat.mjs:74796 附近）与 `forward_group_single_msg`（`class tL`，napcat.mjs:76545 附近）都通过 `nt.getMsgIdAndPeerByShortId(shortId)` 查 **`msgIdMap` / `msgDataMap` 进程内缓存**（LRU 5000 条，构造参数 `5e3`；`createUniqueMsgId` 在消息进入 OneBot 层时写入，进程重启清空）。
+- `forward_group_single_msg` 的 `getTargetPeer` 只决定**发到哪个群**，源消息的 peer 来自缓存 —— 所以**跨群完全可以**，v1.14.0 的「按 peer 找消息」结论是错的。
+- 之前那次「发回原群成功、发到别的群失败」是两条不同的存档：失败那条（`20261027-234006`，消息 id `1481691615`）在 NapCat 2026-10-28 11:24 重启之前产生，短 id 已不在缓存里。
+
+### 行为/默认值变化
+
+- `auto_forward_mode` 默认 `native`（`warden/config.py`）；`_promote_auto_forward_default` 恢复为 `rebuild → native` 的反向迁移（条件：未启用 + 无目标群 + 值仍是 rebuild），日志 `auto_forward_mode: rebuild -> native (v1.17.1 恢复 native 默认;想省掉那一次失败尝试就改回 rebuild)`。
+- `main._auto_forward`：`native` 优先（`get_msg` 核验 → `forward_group_single_msg`），失败记 `auto forward native failed for <群>: ... → rebuild` 再 `rebuild_forward`；成功列表记 `<群>(native)` / `<群>(rebuild)`。
+- `record_page.resend`：去掉 v1.17.0 的 `same_group` 判定 —— 「消息不存在」= 短 id 已不在缓存，发哪个群都一样，直接写 `native_unavailable`。
+- `pages/dashboard/app.js`：`syncNative()` 只按 `d.can_native` 置灰，不再看目标群；动作栏说明改成「发到哪个群都行，缓存失效自动改用重建」。
+
+### 测试
+
+- 仍是 **164 项**（改断言）：`test_plugin_auto_forward_native_first_then_rebuild`（native 成功时只调 `get_msg` + `forward_group_single_msg`；`fail_native` 时再调 `send_group_forward_msg`）、`test_plugin_promotes_auto_forward_default`（`rebuild → native`，三种例外保持不变）、`test_plugin_resend_native_failure_marks_unavailable`（失败即标记，与目标群无关）。
+
+### 文档更正
+
+README「已知边界」把原来的「跨群原地转发基本必然失败 / 按目标 peer 找消息」整条改写成缓存机制说明；CHANGELOG v1.14.0 / v1.15.0 / v1.17.0 里相关句子都加了「v1.17.1 更正」标注（历史条目保留，不篡改原结论）。
+
+## 1.-7 v1.17.0（审计修复，提交 0d36ee3 + b8988ac + 4261881）
 
 用户的诉求（m04527「再仔细调查一遍」→ m04681「可以」）：把第二轮深度审计发现的 18 条问题全修，不吝啬改动。
 
@@ -23,8 +46,8 @@
 
 ### 功能坏点
 
-- **自动转发 native 永远失败**：目标群按定义是「别的群」，而 QQ 的 `forward_group_single_msg` 按**原群**找消息（2026-10-28 实测跨群必回「消息不存在」）。`_auto_forward` 现在恒用 `rebuild_forward`；`auto_forward_mode` 默认改回 `rebuild`，`_promote_auto_forward_default` 改成反向迁移（未启用 + 无目标群 + 仍是 native → 静默改 rebuild）。
-- **跨群 native 失败毒化条目**：`record_page.resend` 以前只要错误含「消息不存在/无法找到」就写 `native_unavailable`。现在仅当**目标群 == 记录的原群**时才记。页面 `syncNative()` 在目标群下拉 change 时同步置灰「转发原消息」并改 title；`doResend` 成功后重新拉详情重画，不再把所有按钮无脑 enable。
+- ~~**自动转发 native 永远失败**~~（**v1.17.1 已推翻**：原地转发按 NapCat 进程内短 id 缓存找消息，与目标群无关）：当时的做法是 `_auto_forward` 恒用 `rebuild_forward`、`auto_forward_mode` 默认 `rebuild`、`_promote_auto_forward_default` 做 native → rebuild 的反向迁移；v1.17.1 已全部恢复，见 §1.-8。
+- ~~**跨群 native 失败毒化条目**~~（**v1.17.1 已推翻**：「消息不存在」只说明短 id 不在缓存，与目标群无关）：当时的做法是仅当目标群 == 原群才写 `native_unavailable`，页面按目标群置灰按钮；v1.17.1 恢复「失败即标记」、按钮只看 `can_native`。`doResend` 成功后重新拉详情重画这一点保留。
 - **语音没有开关**：`policy.kind_allowed` 以前对不在开关表里的 kind 返回 `True` → 六类全关语音照存。新增 `save_voice: bool = False`（config + schema ② 组），`kind_allowed` 改成 `flags.get(kind, False)`（未知类型默认不存）；页面类型标签补 `voice`。
 - **纯文本条目污染扁平索引**：`_save_text` 不再写 `index.record(kind="text", path=<条目>/render.png)` —— 条目本来就在 `_records/`，写了会以「磁盘文件」出现而 `resolve_flat` 拒读，点不开也删不掉。
 - **纯文本回执无预览**：`_build_previews` 候选改为 渲染图 > **text** > image，路径取 `preview_path or path`。
@@ -51,9 +74,9 @@
 
 ### 测试
 
-- 152 → **164**（Phase 9: 21 → 33）：共享文件按行删 + `resolve_flat` 防绕过、文本按发送人去重、纯文本回执预览、分页 offset 2050、旧渲染图清理（条目 msg_id 保留）、预览临时目录清理、`node_payloads` 带 time、跨群 native 失败不毒化。
+- 152 → **164**（Phase 9: 21 → 33）：共享文件按行删 + `resolve_flat` 防绕过、文本按发送人去重、纯文本回执预览、分页 offset 2050、旧渲染图清理（条目 msg_id 保留）、预览临时目录清理、`node_payloads` 带 time。
 - 把 4 个「定义了却没注册」的用例接回 PHASE9（它们此前从未执行过）：`test_forwarder_emoji_mixed_layout`、`test_recover_raw_url_overrides_local_jpeg`、`test_recover_raw_no_http_keeps_local`、`test_recover_pairs_refs_by_identity_not_position`。
-- 改：`test_plugin_auto_forward_native_falls_back_to_rebuild` → `..._cross_group_uses_rebuild`；`test_plugin_promotes_auto_forward_default` → `test_plugin_demotes_auto_forward_default`；回执类型断言改中文标签；路由数 13/14。
+- 改：`test_plugin_auto_forward_native_falls_back_to_rebuild` → `..._cross_group_uses_rebuild`；`test_plugin_promotes_auto_forward_default` → `test_plugin_demotes_auto_forward_default`（v1.17.1 又改回 promote 语义）；回执类型断言改中文标签；路由数 13/14。
 
 ### 本机数据现状（升级后不必手忙的事）
 
@@ -666,7 +689,7 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 - `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`（v1.16.0）
 - v1.14.0 本机实测（2026-10-28）：重载后日志 `loaded: v1.14.0 | mode=whitelist | groups=1 users=1`、`page=on`（修复前同一条是 `groups=0 users=0` —— 配置根本没被读到）；`/api/plug/astrbot-plugin-media-warden/page/{stats,groups,style,records,style_preview}` 全部 200（stats：3 条存档 / 7 节点 / 4 资产 / flat 2000；groups：collect `961583271` 与 llm `256678737`，各 3 人；style_preview 返回 `data:image/png;base64,…`）；`/api/plugin/page/entry?name=…&page=style` 返回 `content_path`（标题由前端按 i18n 的 `pages.style.title` 解析）。**没做浏览器内点击验证**。
 - 本机插件配置在 `C:\Users\chiriu\.astrbot\data\config\astrbot-plugin-media-warden_config.json`（按 schema 分组嵌套）；当前值 `target_groups=["961583271"]`、`target_users=["2510536451"]`、`match_mode=whitelist` —— 修复配置读取后，抓取范围就是「collect 群 + 風見かずき」。
-- v1.14.0 跨群转发实测（2026-10-28，pages API 走真实 bot）：对 2026-10-27 的存档做 `mode=native` → 目标群 `256678737`，`get_msg` 直接回 **「消息不存在」**（原消息已过期；插件先核验再转发，所以没有乱发）；同一条记录 `mode=rebuild` → `ok: true`，`send_group_forward_msg` 送 3 个节点进 llm 群。结论：跨群「原地」同样受「原消息还在」约束，`_auto_forward` 的 native 失败回退 rebuild 是必须的（llm 群里留了一条测试转发，可手动撤回）。
+- v1.14.0 跨群转发实测（2026-10-28，pages API 走真实 bot）：对 2026-10-27 的存档做 `mode=native` → 目标群 `256678737`，`get_msg` 直接回 **「消息不存在」**（事后确认是 **NapCat 11:24 重启后短 id 缓存已清**，不是跨群限制；插件先核验再转发，所以没有乱发）；同一条记录 `mode=rebuild` → `ok: true`，`send_group_forward_msg` 送 3 个节点进 llm 群。结论（**v1.17.1 更正**）：native 的成败取决于 NapCat 进程内短 id 缓存是否还有这条消息，与目标群无关；`_auto_forward` 的 native 失败回退 rebuild 仍是必须的（llm 群里留了一条测试转发，可手动撤回）。
 - v1.14.0 页面审计实测（2026-10-28，用户截图驱动）：修复前 `stats` 的 `flat_total` 是 `_flat_rows(limit=2000)` 的长度（假 2000），`records?kind=forward` 只出 8 条、`kind=image` 恒 500；修复后同一批数据返回 `flat_total 7547` / `flat_bytes 5271692289`（≈4.9 GB）、`forward 60`、`image 7491`、`file 0`，条目侧 `bytes 789953`（含 render.png）；`record?id=20261028-141242-961583271-1576078598` → `has_render: true`、`render: "render.png"`、`uin_reliable: false`（该条 6 个节点共用一个 sender.user_id）。类型筛选现在由 `_FLAT_KIND_MAP` 决定（image 含 `forward_render`，forward 含 `forward_json`）。
 - `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=25 phase5=27 phase6=4 phase7=12 phase8=3, total=130)`（v1.13.0）
 - v1.13.0 页面链路在本机 AstrBot 上实测（2026-10-28）：插件重载后 `/api/plugin/page/entry?name=…&page=dashboard` 返回 `content_path`；页面 HTML 200（标题已被 i18n 换成「聊天记录存档」）；`app.js` / `styles.css` 以 `text/javascript` / `text/css` 200 返回；`/api/plug/<plugin>/page/stats` 与 `/page/records` 返回 3 条真实存档（群 961583271）。**没做浏览器内点击验证**（页面 DOM 只做了语法与 id 交叉检查）
