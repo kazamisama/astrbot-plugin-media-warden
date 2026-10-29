@@ -119,8 +119,11 @@ def _entry_bytes(root: str, name: str, rec: dict) -> int:
     legacy_forward.json 全没算 —— 页面「存档占用」2.5 MB，磁盘实际 9 MB。
     """
     render = rec.get("render") if isinstance(rec.get("render"), str) else None
-    files = [render, RENDER_FILENAME, RECORD_FILENAME, ENTRY_FILENAME,
-             LEGACY_FILENAME]
+    files: list[str] = []
+    for fname in (render, RENDER_FILENAME, RECORD_FILENAME, ENTRY_FILENAME,
+                  LEGACY_FILENAME):
+        if fname and fname not in files:   # render 常等于 render.png,别算两遍
+            files.append(fname)
     return _asset_bytes(rec) + _dir_file_bytes(root, name, files)
 
 
