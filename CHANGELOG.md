@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.17.3
+
+两个独立的小修：样式页也被套上同样的固定布局；自动转发不再对「复用旧条目」的重复内容再发一遍。
+
+### Fixed
+
+- **样式页（pages/style）也有外层滚动条 / 底部边距不齐**：v1.17.2 只修了存档页，样式页还是 `sticky` 顶栏 + `main` 底部 28px + 预览 `max-height: calc(100vh - 200px)`，控件栏一长就顶出整页滚动条，右栏下方留白。现在与存档页同一套：`html, body { height: 100% }`、`body` 是 `flex column` + `overflow: hidden`、`main` 吃掉剩余高度、`.panel` 是 `flex column`、`.panel.controls` 与 `.preview-body` 各自 `overflow: auto`；窄屏把两栏改成 `minmax(0,45%) / minmax(0,1fr)` 两行。
+- **同一段内容在源群被再发一次时，自动转发会往目标群再发一条**：存档层对「同群同内容」复用原条目（`reused`），但 `_save_forward` 仍会调 `_auto_forward` —— 目标群根本没收到新消息，等于重复刷屏。现在 `archived.get("reused")` 为真时跳过自动转发。
+
+### Tests
+
+- 冒烟 164 → **165 项**（Phase 9: 33 → 34）：新增 `test_plugin_auto_forward_skips_reused_entry`（第一次保存 → 只调 `get_msg` + `forward_group_single_msg`；同内容再发 → 复用条目，`calls == []`）。
+- 样式页布局用 Chrome headless（1400×900）截图核对：无外层滚动条，左右面板同高同边距，预览区内部滚动。
+
+### 顺带清理
+
+- `%TEMP%\wd_style_*` 旧预览临时目录 123 个（v1.17.0 修复之前遗留，总共 23 KB）已删除；新版本每次预览都会在 `finally` 里清掉自己的目录。
+
 ## v1.17.2
 
 存档页（dashboard）布局修正：整页固定，滚动只在左右两个面板内部。

@@ -1,9 +1,9 @@
-# 交接文档 · astrbot-plugin-media-warden v1.17.2
+# 交接文档 · astrbot-plugin-media-warden v1.17.3
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.17.2（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.2 是存档页布局修正 —— 整页固定、左右面板各自滚动，见 §1.-9；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.17.3（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.3 给样式页套上同一套固定布局，并让「复用旧条目」不再重复自动转发，见 §1.-10；v1.17.2 是存档页布局修正 —— 整页固定、左右面板各自滚动，见 §1.-9；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
@@ -11,7 +11,42 @@
 - 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`
 
 
-## 1.-9 v1.17.2（存档页整页固定，当前版本）
+## 1.-10 v1.17.3（样式页布局 + 复用条目不重复转发，当前版本）
+
+用户 m05183「还有什么问题吗？」→ 本轮审计发现两条真问题并修掉。
+
+### 1) 样式页（`pages/style`）与存档页同一个布局病
+
+v1.17.2 只修了 `pages/dashboard`，`pages/style` 还是老写法：`topbar { position: sticky }`、`main { padding: 14px 18px 28px; align-items: start }`、`.preview-body { max-height: calc(100vh - 200px); overflow: auto }`。控件栏比视口高时整页出滚动条，预览栏底部留白、左右底边不齐。
+
+改法（纯 CSS，和 dashboard 一致）：
+
+- `html, body { height: 100% }`；`body { display:flex; flex-direction:column; overflow:hidden }`；顶栏 `flex: 0 0 auto`（去掉 sticky）。
+- `main { flex:1; min-height:0; overflow:hidden; padding:14px 18px }`（底部 28px → 14px）。
+- `.panel { min-height:0; display:flex; flex-direction:column }`；`.panel.controls { overflow:auto }`、`.preview-pane { overflow:hidden }`、`.preview-head { flex:0 0 auto }`、`.preview-body { flex:1; min-height:0; overflow:auto }`。
+- 窄屏 `@media (max-width:860px)`：`grid-template-rows: minmax(0,45%) minmax(0,1fr)`。
+
+验证：Chrome headless 1400×900 截图（`%TEMP%\wd_layout2\`，已清理）—— 无外层滚动条、左右面板同高同边距、预览区内部滚动。
+
+### 2) 复用旧条目时自动转发会重复发
+
+`record.capture()` 对「同群同内容」直接复用原条目并返回 `reused=True`（v1.14.0 起的去重）。但 `main._save_forward` 结尾无条件调 `_auto_forward(archived, rid, ctx)` —— 同一段内容在源群被再发一遍时，目标群会收到第二条一模一样的转发（目标群并没有新消息）。
+
+改法（main.py）：`if archived is not None and results and not archived.get("reused"):` 才自动转发。
+
+测试：`test_plugin_auto_forward_skips_reused_entry` —— 第一次 `_save_forward` 调 `get_msg` + `forward_group_single_msg`；同内容再发（新 msg_id）→ 复用条目 → `calls == []`。冒烟 164 → **165**。
+
+### 本轮审计里「不是 bug」/仍开放的点
+
+- 存档占用 9,458,206 B 与 `_records/` 磁盘实际字节完全一致（record.json 3.5 MB + legacy 3.4 MB + render 1.9 MB + assets 631 KB）。
+- 索引 7490 行 / 7002 文件 / 0 缺失；284 个路径被多行共享（v1.17.0 已改成按行删）。
+- 752 段缺失图片全在 51 条 legacy 条目里，用 `localcache.find_cached_image` 复核 0 张可救（QQ 老缓存已清）。
+- 59 条条目里只有 5 条有 `render.png`（其余 54 条是扁平迁移来的老数据）—— 目前只能在详情里逐条点「重渲染」，**没有批量**；要做可得另开一轮。
+- 「聊天记录」分类里还有 1 条 57 B、`nodes: null` 的迁移残留 JSON（`20260618_144820_forward_json_bc72a731.json`），点删除即可，没自动删。
+- 3 条 v1.12 老条目（2026-10-27）没有 `kind` 字段，读取侧按 forward 处理，无实际问题。
+- `%TEMP%\wd_style_*` 旧目录 123 个（v1.17.0 之前遗留）已手动清掉。
+
+## 1.-9 v1.17.2（存档页整页固定，提交 aeac39d + 88116e3）
 
 用户的反馈（m05137）：「最外面多了一个滚动条，应该是单固定页面内嵌两个边距相同的框（目前就是这样，但是边距不一样，右边下面有空白），框内带滚动条」。
 
