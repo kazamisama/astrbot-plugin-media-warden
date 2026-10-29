@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.17.0
+
+一次针对生产数据的审计修复轮：删文件不再连坐、文本去重不再认错人、跨群转发不再毒化条目、旧的扁平渲染图终于能看见也能清掉，外加几处口径/性能/UI 状态修正。
+冒烟 `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`。
+
+### 升级前必读（行为/配置变化）
+
+- **`auto_forward_mode` 默认改回 `rebuild`**：自动转发的目标群按定义就是别的群，而 QQ 的原地转发（native）按**原群**找消息 —— 跨群实测必回「消息不存在」。v1.15.0 把默认改成 native 后，每次自动转发都会白打一次 `get_msg` + `forward_group_single_msg` 再回退。现在自动转发**恒用重建**；配置里写 `native` 仍受理（只记一条说明），「没启用 + 无目标群 + 仍是 native」的旧配置会在启动时静默改回 `rebuild`。
+- **新增 `save_voice`（默认 `false`）**：语音以前不在开关表里，而 `kind_allowed()` 对未知类型一律放行 —— 六个开关全关，语音照样落盘。现在它有独立开关；**认不出的类型默认不保存**（以后新增的类型不会再被静默存下）。
+- **纯文本去重按发送人收窄**：以前只比正文指纹 —— alice 发「666」、bob 也发「666」，第二条会复用 alice 的条目（发送者/时间全错，渲染图还写进 alice 的目录）。现在纯文本要求 `kind=text` **且同一发送人**才算重复；聊天记录仍按内容+群比对。
+- **老的扁平转发渲染图单列「旧渲染图」**：v1.16 之前每次转发额外落一张 `*_forward_image_*.png`（索引 `kind=forward_render`）。生产库 857 张 / 1.25 GB，与任何条目 msg_id 都不重叠，以前混在「图片」里既点不开也筛不掉。现在单独一类，统计栏有「清理旧渲染图 N 张」按钮（只删这批无条目的副本；条目里的 `render.png` 不动）。
+- **`/warden prune` 加 `--records`**：默认仍只删索引行；要删 `_records/` 条目目录必须显式加 `--records`。不带时回执会告诉你「另有 N 条存档未动」。
+
+### Fixed
+
+- **删一条共享图会连坐删别人 10 条记录**：`record_page.delete` 以前先 `os.remove`、再 `forget_path(该 path 全部行)`。Storage 按内容去重，生产库 284 个路径被多行共享（最多 11 行）—— 删一张图 = 文件没了 + 该路径全部索引行没了。现在按行 id 删，文件仅在「没有别的行引用」时才 unlink；页面提示「文件仍被 N 条记录引用，未删除」。
+- **`resolve_flat` 前缀可绕过**：`rel.startswith("_records/")` 对 `"./_records/<rid>/render.png"` 无效 → 页面能读、也能删存档内部文件。改为先 `os.path.normpath` 再判首段与 `..`。
+- **自动转发 native 永远失败**：见上（恒用重建）。
+- **跨群 native 失败永久毒化条目**：`record_page.resend` 只要错误含「消息不存在」就写 `native_unavailable` —— 而跨群失败也是这句。现在只有「发回原群」失败才记；原消息还在的条目不会再被标成「原消息已失效」。页面换目标群时「转发原消息」也会跟着置灰。
+- **纯文本条目污染扁平索引**：`_save_text` 曾往索引写 `kind="text"` 行，页面以「磁盘文件」列出，而 `resolve_flat` 拒读 `_records/` → 点不开、删不掉，去重复用时同一路径再加一行。现在不写扁平行。
+- **纯文本回执没有预览**：`_build_previews` 只挑 `forward_render`/`image`，text 结果永远不出图。现在把 text（`render.png`）纳入，优先级 渲染图 > 纯文本 > 图片。
+- **回执印内部类型名**：`类型: forward_render×1` → 翻成「聊天记录渲染图×1」等中文标签（成功/失败明细同样）。
+- **重建转发丢原时间戳**：AstrBot 的 `Node.to_dict` 不发 `time`。`/warden 重发` 重建、页面与自动转发统一走 OneBot `send_group_forward_msg`，`node_payloads` 补上 `time`。
+- **样式预览泄漏临时目录**：`_render_preview` 每次 `mkdtemp("wd_style_")` 从不删除（实测积 108 个）。现在 `finally` 清理。
+- **分页翻不到第 2000 条之后**：`_flat_rows` 固定只取 2000 行且不传 offset，再由合并列表切片 —— `offset=2050` 返回 0 条而 total=5012。现在按过滤条件取全量再切片（页面每页 200）。
+- **下载并发闸门被迟到缓存占住**：`Semaphore` 包着整个 `_download_one`，包括「等 5s/20s 再查本地缓存」的 sleep —— n 张死链图最坏 `ceil(n/4)*25s` 才出回执。现在闸门只包网络尝试。
+- **页面按钮状态**：`doResend` 的 `finally` 把所有按钮重新 enable，渲染时置灰的「转发原消息」又会活过来。现在成功后重新拉详情按真实状态重画。
+- **`/warden stats` 看不见存档**：只报索引 7490 行、不含 59 条条目（9 MB）；`total_bytes` 是 `SUM(size)`，共享文件被重复计（4.90 GB vs 磁盘 4.56 GB）。现在同时报存档条目/占用与「去重后字节」。
+
+### Tests
+
+- 冒烟 152 → **164 项**（Phase 9: 21 → 33）。新增：共享文件按行删 + `resolve_flat` 防绕过；纯文本按发送人去重；纯文本回执预览；分页 offset 2050；旧渲染图清理（带条目的 msg_id 保留）；样式预览临时目录清理；`node_payloads` 带 time；跨群 native 失败不毒化条目。
+- 把 4 个「定义了却没注册」的用例接回 PHASE9（emoji 混排渲染、raw url 覆盖、raw 无 http、按身份配 ref），它们此前从未被执行。
+- 改：`test_plugin_auto_forward_native_falls_back_to_rebuild` → `..._cross_group_uses_rebuild`（断言不再发生 native 尝试）；`test_plugin_promotes_auto_forward_default` → `test_plugin_demotes_auto_forward_default`；回执类型断言由 `image×1` 改为 `图片×1` 等中文标签；路由数 13 → 14（`purge_legacy`）。
 ## v1.16.0
 
 渲染开关布尔化：三态 `forward_render_mode`（`image`/`json`/`both`）收成一个开关 `forward_render_image`。功能上只有一处变化：**不再落扁平 JSON 副本**。

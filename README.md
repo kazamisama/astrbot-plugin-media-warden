@@ -29,6 +29,7 @@
 - v1.14.0：**按类型采集 + 分类管理 + 样式页** —— 六类保存开关（图片/动图/视频/纯文本/聊天记录/文档）与扩展名白名单，白名单空列表语义反转为「不保存」；纯文本与聊天记录都是「一个条目两种形态」（结构化 JSON + Pillow 渲染图）；dashboard 按类型分类管理（含老的扁平落盘文件），带群名的目标群下拉与两种转发；可选的自动转发；独立的渲染样式页（宽度/字号/圆角/主色/头像形状/时间格式/深色 + 实时预览）；「重渲染」按当前样式补/刷新旧存档的渲染图，同群同内容不再重复建目录，聊天记录的渲染图只存在于条目里（不再单独成一张「图片」）；冒烟 150 项
 - v1.15.0：**配置页重做** —— schema 九组按「监听 → 存什么 → 存到哪 → 下载 → 渲染 → 样式 → 自动转发 → 回执 → 日志」排序，每组标题带序号、hint 只写现状；删掉与 `style_width` 重复的 `forward_image_width`，渲染引擎选项收成 `pil`（只有它实现），`auto_forward_mode` 默认改成 `native`（优先保装扮，失败自动回退；旧配置在「没启用 + 没目标群 + 仍是旧默认」时才跟着升级）；组键保持不变（只改标题）—— 实测组键改名会让 AstrBot 按新 schema 重写配置文件、把旧值丢掉；冒烟 151 项
 - v1.16.0：**渲染开关布尔化** —— 三态 `forward_render_mode`(image/json/both) 收成一个开关 `forward_render_image`（开 = 条目里画 `render.png`，关 = 只留 `record.json`）；旧配置的 `json` 自动映射成关闭，`image`/`both` 映射成开启。条目里本来总有 `record.json`，所以不再产生「扁平的额外 JSON 副本」，一条转发只回一个结果；顺手修了内联节点（`{"type":"node","data":{…}}` 包装形态）存档成空壳的问题；冒烟 152 项
+- v1.17.0：**审计修复** —— 删共享扁平文件不再连坐（按行删 + 引用归零才删字节）；`resolve_flat` 先 normpath 再判 `_records` 前缀（`./_records/…` 绕不过去了）；纯文本去重按发送人收窄（不同人发同一句话各存一条）；语音补上 `save_voice` 开关、未知类型默认不存；自动转发恒用重建（跨群原地必失败，默认改回 `rebuild`）；跨群 native 失败不再把条目永久标成「原消息已失效」；857 张老的扁平转发渲染图单列「旧渲染图」并可一键清理；分页能翻到第 2000 条之后；`/warden stats` 纳入存档、`prune --records` 才删存档；重建转发带原时间戳；纯文本回执带渲染图预览；样式预览不再泄漏临时目录、下载闸门不再被迟到缓存占住；冒烟 164 项
 
 ## 目录
 
@@ -55,7 +56,7 @@ astrbot-plugin-media-warden/
     avatar.py                # 头像抓取 + 文件缓存
     record.py                # 聊天记录存档（自包含目录：节点 + 图片字节）
     record_admin.py          # 存档读侧（扫描/搜索/汇总/详情/取图/删除/还原节点）
-    record_page.py           # 插件页面后端（/<plugin>/page/* 十三个接口）
+    record_page.py           # 插件页面后端（/<plugin>/page/* 十四个接口）
   README.md                  # 本文件
   CHANGELOG.md               # 变更记录
   HANDOVER.md                # 交接文档
@@ -98,6 +99,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | `save_gifs` | `true` | 动图（GIF / APNG / 动态 WebP）。先按扩展名归类，落盘后按字节复核：多帧记 `gif`、单帧归 `image`（进「图片」分类） |
 | `save_videos` | `true` | 视频 |
 | `save_files` | `true` | 文档（群文件），扩展名受 `doc_ext_whitelist` 约束 |
+| `save_voice` | `false` | 语音 / 录音消息（v1.17.0 才有开关：以前它不在开关表里，六类全关也会照存） |
 | `doc_ext_whitelist` | `[pdf,doc,docx,xls,xlsx,ppt,pptx,txt,md,csv,zip,7z,rar,epub]` | 文档扩展名白名单；**空 = 不限**（注意与 ① 群/人白名单的空 = 不存相反） |
 | `save_texts` | `false` | 纯文本消息：`entry.json` + `render.png`，共用一个条目 |
 | `save_forwards` | `true` | 聊天记录：`record.json` + `render.png`，共用一个条目 |
@@ -156,7 +158,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 |---|---|---|
 | `auto_forward_enabled` | `false` | 收到聊天记录后自动转发到目标群 |
 | `forward_target_groups` | `[]` | 目标群（可多个，空 = 不转发） |
-| `auto_forward_mode` | `native` | `native`（转发原消息，保气泡/挂件；**只对原群可靠**，跨群基本必失败并自动回退）\| `rebuild`（按存档重拼，无装扮，永远可用） |
+| `auto_forward_mode` | `rebuild` | `rebuild`（按存档重拼，无装扮，永远可用）\| `native`（转发原消息，保气泡/挂件；**只对原群可靠**）。自动转发的目标群按定义都是别的群，所以实际一律走重建（v1.17.0 起不再白试 native） |
 
 **⑧ 保存后的回执（`reply`）**
 
@@ -191,7 +193,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 5. **转发链处理**（forwarder）—— 拉取/展开嵌套节点，按 `avatar_platforms` 白名单抓头像，按 `forward_render_image` 决定是否渲染 PNG（结构化数据始终写进条目 `record.json`）；透明图片做 alpha 合成
 6. **索引写入**（index）—— SQLite 记录每条资产；失败项写入 `failures` 表（同 subject 累计 `attempts`）
 7. **回执**（reporter）—— 汇总成功 / 失败 / 去重复用 / 用时，并按原因分叉文案（下载失败（源链接失效） vs 落盘失败）
-8. **预览回传** —— 优先回传 `forward_render` 图，其次第一张 image；无 `image_result` 时降级为文本路径
+8. **预览回传** —— 优先回传渲染图（聊天记录 / 纯文本条目的 `render.png`），其次第一张 image；无 `image_result` 时降级为文本路径
 
 ## 存储目录
 
@@ -226,10 +228,10 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 | 命令 | 说明 |
 |---|---|
 | `/warden list [N]` | 列最近 N 条索引记录（默认 10，上限 50），时间可读，带 msg_id 与 sha16（v1.11.0 起与 lookup 共用同一行格式） |
-| `/warden stats` | 资产统计：总数 / 类型分布 / 总字节数 / db 路径 |
+| `/warden stats` | 资产统计：索引行数 / 类型分布 / 索引字节（含去重后）/ **存档条目数与占用** / db 路径（v1.17.0 起纳入 `_records/`） |
 | `/warden export [path]` | 导出索引为 JSON；path 必须落在 `storage_root` 内，默认 `_export.json` |
 | `/warden lookup <msg_id> [#idx]` / `<sha16>` | 反向查询该消息保存了哪些资产，可选按 idx 过滤；传 16 位 hex 则按内容指纹查它出现过几次（v1.10.0） |
-| `/warden prune <days>` | 从索引删除 N 天前的记录（不删实际文件），同期失败记录一并清掉并分别报数（v1.10.0） |
+| `/warden prune <days>` | 从索引删除 N 天前的记录（不删实际文件），同期失败记录一并清掉并分别报数（v1.10.0）。加 `--records` 才会连 `_records/` 条目目录一起删（v1.17.0） |
 | `/warden fail [N]` | 列最近 N 条保存失败（默认 10，上限 50），带 attempts 与 subject；表头带累计次数与「反复失败」top（v1.9.0+ / v1.10.0 补统计） |
 | `/warden 存档 [msg_id]` | **引用（回复）**一条合并转发后发它，把节点 + 节点内图片字节存成 `_records/<id>/`；也可直接转发给机器人，或给 OneBot `message_id`（v1.12.0） |
 | `/warden 重发 [原地\|重建] [record_id\|list]` | 重发存档：默认先**原地**（`forward_group_single_msg`，让 QQ 把原消息再转发一遍，气泡/挂件/头像全保），不行再按存档**重建**合并转发（装饰会丢）；`list` 列最近 10 条（v1.12.0） |
@@ -243,7 +245,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 3. 右侧详情：逐节点列出每段内容（文本 / 图片缩略图 / 表情 / @），缩略图点开看原图；取不到图的段会标出 `missing` 原因
 4. 详情底部：**发到**（目标群下拉，带群名，默认原群）+ **转发原消息**（转原消息本体，气泡/挂件/头像/原时间戳都在，要求原消息还在群里，过期会自动改用重建）+ **重建转发**（按存档重拼，内容一致但没有装扮，随时可用）+ 重渲染 / 打开目录 / 删除（删整个 `_records/<id>/`，不可恢复）
 
-**v1.14.0 分类管理**：顶部类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）同时覆盖两类保存物 —— `_records/` 里的条目，以及老的扁平落盘文件（索引库里一行一条，按 `kind` 分类）。右侧「结构化 / 渲染图」切换看同一个条目的两种形态；「发到」的目标群下拉带群名（默认这条记录原来的群），两个转发按钮都用它 —— **转发原消息**保装扮但依赖原消息还在，**重建转发**不依赖、但没有装扮；纯文本条目没有合并转发可发，只提供浏览/删除/打开目录。
+**v1.14.0 分类管理**：顶部类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 语音 / 纯文本 / 聊天记录 / 旧渲染图）同时覆盖两类保存物 —— `_records/` 里的条目，以及老的扁平落盘文件（索引库里一行一条，按 `kind` 分类）。右侧「结构化 / 渲染图」切换看同一个条目的两种形态；「发到」的目标群下拉带群名（默认这条记录原来的群），两个转发按钮都用它 —— **转发原消息**保装扮但依赖原消息还在，**重建转发**不依赖、但没有装扮；纯文本条目没有合并转发可发，只提供浏览/删除/打开目录。
 
 「重渲染」按**当前**样式重画这条的 `render.png` —— v1.14.0 之前存的条目没有渲染图（标签都不出现），改了样式之后旧图也还是旧样式，两者都靠它。同一份内容被转发两次时（同一个群内），**不会**再建第二个目录：直接复用原来那条（`reused`，图片也不再下一次），页面只看到一条。跨群不合并 —— 同一内容出现在别的群各存一份是对的。老版本已经存成两个目录的，第二条仍带 `duplicate_of` 显示「内容重复」徽章（不会自动删）。
 
@@ -251,11 +253,13 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 **老扁平聊天记录自动迁移**（v1.14.0 起，启动时跑一次）：v1.12.0 之前的聊天记录存成 `…_forward_json_*.json`，页面上只是文件卡片。现在 `record_admin.migrate_flat_forwards()` 把它们迁成 `_records/` 条目 —— 节点能看、能重渲染、能重建转发；图片 url 早已过期，所以不下载、进 `missing`（页面显示「缺 N 图」），原始 JSON 复制成条目里的 `legacy_forward.json` 留底，扁平文件与索引行随后删掉。列表预览也从文件名变成正文。幂等，坏 JSON 不迁不删。
 
-类型标签会标出**当前关掉的类别**（「纯文本 · 关」并淡化），空列表也直接说原因（这一类关了 / 还没存过 / 群和人还没配）—— v1.14.0 起六类都是开关，没有「默认自动存」的类型，页面上不再写含糊的「发图会自动保存」。
+类型标签会标出**当前关掉的类别**（「纯文本 · 关」并淡化），空列表也直接说原因（这一类关了 / 还没存过 / 群和人还没配）—— v1.14.0 起各类都是开关，v1.17.0 补上语音，没有「默认自动存」的类型，页面上不再写含糊的「发图会自动保存」。
+
+**旧渲染图（v1.17.0）**：v1.16 之前每存一条聊天记录，除了条目里的 `render.png`，还会额外落一张扁平的 `*_forward_image_*.png`（索引 `kind=forward_render`）。这批文件与任何条目的消息 id 都不重叠，以前混在「图片」里 —— 既点不开也筛不掉。现在单列「旧渲染图」一类，统计栏出现「清理旧渲染图 N 张」按钮：只删这批没有条目的扁平副本，**条目里的 `render.png` 不受影响**。
 
 几个容易踩的点都在页面里处理掉了：老 GIF 在索引里记的是 `image`，筛选按扩展名再分一次，「动图」标签能筛到 2026-10-28 之前存的那批；「转发原消息」失败且原因是原消息不存在时，会往条目元数据写 `native_unavailable`，之后那条按钮就是灰的、头部显示「原消息已失效」（网络抖动不写，避免一次超时永久禁掉）；删除用页内蒙层确认（桌面版的 `window.confirm` 不保证弹得出来）；列表标题写「共 N 条 · 已加载 M」，和底部的「加载更多」不再打架。
 
-页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,groups,resend,render,delete,reveal,style,style_save,style_preview}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
+页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,groups,resend,render,delete,reveal,style,style_save,style_preview,purge_legacy}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
 
 缩略图经 `page/thumb` 读成 base64 内联显示：`<img>` 直接指后端 URL 带不上 Authorization 头，而桌面版（Tauri）不一定留着 dashboard 的 cookie —— 桥接接口两边都通。单张 >8 MB 时只回错误、让用户走下载。
 
@@ -278,7 +282,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **152 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 26 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 21），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **164 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 26 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 33），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值；**宿主的 schema 分组嵌套配置**能被摊平读取（顶层同名键优先）
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一

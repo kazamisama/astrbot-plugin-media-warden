@@ -1,17 +1,66 @@
-# 交接文档 · astrbot-plugin-media-warden v1.16.0
+# 交接文档 · astrbot-plugin-media-warden v1.17.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.16.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.17.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），**变化见下面 §1.-7**；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 / v1.12.0（`7396611` + `f3368ca`）/ v1.13.0（八笔小步提交）/ v1.14.0（`ba83bbf` → `4ef1afe` → `b8cb445` → `18e8544`）各一批提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`
 
 
-## 1.-5 v1.16.0（渲染开关布尔化，当前版本）
+## 1.-7 v1.17.0（审计修复，当前版本，提交 0d36ee3 + b8988ac + 4261881）
+
+用户的诉求（m04527「再仔细调查一遍」→ m04681「可以」）：把第二轮深度审计发现的 18 条问题全修，不吝啬改动。
+
+### 数据安全（最重要的三条）
+
+- **删一条共享图会连坐删别人最多 10 条记录**：`record_page.delete` 以前先 `os.remove` 再 `index.forget_path(path)`（`DELETE FROM assets WHERE path = ?`）。而 Storage 按内容去重 —— 生产库 7490 行 / 7002 个唯一文件 / **284 个路径被多行共享（最多 11 行）**。改法：页面传 `asset_id` → `index.delete_row(id)`（只删这一行）→ `index.count_path(path)` 归零才 `record_admin.delete_flat` 删文件；仍被引用时回 `{kept_file: true, shared: N}`，页面提示「文件仍被 N 条记录引用，未删除」。`delete_flat(..., keep_file=True)` 只解析不删。
+- **`resolve_flat` 前缀可绕过**：`rel.startswith("_records/")` 对 `"./_records/<rid>/render.png"` 无效 → 页面能读、也能删存档内部文件。改为先 `os.path.normpath`，再判首段是否为 `_records`、是否含 `..`。
+- **纯文本去重认错发送者**：`record.capture_text` 用正文指纹查重 → alice 发「666」、bob 也发「666」，第二条直接复用 alice 的条目（sender/ts 全错，渲染图还写进 alice 目录）。`find_duplicate(..., kind=None, sender_id=None)` 新增两个收窄条件；`capture_text` 传 `kind="text", sender_id=...`。聊天记录仍按「内容 + 群」比对（同一条转发被转两次确实重复）。
+
+### 功能坏点
+
+- **自动转发 native 永远失败**：目标群按定义是「别的群」，而 QQ 的 `forward_group_single_msg` 按**原群**找消息（2026-10-28 实测跨群必回「消息不存在」）。`_auto_forward` 现在恒用 `rebuild_forward`；`auto_forward_mode` 默认改回 `rebuild`，`_promote_auto_forward_default` 改成反向迁移（未启用 + 无目标群 + 仍是 native → 静默改 rebuild）。
+- **跨群 native 失败毒化条目**：`record_page.resend` 以前只要错误含「消息不存在/无法找到」就写 `native_unavailable`。现在仅当**目标群 == 记录的原群**时才记。页面 `syncNative()` 在目标群下拉 change 时同步置灰「转发原消息」并改 title；`doResend` 成功后重新拉详情重画，不再把所有按钮无脑 enable。
+- **语音没有开关**：`policy.kind_allowed` 以前对不在开关表里的 kind 返回 `True` → 六类全关语音照存。新增 `save_voice: bool = False`（config + schema ② 组），`kind_allowed` 改成 `flags.get(kind, False)`（未知类型默认不存）；页面类型标签补 `voice`。
+- **纯文本条目污染扁平索引**：`_save_text` 不再写 `index.record(kind="text", path=<条目>/render.png)` —— 条目本来就在 `_records/`，写了会以「磁盘文件」出现而 `resolve_flat` 拒读，点不开也删不掉。
+- **纯文本回执无预览**：`_build_previews` 候选改为 渲染图 > **text** > image，路径取 `preview_path or path`。
+
+### 口径 / 性能 / UI
+
+- **857 张旧扁平渲染图独立成类**：`record_admin.KINDS` 增 `render`（标签「旧渲染图」），`flat_item` 把 `kind=forward_render` 映射成 `render`；`record_page._FLAT_KIND_MAP` 的 `image` 不再并 `forward_render`，新增 `"render": ["forward_render"]`。统计栏出现「清理旧渲染图 N 张」按钮 → `POST page/purge_legacy` → `record_admin.purge_orphan_renders(root, index)`：跳过带条目 msg_id 的行，按 path 归组删行，引用归零才删文件，返回 `{rows, files, bytes}`。**没有自动执行**：删的是用户数据，必须由人在页面上点。
+- **分页翻不到第 2000 条之后**：`index.list_assets(limit=None)` 支持取全量（`record_page._flat_rows` 默认 None），`scan_items` 切片才是真的 offset。实测 `offset=2050` 能取 50 条（以前 0 条）。
+- **`/warden stats` 纳入存档**：`index.stats()` 增 `unique_bytes`（按 path 去重，共享文件不再重复计）；命令同时打印 `record_admin.stats()` 的条目数/占用。
+- **`/warden prune` 加 `--records`**：默认只删索引行；`record_admin.count_records_older_than` / `delete_records_older_than` 只在显式 `--records` 时调用，否则回执提示「另有 N 条存档未动」。
+- **回执不再印内部类型名**：`reporter._KIND_LABELS` 把 `forward_render→聊天记录渲染图` 等翻成中文，类型行与成功/失败明细共用。
+- **重建转发带原时间戳**：`record_admin.node_payloads` 的 node 加 `"time"`；`/warden 重发` 的重建路径改为优先直接 `send_group_forward_msg`（与页面/自动转发同一实现），只有没有 bot 时才退回 AstrBot `Nodes`（它不发 time）。
+- **下载闸门只包网络**：`Semaphore` 从 `_download_all._one` 移进 `_download_one`，只包 `download(...)` 与 `_refetch_media(...)`；「等 5s/20s 再查本地缓存」不再占并发名额（n 张死链图不再 `ceil(n/4)*25s`）。
+- **样式预览不泄漏临时目录**：`_render_preview` 的 `mkdtemp("wd_style_")` 改为 `try/finally shutil.rmtree`（实测积过 108 个）。
+
+### 接口 / 签名变化（写代码时要看）
+
+- `record.find_duplicate(storage_root, sha, *, exclude="", group_id=None, kind=None, sender_id=None)`。
+- `record_admin.delete_flat(root, rel_path, *, keep_file=False)`。
+- `record_admin.stats(root)` 不变；新增 `count_records_older_than(root, cutoff)` / `delete_records_older_than(root, cutoff)` / `purge_orphan_renders(root, index)`。
+- `index.list_assets(..., limit=None)` 表示全量；新增 `index.count_path(path)`；`index.stats()` 增 `unique_bytes`。
+- `record_page` 路由 **13 → 14**（新增 `page/purge_legacy`）；`get_stats` 增 `legacy_renders` / `legacy_bytes`；`delete` 接受 `{source:"flat", path, asset_id}`。
+- `record_admin.KINDS` / `KIND_LABELS` 增 `render`（「旧渲染图」）。
+
+### 测试
+
+- 152 → **164**（Phase 9: 21 → 33）：共享文件按行删 + `resolve_flat` 防绕过、文本按发送人去重、纯文本回执预览、分页 offset 2050、旧渲染图清理（条目 msg_id 保留）、预览临时目录清理、`node_payloads` 带 time、跨群 native 失败不毒化。
+- 把 4 个「定义了却没注册」的用例接回 PHASE9（它们此前从未执行过）：`test_forwarder_emoji_mixed_layout`、`test_recover_raw_url_overrides_local_jpeg`、`test_recover_raw_no_http_keeps_local`、`test_recover_pairs_refs_by_identity_not_position`。
+- 改：`test_plugin_auto_forward_native_falls_back_to_rebuild` → `..._cross_group_uses_rebuild`；`test_plugin_promotes_auto_forward_default` → `test_plugin_demotes_auto_forward_default`；回执类型断言改中文标签；路由数 13/14。
+
+### 本机数据现状（升级后不必手忙的事）
+
+- 生产库索引 7490 行、`_records/` 59 条条目、857 张旧扁平渲染图（1.25 GB）。旧渲染图**没有**自动删 —— 在 dashboard「旧渲染图」分类或统计栏按钮里人工清。
+- 752 张 missing 图全在 legacy 条目里，用 `localcache` 逐张探过 0 张可救（老缓存已清）。
+- `save_voice` 默认关，本机库中 0 条语音，升级后行为不变。
+## 1.-5 v1.16.0（渲染开关布尔化）
 
 用户诉求（m04174 选「3 按建议」）：三态 `forward_render_mode`（`image`/`json`/`both`）太难懂，收成一个布尔开关；不做老动画 WebP 重扫。
 
@@ -612,7 +661,9 @@ AstrBot 核心本身也是「多候选 × 多参数形态」地试 —— 只赌
 
 已验证：
 
-- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`（v1.14.0）
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`（v1.17.0）
+- v1.17.0 本机实测（2026-10-29 09:54–09:56，重载后）：日志 `loaded: v1.17.0 | mode=whitelist | groups=1 users=1`、`page=on`；`page/stats` → records 59 / texts 0 / assets 5 / **bytes 9,458,206**（含 record.json + legacy_forward.json，此前只算 assets+render 是 2.5 MB）、flat_total 7490 / flat_bytes 5,266,143,004、**legacy_renders 857 / legacy_bytes 1,310,438,292**、`save_types` 含 `voice: False`；`page/records` → `kind=render` 857、`kind=image` **4155**（拆分前 5012 = 4155 + 857 旧渲染图）、`kind=forward` 60。**857 张旧渲染图没有自动删除**，留给页面上的「清理旧渲染图」按钮。
+- `python -X utf8 _smoke.py`：`ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=21, total=152)`（v1.16.0）
 - v1.14.0 本机实测（2026-10-28）：重载后日志 `loaded: v1.14.0 | mode=whitelist | groups=1 users=1`、`page=on`（修复前同一条是 `groups=0 users=0` —— 配置根本没被读到）；`/api/plug/astrbot-plugin-media-warden/page/{stats,groups,style,records,style_preview}` 全部 200（stats：3 条存档 / 7 节点 / 4 资产 / flat 2000；groups：collect `961583271` 与 llm `256678737`，各 3 人；style_preview 返回 `data:image/png;base64,…`）；`/api/plugin/page/entry?name=…&page=style` 返回 `content_path`（标题由前端按 i18n 的 `pages.style.title` 解析）。**没做浏览器内点击验证**。
 - 本机插件配置在 `C:\Users\chiriu\.astrbot\data\config\astrbot-plugin-media-warden_config.json`（按 schema 分组嵌套）；当前值 `target_groups=["961583271"]`、`target_users=["2510536451"]`、`match_mode=whitelist` —— 修复配置读取后，抓取范围就是「collect 群 + 風見かずき」。
 - v1.14.0 跨群转发实测（2026-10-28，pages API 走真实 bot）：对 2026-10-27 的存档做 `mode=native` → 目标群 `256678737`，`get_msg` 直接回 **「消息不存在」**（原消息已过期；插件先核验再转发，所以没有乱发）；同一条记录 `mode=rebuild` → `ok: true`，`send_group_forward_msg` 送 3 个节点进 llm 群。结论：跨群「原地」同样受「原消息还在」约束，`_auto_forward` 的 native 失败回退 rebuild 是必须的（llm 群里留了一条测试转发，可手动撤回）。
