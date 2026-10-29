@@ -318,12 +318,18 @@ class AssetIndex:
         c = self._require()
         clause, params = self._asset_filter(kinds, group_id, q)
         total = c.execute("SELECT COUNT(*) FROM assets" + clause, params).fetchone()[0]
-        rows = _asset_rows(c.execute(
-            "SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
-            "kind, path, size, sha16, forward_meta FROM assets" + clause
-            + " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
-            params + [max(1, int(limit)), max(0, int(offset))],
-        ))
+        cols = ("SELECT id, ts, platform, group_id, sender_id, msg_id, idx, "
+                "kind, path, size, sha16, forward_meta FROM assets" + clause
+                + " ORDER BY ts DESC, id DESC")
+        # v1.17.0: limit=None 表示取全部。页面分页以前固定只取 2000 行再在
+        # 合并列表上切片 —— 第 2000 条之后永远翻不到（total 5012 却返回 0 条）。
+        if limit is None or int(limit) <= 0:
+            rows = _asset_rows(c.execute(cols, params))
+        else:
+            rows = _asset_rows(c.execute(
+                cols + " LIMIT ? OFFSET ?",
+                params + [max(1, int(limit)), max(0, int(offset))],
+            ))
         return {"total": int(total), "items": rows}
 
     def find_by_sha(self, sha16: str) -> list[dict]:
@@ -355,6 +361,18 @@ class AssetIndex:
     def count(self) -> int:
         c = self._require()
         return c.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+
+    def count_path(self, path: str) -> int:
+        """同一个文件还有几行索引引用它（Storage 按内容去重会让多行共享一个文件）。
+
+        页面删扁平文件前必须问这一句：以前直接 os.remove + 删掉该 path 的全部行，
+        删一张共享图会连带删掉别人最多 10 条消息的索引行(v1.17.0 修复)。
+        """
+        if not path:
+            return 0
+        c = self._require()
+        return int(c.execute("SELECT COUNT(*) FROM assets WHERE path = ?",
+                             (str(path),)).fetchone()[0] or 0)
 
     def summary(self, *, kinds: Optional[list] = None,
                 group_id: Optional[str] = None, q: str = "") -> dict:
@@ -389,6 +407,12 @@ class AssetIndex:
         total_bytes = c.execute(
             "SELECT COALESCE(SUM(size), 0) FROM assets"
         ).fetchone()[0]
+        # 同一个文件可能被多行引用（Storage 按内容去重）：SUM 会把它的字节数
+        # 重复计一遍。unique_bytes 按 path 去重，才是磁盘上的真实占用。
+        unique_bytes = c.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM ("
+            "SELECT DISTINCT path, size FROM assets)"
+        ).fetchone()[0]
         fail_total = c.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
         by_kind_fail = dict(c.execute(
             "SELECT kind, COUNT(*) FROM failures GROUP BY kind"
@@ -397,6 +421,7 @@ class AssetIndex:
             "total": total,
             "by_kind": by_kind,
             "total_bytes": int(total_bytes),
+            "unique_bytes": int(unique_bytes),
             "failures": int(fail_total),
             "failures_by_kind": by_kind_fail,
             "db_path": self.db_path,

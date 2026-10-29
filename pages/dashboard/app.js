@@ -8,14 +8,18 @@
 
   var KIND_LABELS = {
     all: "全部", image: "图片", gif: "动图", video: "视频", file: "文档",
-    voice: "语音", text: "纯文本", forward: "聊天记录"
+    voice: "语音", text: "纯文本", forward: "聊天记录", render: "旧渲染图"
   };
-  var KIND_ORDER = ["all", "image", "gif", "video", "file", "text", "forward"];
-  // v1.14.0 起六类**各自**有保存开关(没有「总是自动保存」的类别):
+  // v1.17.0: voice 补上（以前有标签但不在开关表里，六类全关也照存）；
+  // render 是 v1.16 之前每次转发额外落下的扁平渲染图，单列一类才能清理。
+  var KIND_ORDER = ["all", "image", "gif", "video", "file", "voice",
+                    "text", "forward", "render"];
+  // v1.14.0 起七类**各自**有保存开关(没有「总是自动保存」的类别):
   // 空列表/类型标签上的「关」标记都靠这张表说明真相。
   var KIND_FLAGS = {
     image: "save_images", gif: "save_gifs", video: "save_videos",
-    file: "save_files", text: "save_texts", forward: "save_forwards"
+    file: "save_files", voice: "save_voice", text: "save_texts",
+    forward: "save_forwards"
   };
 
   function $(id) { return document.getElementById(id); }
@@ -128,6 +132,29 @@
     $("stats").innerHTML = parts.map(function (p) {
       return "<span>" + esc(p[0]) + " <b>" + esc(p[1]) + "</b></span>";
     }).join("");
+    // v1.17.0: 老版本每次转发都多存一张扁平渲染图（没有对应条目）。以前它们
+    // 混在「图片」里，1.25 GB 既看不见也筛不掉 —— 这里给一个显式清理入口。
+    if (s.legacy_renders) {
+      $("stats").innerHTML += '<span><button class="btn" id="btn-purge-legacy" ' +
+        'title="只删 v1.16 之前额外落下的扁平转发渲染图；条目里的 render.png 不受影响">' +
+        "清理旧渲染图 " + esc(s.legacy_renders) + " 张（" +
+        esc(fmtBytes(s.legacy_bytes || 0)) + "）</button></span>";
+      $("btn-purge-legacy").addEventListener("click", purgeLegacy);
+    }
+  }
+
+  async function purgeLegacy() {
+    var n = (state.stats && state.stats.legacy_renders) || 0;
+    if (!(await askConfirm("删除 " + n + " 张旧的扁平转发渲染图？" +
+        "它们没有对应的存档条目（条目里的 render.png 不受影响），不可恢复。"))) return;
+    try {
+      var r = unwrap(await post("purge_legacy", {}));
+      toast("已清理 " + (r.rows || 0) + " 行索引 / " + (r.files || 0) +
+        " 个文件（" + fmtBytes(r.bytes || 0) + "）");
+      await Promise.all([loadStats(), loadList()]);
+    } catch (e) {
+      toast("清理失败：" + e.message, true);
+    }
   }
 
   function renderKinds() {
@@ -208,15 +235,15 @@
         return "「" + label + "」这一类当前是关的（配置项 " + key +
           "），打开后才会存。六类都能单独开关。";
       }
-      return "这一类还没有保存过内容。六类（图片 / 动图 / 视频 / 文档 / 纯文本 / 聊天记录）都能在插件配置里单独开关。";
+      return "这一类还没有保存过内容。七类（图片 / 动图 / 视频 / 文档 / 语音 / 纯文本 / 聊天记录）都能在插件配置里单独开关。";
     }
     var off = Object.keys(KIND_FLAGS).filter(function (k) {
       return flags[KIND_FLAGS[k]] === false;
     }).map(function (k) { return KIND_LABELS[k] || k; });
     if (off.length) {
-      return "当前关闭的类型：" + off.join("、") + "（六类都能在插件配置里单独开关）。";
+      return "当前关闭的类型：" + off.join("、") + "（七类都能在插件配置里单独开关）。";
     }
-    return "还没有保存过任何内容。先检查 target_groups / target_users（白名单模式下空列表 = 不保存），再看六类开关。";
+    return "还没有保存过任何内容。先检查 target_groups / target_users（白名单模式下空列表 = 不保存），再看七类开关。";
   }
 
   function renderList(data) {
@@ -412,8 +439,28 @@
       var sel = $("target-group");
       return sel ? sel.value : "";
     }
-    if (bn) bn.addEventListener("click", function () { doResend(rid, "native", targetGroup()); });
+    // v1.17.0: 换目标群后「转发原消息」要跟着置灰 —— QQ 的原地转发按**原群**
+    // 找消息，跨群必失败。以前下拉没有 change 处理，选了别的群按钮还是可点的。
+    function syncNative() {
+      if (!bn) return;
+      var gid = targetGroup();
+      var same = !gid || String(gid) === String(d.group_id || "");
+      bn.disabled = !(d.can_native && same);
+      bn.title = !d.can_native
+        ? (d.root_msg_id
+          ? "这条的原消息已经失效（过期或撤回），只能用重建转发"
+          : "这条没有可用的原消息 id（多半是嵌套转发，只拿得到长 id），只能用重建转发")
+        : (same
+          ? "转发原消息本体：气泡、挂件、头像、原时间戳都保留；要求原消息还在群里"
+          : "「转发原消息」只能发回原群（QQ 按原群找消息），跨群请用重建转发");
+    }
+    var tg = $("target-group");
+    if (tg) tg.addEventListener("change", syncNative);
+    if (bn) bn.addEventListener("click", function () {
+      if (!bn.disabled) doResend(rid, "native", targetGroup());
+    });
     if (br) br.addEventListener("click", function () { doResend(rid, "rebuild", targetGroup()); });
+    syncNative();
     var brr = $("btn-rerender");
     if (brr) brr.addEventListener("click", function () { doRerender(rid); });
     $("btn-open").addEventListener("click", function () { doReveal({ id: rid }); });
@@ -439,7 +486,7 @@
       '<button class="btn" id="btn-open">打开目录</button>' +
       '<button class="btn danger" id="btn-flat-delete">删除文件</button></div>';
     var body = "";
-    if (it.kind === "image" || it.kind === "gif") {
+    if (it.kind === "image" || it.kind === "gif" || it.kind === "render") {
       body = '<div class="render-wrap"><img class="thumb render-img" id="flat-img" ' +
         'alt="加载中…" title="点击查看原图"></div>';
     }
@@ -451,8 +498,9 @@
       doReveal({ path: it.rel || it.path });
     });
     $("btn-flat-delete").addEventListener("click", function () {
-      doDelete({ source: "flat", path: it.path },
-               "删除这个文件？（磁盘上的文件与索引行一起删，不可恢复）");
+      // v1.17.0: 带上 asset_id，后端只删这一行；文件还有别的记录引用时保留字节
+      doDelete({ source: "flat", path: it.path, asset_id: it.asset_id },
+               "删除这个文件？（只删这一条；文件仍被别的记录引用时会保留）");
     });
     var img = $("flat-img");
     if (img) fillThumb(img, thumbParams(it, ""));
@@ -528,7 +576,13 @@
       }
     } catch (e) {
       toast("发送失败：" + e.message, true);
-    } finally {
+    }
+    // v1.17.0: 按最新状态重画详情，而不是把所有按钮重新启用 —— 以前 finally 里
+    // 无脑 enable，会让「原消息已失效」或跨群时本该置灰的「转发原消息」又活过来。
+    try {
+      var fresh = unwrap(await api("record", { id: rid }));
+      renderDetail(fresh);
+    } catch (e2) {
       Array.prototype.forEach.call(btns, function (b) { b.disabled = false; });
     }
   }
@@ -573,8 +627,10 @@
   async function doDelete(body, question) {
     if (!(await askConfirm(question))) return;
     try {
-      unwrap(await post("delete", body));
-      toast("已删除");
+      var r = unwrap(await post("delete", body));
+      toast(r && r.kept_file
+        ? "已从列表移除（文件仍被其他记录引用，未删除）"
+        : "已删除");
       state.selected = null;
       $("detail").innerHTML = '<p class="hint">左侧选择一条查看内容</p>';
       await Promise.all([loadStats(), loadList()]);

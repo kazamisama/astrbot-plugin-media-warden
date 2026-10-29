@@ -47,6 +47,7 @@ body {
 .sub { color: var(--dim); font-size: 12px; }
 .stats { display: flex; gap: 10px; flex-wrap: wrap; color: var(--dim); font-size: 12px; }
 .stats b { color: var(--ink); font-size: 13px; }
+.stats .btn { padding: 2px 8px; font-size: 12px; }
 .tools { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 input[type="search"], select {
   padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;

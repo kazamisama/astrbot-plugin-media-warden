@@ -511,7 +511,7 @@ def test_reporter_format_batch_ok():
     ], duration_s=0.42)
     txt = format_batch(br)
     assert "✅" in txt and "/data/x/" in txt
-    assert "image×1" in txt and "video×1" in txt
+    assert "图片×1" in txt and "视频×1" in txt
     print("  OK")
     print(txt)
 
@@ -957,7 +957,7 @@ def test_plugin_e2e_group_message_image_saved():
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
         assert "✅" in text, text
-        assert "image×1" in text
+        assert "图片×1" in text
         # 文件实际落盘
         import glob
         files = []
@@ -1077,7 +1077,7 @@ def test_plugin_e2e_forward_saved_as_json_sidecar():
 
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
-        assert "forward×1" in text, text
+        assert "聊天记录×1" in text, text
         # v1.16.0: 关掉渲染后不再落扁平 JSON —— 结构化数据就在条目 record.json 里
         recs = _archived_records(td)
         assert len(recs) == 1 and recs[0]["node_count"] == 1, recs
@@ -1657,7 +1657,7 @@ def test_plugin_e2e_forward_expands_nested_two_levels():
 
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
-        assert "forward×1" in text, text
+        assert "聊天记录×1" in text, text
         assert calls == ["inner1", "inner2"], calls
 
         # v1.16.0: 结构化数据住在条目 record.json 里(不再落扁平 sidecar)
@@ -1727,7 +1727,7 @@ def test_plugin_e2e_forward_prefers_fetched_sender_names():
 
         first = asyncio.run(_drive())
         text = first.text if hasattr(first, "text") else str(first)
-        assert "forward×1" in text, text
+        assert "聊天记录×1" in text, text
         assert calls == ["outer-full"], calls
 
         recs = _archived_records(td)
@@ -4713,7 +4713,7 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 13, routes
+    assert len(routes) == 14, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/render"] == ("POST",), routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
@@ -4826,7 +4826,7 @@ def test_record_page_routes_and_handlers():
         sys.modules.pop("astrbot.api.web", None)
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK ->", "12 条路由 + stats/records/record/asset/thumb/groups/resend/delete/reveal/style*")
+    print("  OK ->", "14 条路由 + stats/records/record/asset/thumb/groups/resend/delete/reveal/style*/purge_legacy")
 
 
 def test_plugin_initialize_registers_page_api():
@@ -4839,14 +4839,14 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 13, seen
+    assert len(seen) == 14, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
     pl2 = _build_plugin_for_command(tmp2, enable_index=False, log_to_stdout=False)
     asyncio.run(pl2.initialize())
     assert pl2._page_api is None, "宿主没有 register_web_api 时应安静跳过"
-    print("  OK ->", "12 条路由 / 无宿主支持时跳过")
+    print("  OK ->", "14 条路由 / 无宿主支持时跳过")
 
 
 PHASE7 = [
@@ -4905,6 +4905,10 @@ def test_policy_media_kind_and_type_flags():
     assert policy.kind_allowed(MediaWardenConfig(save_texts=False), "text") is False
     assert policy.kind_allowed(MediaWardenConfig(save_texts=True), "text") is True
     assert policy.kind_allowed(MediaWardenConfig(save_forwards=False), "forward") is False
+    # v1.17.0: 语音以前不在开关表里 → 未知类型放行,六类全关也照存
+    assert policy.kind_allowed(MediaWardenConfig(), "voice") is False
+    assert policy.kind_allowed(MediaWardenConfig(save_voice=True), "voice") is True
+    assert policy.kind_allowed(MediaWardenConfig(), "hologram") is False
 
     assert MediaWardenConfig().doc_ext_allowed("PDF") is True
     assert MediaWardenConfig().doc_ext_allowed(".docx") is True
@@ -5003,12 +5007,15 @@ def test_plugin_e2e_text_message_saved_as_entry():
         else:
             assert has_png, os.listdir(rdir)
             assert entry["render"] == "render.png"
-        # 索引也能查到(改了样式还能找到原文)
+        # v1.17.0: 纯文本不再往**扁平**索引写行 —— 条目本来就在 _records/ 里,
+        # 页面按条目列它;写了会以「磁盘文件」出现在页面上,而 resolve_flat 拒读
+        # _records/,点不开也删不掉。这里断言索引保持 0 行。
         if inst._index is not None:
-            hit = inst._index.find_by_msg("mtext1")
-            assert hit and hit[0]["kind"] == "text", hit
-            inst._index.close()
-            inst._index = None
+            try:
+                assert inst._index.count() == 0, inst._index.stats()
+            finally:
+                inst._index.close()
+                inst._index = None
         print("  OK ->", text.replace(chr(10), " | ")[:70],
               "| render=" + ("on" if has_png else "off"))
 
@@ -5277,9 +5284,9 @@ def test_plugin_forward_auto_forward_to_target_groups():
         print("  OK -> 2 个目标群各发一次; 关掉开关后 0 次")
 
 
-def test_plugin_auto_forward_native_falls_back_to_rebuild():
+def test_plugin_auto_forward_cross_group_uses_rebuild():
     import asyncio
-    banner("plugin: 自动转发 native 失败 -> 回退重建")
+    banner("plugin: 自动转发即使配 native 也走重建(跨群原地必失败)")
     with tempfile.TemporaryDirectory() as td:
         inst = plugin_main.MediaWardenStar(
             plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
@@ -5312,9 +5319,10 @@ def test_plugin_auto_forward_native_falls_back_to_rebuild():
                           msg_id="1481691615", idx=0, ts=1718600000)
         comp = Component(kind="forward", meta={"nodes": nodes})
         asyncio.run(inst._save_forward(comp, ctx, None))
-        assert "forward_group_single_msg" in calls, calls
-        assert "send_group_forward_msg" in calls, calls
-        print("  OK -> 原地失败后仍以重建送达")
+        # v1.17.0: 目标是别的群,原地转发按原群找消息必失败 —— 不再白打
+        # get_msg + forward_group_single_msg,直接重建。
+        assert calls == ["send_group_forward_msg"], calls
+        print("  OK -> 跳过跨群原地转发,直接重建送达")
 
 
 def test_forwarder_apply_style_and_avatar_shape():
@@ -5793,29 +5801,29 @@ def test_record_admin_migrates_flat_forwards():
         index.close()
     print("  OK -> 迁移 1 条(2 节点/1 缺图/留底), 幂等, 坏文件保留")
 
-def test_plugin_promotes_auto_forward_default():
-    """v1.15.0 新默认 native:只有「没启用 + 无目标群 + 仍是旧默认」才跟着升级。"""
-    banner("plugin: auto_forward_mode 旧默认值跟着升级为 native")
+def test_plugin_demotes_auto_forward_default():
+    """v1.17.0 默认改回 rebuild:只有「没启用 + 无目标群 + 仍是旧默认 native」才改。"""
+    banner("plugin: auto_forward_mode 旧默认值跟回 rebuild")
     MediaWardenStar = main.MediaWardenStar
 
     class _C:
-        def __init__(self, enabled=False, mode="rebuild", targets=None):
+        def __init__(self, enabled=False, mode="native", targets=None):
             self.auto_forward_enabled = enabled
             self.auto_forward_mode = mode
             self.forward_target_groups = targets or []
 
     c = _C()
     assert MediaWardenStar._promote_auto_forward_default(c) is True
-    assert c.auto_forward_mode == "native", c.auto_forward_mode
-    # 已经启用了 / 有目标群 / 用户显式选了 native -> 都不改
+    assert c.auto_forward_mode == "rebuild", c.auto_forward_mode
+    # 已经启用了 / 有目标群 / 用户显式选了 rebuild -> 都不改
     c2 = _C(enabled=True)
     assert MediaWardenStar._promote_auto_forward_default(c2) is False
-    assert c2.auto_forward_mode == "rebuild", c2.auto_forward_mode
+    assert c2.auto_forward_mode == "native", c2.auto_forward_mode
     c3 = _C(targets=["256678737"])
     assert MediaWardenStar._promote_auto_forward_default(c3) is False
-    c4 = _C(mode="native")
+    c4 = _C(mode="rebuild")
     assert MediaWardenStar._promote_auto_forward_default(c4) is False
-    print("  OK -> 未启用的旧默认升级为 native;启用/有目标/已显式选择都不动")
+    print("  OK -> 未启用的旧默认改回 rebuild;启用/有目标/已显式选择都不动")
 
 def test_record_duplicate_dedupe_and_rerender():
     """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
@@ -6029,6 +6037,276 @@ def test_record_admin_reconcile_flat_renders():
     index.close()
     print("  OK -> 删 2 行 + 2 文件,收编 1 张,共享文件保留")
 
+
+# ---------------- PHASE 9 追加（v1.17.0 审计修复） ----------------
+
+def test_index_delete_shared_file_keeps_bytes():
+    banner("index: 删共享扁平文件只删一行,不动别人的字节 + resolve_flat 防绕过")
+    from warden.index import AssetIndex
+    tmp = tempfile.mkdtemp(prefix="wd_shared_")
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+    try:
+        path = os.path.join(tmp, "g1", "a.png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"PNG")
+        for i in range(3):
+            index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                         msg_id="m%d" % i, idx=0, kind="image", path=path,
+                         size=3, sha16="ab" * 8)
+        rows = index.list_assets(kinds=["image"])["items"]
+        assert len(rows) == 3 and index.count_path(path) == 3, rows
+        assert index.delete_row(rows[0]["id"]) == 1
+        assert index.count_path(path) == 2, "其余两条引用不该被带走"
+        assert os.path.isfile(path), "还有人引用时文件不能删"
+        # v1.17.0: normpath 之后判 _records 前缀, "./_records/..." 绕不过去
+        assert record_admin.resolve_flat(tmp, "./_records/x/render.png") is None
+        assert record_admin.resolve_flat(tmp, "g1/../_records/x") is None
+        assert record_admin.resolve_flat(tmp, "g1/a.png") == os.path.abspath(path)
+        assert record_admin.delete_flat(tmp, "g1/a.png", keep_file=True)["kept"] is True
+        assert os.path.isfile(path)
+        # 没有引用之后才由调用方删文件
+        assert index.delete_row(rows[1]["id"]) == 1
+        assert index.delete_row(rows[2]["id"]) == 1
+        assert index.count_path(path) == 0
+        assert record_admin.delete_flat(tmp, "g1/a.png")["deleted"] is True
+        assert not os.path.isfile(path)
+    finally:
+        index.close()
+    print("  OK -> 共享文件按行删,引用归零才删字节")
+
+
+def test_record_text_dedupe_is_per_sender():
+    import asyncio
+    banner("record: 纯文本去重按发送人收窄(不同人发同一句话各自成条)")
+    tmp = tempfile.mkdtemp(prefix="wd_textdup_")
+    segs = [{"type": "text", "data": {"text": "666"}}]
+
+    def cap(sender, mid, ts):
+        return asyncio.run(record_store.capture_text(
+            segs, platform="aiocqhttp", group_id="g1", msg_id=mid,
+            sender_id=sender, sender_name=sender, storage_root=tmp, ts=ts))
+
+    a = cap("u1", "m1", 1720000000)
+    b = cap("u2", "m2", 1720000060)
+    assert not b.get("reused"), "不同人发同一句话不能复用条目"
+    assert b["record_id"] != a["record_id"]
+    assert b["sender_id"] == "u2" and b["sender_name"] == "u2", b
+    assert b["captured_ts"] == 1720000060, b
+    assert len(record_store.list_records(tmp)) == 2
+    c = cap("u1", "m3", 1720000120)
+    assert c.get("reused") is True and c["record_id"] == a["record_id"], c
+    print("  OK -> alice/bob 各一条, alice 重复才复用")
+
+
+def test_plugin_text_receipt_has_preview():
+    import asyncio
+    banner("plugin: 纯文本回执带渲染图预览(以前只有一行文字)")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={"storage_root": td, "match_mode": "blacklist",
+                    "save_texts": True, "enable_index_db": True,
+                    "reply_preview": True})
+        asyncio.run(inst.initialize())
+        try:
+            if inst._forwarder is None:
+                print("  SKIP -> PIL unavailable")
+                return
+            ev = _fake_event(group_id="g1", user_id="u1", nickname="alice",
+                             message=[{"type": "text",
+                                       "data": {"text": "预览我"}}],
+                             message_str="预览我", message_id="mprev1",
+                             timestamp=1718600000)
+            out = _drive_command(inst, ev, inst.on_group_message)
+            assert len(out) == 2, out
+            assert "✅" in out[0].text, out[0].text
+            assert str(out[1].text).endswith("render.png"), out[1].text
+            assert os.path.isfile(out[1].text), out[1].text
+        finally:
+            if inst._index is not None:
+                inst._index.close()
+                inst._index = None
+    print("  OK -> 文字回执 + render.png 预览")
+
+
+def test_page_pagination_beyond_first_page():
+    import asyncio
+    from warden.index import AssetIndex
+    banner("record_page: 分页能翻到第 2000 条之后(以前 offset 无效)")
+    tmp = tempfile.mkdtemp(prefix="wd_paging_")
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+
+    class _Pl:
+        def __init__(self):
+            self._index = index
+
+        def _records_root(self):
+            return tmp
+
+    try:
+        os.makedirs(os.path.join(tmp, "g1"), exist_ok=True)
+        for i in range(2100):
+            p = os.path.join(tmp, "g1", "f%d.png" % i)
+            with open(p, "wb") as fh:
+                fh.write(b"x")
+            index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                         msg_id="m%d" % i, idx=0, kind="image", path=p, size=1)
+        api = record_page.RecordPageApi(_Pl())
+        saved = sys.modules.get("astrbot.api.web")
+        try:
+            _install_web_stub(query={"kind": "image", "limit": "50",
+                                     "offset": "2050"})
+            res = asyncio.run(api.list_records())
+            data = res["data"]
+            assert res["status"] == "ok" and data["total"] == 2100, data
+            assert len(data["items"]) == 50, len(data["items"])
+            _install_web_stub(query={"limit": "5", "offset": "1999"})
+            got = asyncio.run(api.list_records())["data"]["items"]
+            assert len(got) == 5, got
+        finally:
+            if saved is None:
+                sys.modules.pop("astrbot.api.web", None)
+            else:
+                sys.modules["astrbot.api.web"] = saved
+    finally:
+        index.close()
+    print("  OK -> offset 2050 取到 50 条, offset 1999 取到 5 条")
+
+
+def test_record_admin_purge_orphan_renders():
+    import asyncio
+    from warden.index import AssetIndex
+    banner("record_admin: 一键清理老的扁平转发渲染图(条目内的保留)")
+    tmp = tempfile.mkdtemp(prefix="wd_purge_")
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+
+    async def _noimg(_d):
+        return None
+
+    try:
+        nodes = [{"sender": {"user_id": 7, "nickname": "a"}, "time": 1,
+                  "message": [{"type": "text", "data": {"text": "x"}}]}]
+        rid = record_store.make_record_id("g1", "keep1", ts=1720000000)
+        asyncio.run(record_store.capture(
+            nodes, platform="aiocqhttp", group_id="g1", msg_id="keep1",
+            storage_root=tmp, fetch_image=_noimg, ts=1720000000, record_id=rid))
+        files = []
+        for i, mid in enumerate(("old1", "old2", "keep1")):
+            p = os.path.join(tmp, "g1", "20260101_00000%d.png" % i)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as fh:
+                fh.write(b"x" * (i + 1))
+            files.append(p)
+            index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                         msg_id=mid, idx=0, kind="forward_render", path=p,
+                         size=i + 1)
+        res = record_admin.purge_orphan_renders(tmp, index)
+        assert res["rows"] == 2 and res["files"] == 2, res
+        assert res["bytes"] == 3, res
+        assert index.count() == 1, index.count()
+        assert not os.path.isfile(files[0]) and not os.path.isfile(files[1])
+        assert os.path.isfile(files[2]), "带条目的 msg_id 不能被清理"
+    finally:
+        index.close()
+    print("  OK -> 删 2 行/2 文件, 条目对应的那张保留")
+
+
+def test_plugin_style_preview_cleans_temp():
+    import asyncio, glob
+    banner("record_page: 样式预览不残留临时目录")
+    tmp = tempfile.mkdtemp(prefix="wd_styletmp_")
+    inst = plugin_main.MediaWardenStar(
+        plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+        config={"storage_root": tmp, "match_mode": "blacklist",
+                "enable_index_db": False, "log_to_stdout": False})
+    asyncio.run(inst.initialize())
+    if inst._forwarder is None:
+        print("  SKIP -> PIL unavailable")
+        return
+    api = record_page.RecordPageApi(inst)
+    pattern = os.path.join(tempfile.gettempdir(), "wd_style_*")
+    before = set(glob.glob(pattern))
+    blob = asyncio.run(api._render_preview({}))
+    after = set(glob.glob(pattern))
+    assert blob[:8] == b"\x89PNG\r\n\x1a\n", blob[:8]
+    assert after == before, after - before
+    print("  OK -> 预览渲染后临时目录已清理")
+
+
+def test_record_admin_node_payloads_keep_time():
+    import asyncio
+    banner("record_admin: 重建转发的节点带原时间戳")
+    tmp = tempfile.mkdtemp(prefix="wd_ntime_")
+    nodes = [{"sender": {"user_id": 7, "nickname": "阿七"},
+              "time": 1718600123,
+              "message": [{"type": "text", "data": {"text": "hi"}}]}]
+
+    async def _noimg(_d):
+        return None
+
+    rid = record_store.make_record_id("g1", "m1", ts=1720000000)
+    asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="m1",
+        storage_root=tmp, fetch_image=_noimg, ts=1720000000, record_id=rid))
+    rec = record_store.load_record(tmp, rid)
+    payloads = record_admin.node_payloads(rec, record_store.record_dir(tmp, rid))
+    assert payloads and payloads[0]["data"]["time"] == 1718600123, payloads
+    print("  OK -> time 原样带回", payloads[0]["data"]["time"])
+
+
+def test_plugin_resend_cross_group_does_not_poison():
+    import asyncio
+    banner("record_page: 跨群转发失败不再把条目记成「原消息已失效」")
+    tmp = tempfile.mkdtemp(prefix="wd_resend_")
+    nodes = [{"sender": {"user_id": 7, "nickname": "a"}, "time": 1,
+              "message": [{"type": "text", "data": {"text": "x"}}]}]
+    rid = record_store.make_record_id("g1", "1481691615", ts=1720000000)
+
+    async def _noimg(_d):
+        return None
+
+    asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="1481691615",
+        storage_root=tmp, fetch_image=_noimg, ts=1720000000, record_id=rid))
+
+    class _Bot:
+        async def call_action(self, action, **kw):
+            if action == "get_msg":
+                return {"message": [{"type": "forward",
+                                     "data": {"id": "F"}}]}
+            raise RuntimeError("消息不存在")
+
+    class _Pl:
+        def _records_root(self):
+            return tmp
+
+    api = record_page.RecordPageApi(_Pl())
+    api._bot = lambda: _Bot()
+    saved = sys.modules.get("astrbot.api.web")
+    try:
+        _install_web_stub(body={"id": rid, "group_id": "other",
+                               "mode": "native", "fallback": False})
+        res = asyncio.run(api.resend())
+        assert res["status"] == "ok" and res["data"]["ok"] is False, res
+        rec = record_store.load_record(tmp, rid)
+        assert not rec.get("native_unavailable"), "跨群失败不能毒化条目"
+        _install_web_stub(body={"id": rid, "group_id": "g1",
+                               "mode": "native", "fallback": False})
+        asyncio.run(api.resend())
+        rec2 = record_store.load_record(tmp, rid)
+        assert rec2.get("native_unavailable"), "发回原群失败才是真失效"
+    finally:
+        if saved is None:
+            sys.modules.pop("astrbot.api.web", None)
+        else:
+            sys.modules["astrbot.api.web"] = saved
+    print("  OK -> 跨群失败不记失效, 原群失败才记")
+
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -6038,7 +6316,7 @@ PHASE9 = [
     test_plugin_forward_saved_as_single_entry,
     test_record_admin_categories_and_flat,
     test_plugin_forward_auto_forward_to_target_groups,
-    test_plugin_auto_forward_native_falls_back_to_rebuild,
+    test_plugin_auto_forward_cross_group_uses_rebuild,
     test_forwarder_apply_style_and_avatar_shape,
     test_plugin_style_update_and_page,
     test_config_reads_nested_schema_groups,
@@ -6048,10 +6326,23 @@ PHASE9 = [
     test_page_stats_and_kind_filter_use_real_counts,
     test_page_native_failure_marks_stale,
     test_record_admin_migrates_flat_forwards,
-    test_plugin_promotes_auto_forward_default,
+    test_plugin_demotes_auto_forward_default,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
     test_record_admin_reconcile_flat_renders,
+    # v1.17.0: 审计修复的回归 + 之前定义了却没注册的 4 个用例
+    test_index_delete_shared_file_keeps_bytes,
+    test_record_text_dedupe_is_per_sender,
+    test_plugin_text_receipt_has_preview,
+    test_page_pagination_beyond_first_page,
+    test_record_admin_purge_orphan_renders,
+    test_plugin_style_preview_cleans_temp,
+    test_record_admin_node_payloads_keep_time,
+    test_plugin_resend_cross_group_does_not_poison,
+    test_forwarder_emoji_mixed_layout,
+    test_recover_raw_url_overrides_local_jpeg,
+    test_recover_raw_no_http_keeps_local,
+    test_recover_pairs_refs_by_identity_not_position,
 ]
 
 

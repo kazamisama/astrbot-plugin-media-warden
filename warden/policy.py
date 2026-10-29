@@ -139,11 +139,14 @@ def media_kind(comp) -> str:
 
 
 def kind_allowed(cfg: "MediaWardenConfig", kind: str) -> bool:
-    """类型开关：'image'/'gif'/'video'/'file'/'text'/'forward' 各自是否保存。"""
+    """类型开关：'image'/'gif'/'video'/'file'/'voice'/'text'/'forward' 各自是否保存.
+
+    v1.17.0: 认不出的类型一律**不保存**。以前返回 True —— 于是语音（不在开关
+    表里）六个开关全关也会落盘；以后新增的类型也会默认被静默保存。默认拒绝
+    才是安全的：真漏了开关，用户看到的是「没存」而不是「关了还在存」。
+    """
     flags = cfg.save_type_flags()
-    if kind in flags:
-        return bool(flags[kind])
-    return True
+    return bool(flags.get(str(kind or ""), False))
 
 
 def evaluate(cfg: "MediaWardenConfig", event) -> MatchDecision:

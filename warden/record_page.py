@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import shutil
 import time
 from typing import Optional
 
@@ -82,6 +83,8 @@ class RecordPageApi:
                  "media-warden 渲染样式(保存)")
         register(f"{PAGE_PREFIX}/style_preview", self.style_preview, ["POST"],
                  "media-warden 渲染样式(实时预览)")
+        register(f"{PAGE_PREFIX}/purge_legacy", self.purge_legacy, ["POST"],
+                 "media-warden 清理老的扁平转发渲染图")
         return True
 
     # ---------------- 内部 ----------------
@@ -104,7 +107,10 @@ class RecordPageApi:
     # forward_render、把转发 JSON 记成 forward_json，页面把它们并到
     # 「图片 / 聊天记录」两类里，否则这两批文件在页面上永远点不到。
     _FLAT_KIND_MAP = {
-        "image": ["image", "forward_render"],
+        # v1.17.0: forward_render 不再并进「图片」—— 857 张没有条目的旧渲染图
+        # 以前被算作图片，既点不开也筛不掉；现在单列「旧渲染图」，可一键清理。
+        "image": ["image"],
+        "render": ["forward_render"],
         "gif": ["gif"],
         "video": ["video"],
         "file": ["file"],
@@ -129,7 +135,7 @@ class RecordPageApi:
         except Exception:
             return {"total": 0, "bytes": 0}
 
-    def _flat_rows(self, *, kinds=None, group=None, q="", limit=500) -> list:
+    def _flat_rows(self, *, kinds=None, group=None, q="", limit=None) -> list:
         """索引库里的扁平落盘资产（图片/动图/视频/文档）—— 没有索引时返回空。"""
         index = getattr(self.plugin, "_index", None)
         if index is None:
@@ -148,6 +154,10 @@ class RecordPageApi:
         # 六类各自的保存开关:页面空态要靠它说「这一类是关的」,而不是笼统说
         # 「发图会自动保存」(v1.14.0 起每一类都是可开关的)。
         data["save_types"] = self._save_type_flags()
+        # v1.17.0: 老的扁平转发渲染图单独计数（以前混在「图片」里，1.25 GB 看不见）
+        legacy = self._flat_summary(kinds=["forward_render"])
+        data["legacy_renders"] = int(legacy["total"])
+        data["legacy_bytes"] = int(legacy["bytes"])
         return {"status": "ok", "data": data}
 
     def _save_type_flags(self) -> dict:
@@ -170,7 +180,7 @@ class RecordPageApi:
         # 于是「聊天记录」只出最新窗口里那几条、「图片」永远显示 500。
         flat_kinds = self._flat_kinds(kind)
         have_flat = flat_kinds is None or bool(flat_kinds)
-        flat_rows = (self._flat_rows(kinds=flat_kinds, group=group, q=q, limit=2000)
+        flat_rows = (self._flat_rows(kinds=flat_kinds, group=group, q=q)
                      if have_flat else [])
         flat_total = (self._flat_summary(kinds=flat_kinds, group=group, q=q)["total"]
                       if have_flat else 0)
@@ -322,8 +332,12 @@ class RecordPageApi:
         else:
             res = await record_admin.native_forward(
                 bot, group_id, rec.get("root_msg_id") or "")
-            if not res.get("ok") and _native_gone(res.get("error")):
-                # 原消息过期是永久的：记住这条，页面下次不再把它当可点的主按钮
+            # v1.17.0: 只有「发回原群」失败才可能是原消息真的失效。跨群 native
+            # 也会回「消息不存在」（QQ 按原群找消息），以前同样被记成永久失效 ——
+            # 原消息明明还在，页面却再也不给「转发原消息」了。
+            same_group = str(group_id) == str(rec.get("group_id") or "")
+            if (not res.get("ok") and same_group
+                    and _native_gone(res.get("error"))):
                 try:
                     set_meta(self._root, rid, native_unavailable=int(time.time()))
                 except Exception as e:  # 标记失败不影响这次回退
@@ -333,6 +347,20 @@ class RecordPageApi:
                 if rb.get("ok"):
                     rb["note"] = f"转发原消息不可用（{res.get('error')}），已改用重建转发"
                     res = rb
+        return {"status": "ok", "data": res}
+
+    async def purge_legacy(self):
+        """删掉 v1.16 之前每次转发额外落下的扁平渲染图（它们没有对应条目）。
+
+        只删 kind=forward_render 的行与文件；带条目 msg_id 的行跳过。
+        """
+        index = getattr(self.plugin, "_index", None)
+        if index is None:
+            return {"status": "error", "message": "索引未启用", "data": {}}
+        try:
+            res = record_admin.purge_orphan_renders(self._root, index)
+        except Exception as e:
+            return {"status": "error", "message": f"清理失败: {e!r}", "data": {}}
         return {"status": "ok", "data": res}
 
     # ---------------- 样式页 ----------------
@@ -411,14 +439,19 @@ class RecordPageApi:
                  {"type": "face", "data": {"id": "14"}}]},
         ])
         # 合成一个头像,否则看不出「圆形/方形」的差别
+        # v1.17.0: 临时目录必须收拾。以前每次预览都 mkdtemp 且从不删除 ——
+        # 拖一次滑块一个目录,实测 %TEMP% 里积了 108 个 wd_style_*。
         tmp = tempfile.mkdtemp(prefix="wd_style_")
-        avatar = os.path.join(tmp, "avatar.png")
-        im = Image.new("RGBA", (72, 72), (47, 125, 225, 255))
-        ImageDraw.Draw(im).ellipse((10, 10, 62, 62), fill=(255, 255, 255, 255))
-        im.save(avatar)
-        for nd in nodes:
-            nd.avatar_path = avatar
-        return await fw.render(nodes)
+        try:
+            avatar = os.path.join(tmp, "avatar.png")
+            im = Image.new("RGBA", (72, 72), (47, 125, 225, 255))
+            ImageDraw.Draw(im).ellipse((10, 10, 62, 62), fill=(255, 255, 255, 255))
+            im.save(avatar)
+            for nd in nodes:
+                nd.avatar_path = avatar
+            return await fw.render(nodes)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     async def reveal(self):
         """在运行 AstrBot 的这台机器上打开文件所在目录。
@@ -461,15 +494,37 @@ class RecordPageApi:
         if not isinstance(body, dict):
             body = {}
         if str(body.get("source") or "") == "flat":
-            res = record_admin.delete_flat(self._root,
-                                           str(body.get("path") or ""))
+            # v1.17.0: 按行 id 删，文件只在「没有别的行还引用它」时才 unlink。
+            # 以前是 os.remove + forget_path(该路径的全部行) —— Storage 去重让
+            # 284 个路径被多行共享(最多 11 行)，删一张图会顺手删掉别人 10 条记录。
+            path = str(body.get("path") or "")
+            full = record_admin.resolve_flat(self._root, path)
+            if not full:
+                return {"status": "error", "message": "文件不存在或路径越界",
+                        "data": {}}
+            index = getattr(self.plugin, "_index", None)
+            asset_id = body.get("asset_id")
+            rows = 0
+            left = 0
+            if index is not None:
+                try:
+                    if asset_id not in (None, ""):
+                        rows = index.delete_row(int(asset_id))
+                    else:
+                        rows = index.forget_path(full)
+                    left = index.count_path(full)
+                except Exception as e:
+                    return {"status": "error",
+                            "message": f"清理索引失败: {e!r}", "data": {}}
+            if left > 0:
+                # 文件还有别的记录在用：只摘掉这一条，别动字节
+                return {"status": "ok", "data": {
+                    "deleted": True, "kept_file": True, "path": full,
+                    "rows": rows, "shared": left,
+                }, "message": f"已删除这条记录；文件仍被 {left} 条记录引用，未删除"}
+            res = record_admin.delete_flat(self._root, path)
             if res.get("deleted"):
-                index = getattr(self.plugin, "_index", None)
-                if index is not None:
-                    try:
-                        index.forget_path(res.get("path") or "")
-                    except Exception:
-                        pass
+                res["rows"] = rows
             return {"status": "ok" if res.get("deleted") else "error",
                     "message": res.get("reason", ""), "data": res}
         rid = str(body.get("id") or "")

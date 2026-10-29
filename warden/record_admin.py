@@ -19,10 +19,15 @@ from .record import (
 
 # v1.14.0 分类管理:一条「保存物」要么是条目(_records/ 下的聊天记录/纯文本),
 # 要么是老的扁平落盘文件(图片/动图/视频/文档,索引库里一行一条)。
-KINDS = ("image", "gif", "video", "file", "voice", "text", "forward")
+KINDS = ("image", "gif", "video", "file", "voice", "text", "forward",
+         "render")
 KIND_LABELS = {
     "image": "图片", "gif": "动图", "video": "视频", "file": "文档",
     "voice": "语音", "text": "纯文本", "forward": "聊天记录",
+    # v1.17.0: v1.16 之前每次转发还额外落一张扁平的 forward_image_*.png
+    # (索引 kind=forward_render)。它们与任何条目都不重叠，以前混在「图片」里，
+    # 现在单独一类，能看到也能一键清理。
+    "render": "旧渲染图",
 }
 
 
@@ -177,12 +182,13 @@ def flat_item(root: str, row: dict) -> Optional[dict]:
     if kind in ("forward_json", "forward"):
         kind = "forward"
     elif kind == "forward_render":
-        kind = "image"
+        kind = "render"
     elif kind == "image" and path.lower().endswith(".gif"):
         # 老索引把 GIF 也记成 image:列表里要显示「动图」,和 SQL 侧的扩展名切分一致
         kind = "gif"
     return {
         "source": "flat",
+        "asset_id": int(row.get("id") or 0),
         "kind": kind,
         "record_id": "",
         "captured_ts": int(row.get("ts") or 0),
@@ -331,6 +337,37 @@ def scan_records(root: str, *, q: str = "", group: str = "",
     total = len(items)
     page = items[max(0, int(offset)):max(0, int(offset)) + max(1, int(limit))]
     return {"total": total, "items": page, "root": base}
+
+
+def _iter_records(root: str):
+    """逐个读出 _records/ 下的条目（record.json 或 entry.json）。"""
+    base = records_root(root)
+    if not os.path.isdir(base):
+        return
+    for name in sorted(os.listdir(base)):
+        rec = load_record(root, name) or load_entry(root, name)
+        if rec:
+            yield name, rec
+
+
+def count_records_older_than(root: str, cutoff_ts: int) -> int:
+    """captured_ts 早于 cutoffs 的条目数（prune 回执先说清会删多少）。"""
+    return sum(1 for _, rec in _iter_records(root)
+               if int(rec.get("captured_ts") or 0) < int(cutoff_ts))
+
+
+def delete_records_older_than(root: str, cutoff_ts: int) -> int:
+    """删掉 captured_ts 早于 cutoff 的条目目录，返回删除条数。
+
+    只由 /warden prune --records 显式触发 —— 存档是原件，默认不碰。
+    """
+    n = 0
+    for name, rec in _iter_records(root):
+        if int(rec.get("captured_ts") or 0) >= int(cutoff_ts):
+            continue
+        if delete_record(root, name).get("deleted"):
+            n += 1
+    return n
 
 
 def stats(root: str) -> dict:
@@ -677,27 +714,80 @@ def entry_file(root: str, record_id: str, rel_path: str) -> Optional[str]:
 
 
 def resolve_flat(root: str, rel_path: str) -> Optional[str]:
-    """老的扁平落盘文件:只认 storage_root 之下的路径(不许从页面读任意文件)。"""
+    """老的扁平落盘文件:只认 storage_root 之下的路径(不许从页面读任意文件).
+
+    v1.17.0: 先 normpath 再判断前缀。以前直接 `rel.startswith("_records/")`，
+    传 "./_records/<rid>/render.png" 就绕过去了 —— 页面能读、也能删存档内部文件。
+    """
     base = os.path.abspath(root)
-    rel = str(rel_path or "").replace("\\", "/").lstrip("/")
-    if not rel or rel.startswith("_records/"):
+    rel = str(rel_path or "").replace("\\", "/").strip().lstrip("/")
+    if not rel:
         return None
-    full = os.path.abspath(os.path.join(base, rel.replace("/", os.sep)))
+    parts = [p for p in os.path.normpath(rel).replace("\\", "/").split("/")
+             if p not in ("", ".")]
+    if not parts or parts[0] == "_records" or ".." in parts:
+        return None
+    full = os.path.abspath(os.path.join(base, *parts))
     if not full.startswith(base + os.sep):
         return None
     return full if os.path.isfile(full) else None
 
 
-def delete_flat(root: str, rel_path: str) -> dict:
-    """删除一个扁平文件(老的落盘产物);索引行由调用方清理。"""
+def delete_flat(root: str, rel_path: str, *, keep_file: bool = False) -> dict:
+    """删除一个扁平文件(老的落盘产物);索引行由调用方清理。
+
+    v1.17.0: keep_file=True 只解析不删 —— 同一个文件可能被多行索引共享
+    （Storage 按内容去重），调用方要先按行删、确认没有别的行再删文件。
+    """
     full = resolve_flat(root, rel_path)
     if not full:
         return {"deleted": False, "reason": "文件不存在或路径越界"}
+    if keep_file:
+        return {"deleted": True, "path": full, "kept": True}
     try:
         os.remove(full)
     except OSError as e:
         return {"deleted": False, "reason": f"{type(e).__name__}: {e}"}
     return {"deleted": True, "path": full}
+
+
+def purge_orphan_renders(root: str, index) -> dict:
+    """清理老版本落下的**扁平**转发渲染图（索引 kind='forward_render'）。
+
+    v1.16 起渲染图只住在条目 `_records/<id>/render.png` 里；这批行是每次转发额外
+    存一份的旧产物，与任何条目的 msg_id 都不重叠（生产库实测 857 行 / 1.25 GB）。
+    按 path 归组：同文件被多行共享时只删一次文件；文件还有别的 kind 的行在用就
+    只删行。带条目的 msg_id 的行一律跳过 —— 那是真存档的一部分。
+    """
+    entry_msgs = {str(rec.get("root_msg_id") or "")
+                  for _, rec in _iter_records(root)}
+    entry_msgs.discard("")
+    rows = index.list_assets(limit=None, kinds=["forward_render"])["items"]
+    by_path: dict = {}
+    for r in rows:
+        if str(r.get("msg_id") or "") in entry_msgs:
+            continue
+        by_path.setdefault(str(r.get("path") or ""), []).append(r)
+    n_rows = n_files = n_bytes = 0
+    for path, group in by_path.items():
+        for r in group:
+            rid = r.get("id")
+            if not rid:
+                continue
+            try:
+                n_rows += int(index.delete_row(int(rid)) or 0)
+            except Exception:
+                continue
+        if not path or index.count_path(path):
+            continue
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+        except OSError:
+            continue
+        n_files += 1
+        n_bytes += size
+    return {"rows": n_rows, "files": n_files, "bytes": n_bytes}
 
 
 def delete_record(root: str, record_id: str) -> dict:
@@ -754,6 +844,9 @@ def node_payloads(rec: dict, base_dir: str) -> list:
         out.append({"type": "node", "data": {
             "user_id": str(node.get("uin") or "0"),
             "nickname": str(node.get("name") or ""),
+            # v1.17.0: 带上原时间戳。AstrBot 的 Node.to_dict 不发 time，经它发送
+            # 的合并转发会丢时间；这里直发 OneBot 结构，可以原样带回去。
+            "time": int(node.get("time") or 0),
             "content": content,
         }})
     return out

@@ -262,7 +262,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.16.0: 按群/按人 + 按类型(图片/动图/视频/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
+    "群聊素材守门人 v1.17.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除/旧渲染图清理) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -290,21 +290,21 @@ class MediaWardenStar(Star):
 
     @staticmethod
     def _promote_auto_forward_default(cfg) -> bool:
-        """v1.15.0 把默认值从 rebuild 改成 native:旧配置跟着升级。
+        """v1.17.0 把默认值从 native 改回 rebuild:旧配置跟着升级。
 
-        升级后 AstrBot 会把配置文件按新 schema 重写一遍,但**值仍在读** —— 存着
-        旧默认值 rebuild 的用户会一直用不明白为什么没按新默认为准。只在「功能没
-        启用、目标群为空、值就是旧默认」时静默改成 native:这三种条件下改了也不会
-        有任何行为变化;一旦用户真开过自动转发,那 rebuild 就是他自己的选择,不动。
+        自动转发的目标群按定义都是「别的群」，而原地转发(native)是 QQ 按**原群**
+        找消息的 —— 跨群实测必回「消息不存在」，每次都要白打一次请求再回退重建。
+        只在「功能没启用、目标群为空、值还是旧默认 native」时静默改回 rebuild:
+        这三种条件下改了没有任何行为变化；用户真开过自动转发就尊重他的选择。
         返回是否改了(调用方负责写回配置)。
         """
         if getattr(cfg, "auto_forward_enabled", False):
             return False
-        if getattr(cfg, "auto_forward_mode", "") != "rebuild":
+        if getattr(cfg, "auto_forward_mode", "") != "native":
             return False
         if getattr(cfg, "forward_target_groups", None):
             return False
-        cfg.auto_forward_mode = "native"
+        cfg.auto_forward_mode = "rebuild"
         return True
 
     async def initialize(self) -> None:
@@ -312,8 +312,8 @@ class MediaWardenStar(Star):
             # 静默升级默认值并写回配置:重启后不再反复提示
             self._persist_config({"auto_forward_mode": self.cfg.auto_forward_mode})
             self._log(
-                f"auto_forward_mode: rebuild -> {self.cfg.auto_forward_mode} "
-                f"(v1.15.0 新默认;想保留重建就把它改回 rebuild)")
+                f"auto_forward_mode: native -> {self.cfg.auto_forward_mode} "
+                f"(v1.17.0 新默认;跨群原地转发必失败,想保留就把它改回 native)")
         self._storage = Storage(
             root=self.cfg.storage_root,
             dedupe=self.cfg.dedupe,
@@ -854,16 +854,9 @@ class MediaWardenStar(Star):
         rel = render_name or record_store.ENTRY_FILENAME
         path = os.path.join(record_store.record_dir(root, rid), rel)
         size = len(png) if (png is not None and render_name) else 0
-        if self._index is not None:
-            try:
-                sha16 = hashlib.blake2b(png, digest_size=8).hexdigest() if png else None
-                self._index.record(
-                    platform=platform, group_id=group_id, sender_id=sender_id,
-                    msg_id=msg_id, idx=0, kind="text", path=path, size=size,
-                    sha16=sha16,
-                )
-            except Exception as e:
-                self._log(f"index record failed: {e!r}")
+        # v1.17.0: 不再往**扁平**索引里写 kind="text" 行。条目本来就在 _records/
+        # 里,页面按条目列它;写了扁平行反而会以「磁盘文件」出现,而 resolve_flat
+        # 拒读 _records/ —— 点不开、删不掉,去重复用时同一路径再加一行。
         if render_name is None:
             self._log(f"text saved without render: {rid}")
         return AssetResult(
@@ -968,16 +961,16 @@ class MediaWardenStar(Star):
         """
         if not media:
             return []
-        sem = asyncio.Semaphore(self.cfg.max_concurrent)
 
         async def _one(c):
-            async with sem:
-                try:
-                    return await self._download_one(c, event)
-                except DownloadError as e:
-                    return e
-                except Exception as e:
-                    return DownloadError(f"{type(e).__name__}: {e}")
+            # v1.17.0: 并发闸门移到 _download_one 里**只包网络尝试** —— 以前整个
+            # 回退链都在闸门内,「等 5s/20s 再查本地缓存」会把名额占满。
+            try:
+                return await self._download_one(c, event)
+            except DownloadError as e:
+                return e
+            except Exception as e:
+                return DownloadError(f"{type(e).__name__}: {e}")
 
         return await asyncio.gather(*(_one(c) for c in media))
 
@@ -1034,6 +1027,19 @@ class MediaWardenStar(Star):
             return data, path, misses
         return None, None, misses
 
+    def _download_sem(self) -> asyncio.Semaphore:
+        """下载并发闸门(v1.17.0): 只包住真正的网络尝试。
+
+        以前 Semaphore 包着整个 _download_one,包括「等 5s/20s 再查本地缓存」的
+        sleep —— n 张死链图最坏 ceil(n/max_concurrent)*25s 才出回执。等本地缓存
+        不占网络并发,不该挤占名额。
+        """
+        sem = getattr(self, "_dl_sem", None)
+        if sem is None:
+            sem = asyncio.Semaphore(max(1, int(self.cfg.max_concurrent)))
+            self._dl_sem = sem
+        return sem
+
     async def _download_one(self, comp: Component, event=None):
         """单个组件的下载回退链;全失败时抛首个(最对症的)下载错误。
 
@@ -1051,12 +1057,13 @@ class MediaWardenStar(Star):
         if misses:
             attempts.append("qcache: 本地无副本 " + ", ".join(misses[:2]))
         try:
-            dl = await download(
-                comp, fetcher=astrbot_component_fetcher,
-                retries=self.cfg.download_retries,
-                max_bytes=self.cfg.max_file_size_bytes,
-                timeout_s=self.cfg.download_timeout_s,
-            )
+            async with self._download_sem():
+                dl = await download(
+                    comp, fetcher=astrbot_component_fetcher,
+                    retries=self.cfg.download_retries,
+                    max_bytes=self.cfg.max_file_size_bytes,
+                    timeout_s=self.cfg.download_timeout_s,
+                )
         except DownloadError as primary:
             attempts.append(f"orig: {primary}")
             note = getattr(primary, "fallback_error", None)
@@ -1065,7 +1072,8 @@ class MediaWardenStar(Star):
             dl = None
             # 第二级: 向 bot 重取(get_image / get_msg) —— rkey 过期唯一能救回来的路
             if self.cfg.get_media_fallback and event is not None:
-                dl, trace = await self._refetch_media(comp, event)
+                async with self._download_sem():
+                    dl, trace = await self._refetch_media(comp, event)
                 if dl is None:
                     attempts.append(f"refetch: {trace[-1] if trace else 'no usable ref'}")
             # 第三级: 组件本地副本(napcat 的 temp 缓存 / raw 转换) —— 与 event 无关,总是试
@@ -1276,8 +1284,10 @@ class MediaWardenStar(Star):
                             ctx: SaveContext) -> list[str]:
         """把刚存的聊天记录转发到配置的目标群（v1.14.0 可选功能）.
 
-        native 模式先试原地转发（保气泡），失败自动回退重建 —— 跨群原地
-        并非 QQ 永远允许，回退不算错误，只记日志。
+        **自动转发恒用重建**（v1.17.0）：目标群按定义就不是原群，而 QQ 的原地
+        转发是按原群找消息的 —— 跨群实测必回「消息不存在」。以前 native 默认会让
+        每个目标群白打一次 get_msg + forward_group_single_msg 再回退，日志里全是
+        假失败。配置里的 native 仍然受理（用户可能手动指定过），只记一条说明。
         """
         if not self.cfg.auto_forward_enabled:
             return []
@@ -1291,18 +1301,11 @@ class MediaWardenStar(Star):
             return []
         from .warden import record_admin
         base = record_store.record_dir(self.cfg.storage_root, rid)
+        if str(self.cfg.auto_forward_mode or "").lower() == "native":
+            self._log("auto forward: 目标是别的群,原地转发不可用 → 改用重建")
         done: list[str] = []
         for gid in targets:
-            res = None
-            if self.cfg.auto_forward_mode == "native":
-                res = await record_admin.native_forward(
-                    bot, gid, rec.get("root_msg_id") or "")
-                if not res.get("ok"):
-                    self._log(f"auto forward native failed for {gid}: "
-                              f"{res.get('error')} — fallback rebuild")
-                    res = None
-            if res is None:
-                res = await record_admin.rebuild_forward(bot, gid, rec, base)
+            res = await record_admin.rebuild_forward(bot, gid, rec, base)
             if res.get("ok"):
                 done.append(f"{gid}({res.get('mode')})")
             else:
@@ -1913,19 +1916,19 @@ class MediaWardenStar(Star):
     def _build_previews(self, event: AstrMessageEvent, batch: BatchResult):
         if not self.cfg.reply_preview:
             return
+        # 预览候选:渲染图 > 纯文本(它的正常形式就是一张渲染图) > 图片。
+        # v1.17.0 补上 text —— 以前只挑 forward_render/image,纯文本回执永远不出图。
         candidate = None
-        for x in batch.items:
-            if x.ok and x.kind == "forward_render" and x.path:
-                candidate = x
-                break
-        if candidate is None:
+        for want in ("forward_render", "text", "image"):
             for x in batch.items:
-                if x.ok and x.kind == "image" and x.path:
+                if x.ok and x.kind == want and (x.preview_path or x.path):
                     candidate = x
                     break
+            if candidate is not None:
+                break
         if candidate is None:
             return
-        path = candidate.path
+        path = candidate.preview_path or candidate.path
         if not os.path.exists(path):
             return
         img_fn = getattr(event, "image_result", None)
@@ -1984,15 +1987,23 @@ class MediaWardenStar(Star):
             yield event.plain_result("[Warden] 索引未启用")
             return
         s = self._index.stats()
-        yield event.plain_result(
-            "## warden 统计\n"
-            f"  assets: {s.get('total', 0)}\n"
-            f"  by_kind: {s.get('by_kind', {})}\n"
-            f"  total_bytes: {s.get('total_bytes', 0)}\n"
-            f"  failures: {s.get('failures', 0)}\n"
-            f"  failures_by_kind: {s.get('failures_by_kind', {})}\n"
-            f"  db: {s.get('db_path', '?')}"
-        )
+        # v1.17.0: 存档(_records/)以前完全不进统计 —— 59 条条目 9 MB 看不见，
+        # 且 total_bytes 是 SUM(size)，共享文件会被重复计(4.90 GB vs 磁盘 4.56 GB)。
+        from .warden import record_admin as _radmin
+        arc = _radmin.stats(self._records_root())
+        lines = [
+            "## warden 统计",
+            f"  assets: {s.get('total', 0)} 行",
+            f"  by_kind: {s.get('by_kind', {})}",
+            f"  索引字节: {s.get('total_bytes', 0)}"
+            f"（去重后 {s.get('unique_bytes', s.get('total_bytes', 0))}）",
+            f"  存档条目: {arc.get('records', 0)} 条聊天记录 + {arc.get('texts', 0)} 条纯文本",
+            f"  存档占用: {arc.get('bytes', 0)} B",
+            f"  failures: {s.get('failures', 0)}",
+            f"  failures_by_kind: {s.get('failures_by_kind', {})}",
+            f"  db: {s.get('db_path', '?')}",
+        ]
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("warden fail")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2096,14 +2107,21 @@ class MediaWardenStar(Star):
     @filter.command("warden prune")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_prune(self, event: AstrMessageEvent, arg: str = ""):
-        """用法: /warden prune <days>   删除索引里 N 天前的记录(不删文件)"""
+        """用法: /warden prune <days> [--records]
+
+        默认只删索引行(不删文件)；加 --records 才会连 _records/ 里的条目目录
+        一起删 —— 存档是原件，不能跟着默认清理被带走。
+        """
+        tokens = [t for t in (arg or "").split() if t]
+        with_records = any(t in ("--records", "records", "-r") for t in tokens)
+        nums = [t for t in tokens if not t.startswith("-") and t != "records"]
         if self._index is None:
             yield event.plain_result("[Warden] 索引未启用")
             return
         try:
-            days = int(arg.strip())
+            days = int(nums[0]) if nums else 0
         except ValueError:
-            yield event.plain_result("usage: /warden prune <days>")
+            yield event.plain_result("usage: /warden prune <days> [--records]")
             return
         if days <= 0:
             yield event.plain_result("[Warden] days 必须 > 0")
@@ -2111,9 +2129,18 @@ class MediaWardenStar(Star):
         cutoff = int(time.time()) - days * 86400
         try:
             n = self._index.prune_older_than(cutoff)
+            from .warden import record_admin as _radmin
+            root = self._records_root()
+            old = _radmin.count_records_older_than(root, cutoff)
+            extra = ""
+            if with_records:
+                gone = _radmin.delete_records_older_than(root, cutoff)
+                extra = f"，并删除 {gone} 条存档条目（目录一起删）"
+            elif old:
+                extra = f"；另有 {old} 条存档条目未动（加 --records 才删）"
             yield event.plain_result(
                 f"[Warden] 已删除 {n['assets']} 条索引记录"
-                f"（另有 {n['failures']} 条失败记录）(> {days} 天前)"
+                f"（另有 {n['failures']} 条失败记录）(> {days} 天前){extra}"
             )
         except Exception as e:
             yield event.plain_result(f"[Warden] prune 失败: {e!r}")
@@ -2389,6 +2416,24 @@ class MediaWardenStar(Star):
                 yield event.plain_result(why)
                 return
             fallback_note = why
+        # v1.17.0: 重建优先走 OneBot 动作(与页面「重建转发」同一实现) —— AstrBot
+        # 的 Node.to_dict 不发 time,经 Nodes 组件发出会丢原时间戳；直接
+        # send_group_forward_msg 能带上 time,两条重建路径的元数据才一致。
+        group_target = str(event_group_id(event) or rec.get("group_id") or "")
+        bot = getattr(event, "bot", None)
+        if bot is not None and group_target:
+            from .warden import record_admin as _radmin
+            res = await _radmin.rebuild_forward(
+                bot, group_target, rec, record_store.record_dir(root, arg))
+            if res.get("ok"):
+                self._log(f"resend record {arg}: rebuild -> {group_target}")
+                mid = res.get("new_message_id")
+                yield event.plain_result(
+                    f"[Warden] 已重建转发 {res.get('node_count', 0)} 个节点"
+                    f" → 群 {group_target}" + (f"（消息 {mid}）" if mid else ""))
+                return
+            yield event.plain_result(f"[Warden] 重建转发失败: {res.get('error')}")
+            return
         try:
             from astrbot.api.message_components import Nodes
         except ImportError:

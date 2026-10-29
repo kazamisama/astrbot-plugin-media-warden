@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
@@ -31,6 +31,9 @@ class MediaWardenConfig:
     save_videos: bool = True
     save_files: bool = True
     save_forwards: bool = True
+    # v1.17.0: 语音以前不在开关表里，而 kind_allowed() 对未知类型一律放行 ——
+    # 六个开关全关，语音照样落盘。补上开关，默认关（用户从未配置过这一类）。
+    save_voice: bool = False
     # 纯文本是 v1.14.0 新增能力（以前纯文本根本不进保存流程），默认关
     save_texts: bool = False
     # 文档类扩展名白名单（不含点，大小写不敏感）；空列表 = 不限制
@@ -40,11 +43,12 @@ class MediaWardenConfig:
     ])
     # ---- v1.14.0 聊天记录自动转发（可选，默认关） ----
     auto_forward_enabled: bool = False
-    # native  = 转发原消息（保气泡/挂件，但只对**原群**可靠；跨群基本必失败并
-    #           自动回退 rebuild，所以每个跨群目标会白试一次 —— 2026-10-28 实测）
+    # native  = 转发原消息（保气泡/挂件，但只对**原群**可靠）。
     # rebuild = 用存档重拼合并转发（无装扮，永远可用）
-    # v1.15.0: 默认从 rebuild 改成 native（用户要求优先保装扮，失败自动回退）
-    auto_forward_mode: str = "native"
+    # v1.15.0 曾把默认改成 native；v1.17.0 改回 rebuild —— 自动转发的目标群按定义
+    # 就是「别的群」，而 QQ 的原地转发是按原群找消息的（2026-10-28 实测跨群必回
+    # 「消息不存在」），native 在自动转发里永远只是白打一次请求再回退。
+    auto_forward_mode: str = "rebuild"
     forward_target_groups: List[str] = field(default_factory=list)
     # ---- v1.14.0 Pillow 渲染样式（样式页可改） ----
     style_width: int = 720
@@ -203,6 +207,7 @@ class MediaWardenConfig:
             "file": bool(self.save_files),
             "text": bool(self.save_texts),
             "forward": bool(self.save_forwards),
+            "voice": bool(self.save_voice),
         }
 
     def forward_targets_set(self) -> list:

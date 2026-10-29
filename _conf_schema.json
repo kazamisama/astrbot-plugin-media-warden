@@ -31,7 +31,7 @@
   "save_types": {
     "description": "② 保存哪些类型",
     "type": "object",
-    "hint": "六类各自开关，在下载之前就按类型丢弃（不开的类型不会产生下载与失败记录）。没有「默认自动保存」的类型。",
+    "hint": "七类各自开关，在下载之前就按类型丢弃（不开的类型不会产生下载与失败记录）。没有「默认自动保存」的类型。",
     "items": {
       "save_images": {
         "type": "bool",
@@ -56,6 +56,12 @@
         "default": true,
         "description": "文档（群文件）",
         "hint": "扩展名受下一项白名单约束。"
+      },
+      "save_voice": {
+        "type": "bool",
+        "default": false,
+        "description": "语音",
+        "hint": "语音 / 录音消息。v1.17.0 才补上开关：以前它不在开关表里，六个开关全关也会照存。默认关。"
       },
       "doc_ext_whitelist": {
         "type": "list",

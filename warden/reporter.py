@@ -12,6 +12,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 
+# 回执是给用户看的：内部类型名(forward_render / text / forward…)必须翻成人话，
+# 不然用户会看到「类型: forward_render×1」这种只有代码认识的东西(v1.17.0)。
+_KIND_LABELS = {
+    "image": "图片", "gif": "动图", "video": "视频", "file": "文档",
+    "voice": "语音", "text": "纯文本", "forward": "聊天记录",
+    "forward_render": "聊天记录渲染图", "forward_json": "聊天记录",
+}
+
+
 @dataclass
 class AssetResult:
     kind: str
@@ -190,7 +199,8 @@ def format_batch(res: BatchResult) -> str:
 
     from collections import Counter
     kinds = Counter(x.kind for x in res.items)
-    kind_summary = ", ".join(f"{k}×{v}" for k, v in sorted(kinds.items()))
+    kind_summary = ", ".join(
+        f"{_KIND_LABELS.get(k, k)}×{v}" for k, v in sorted(kinds.items()))
     lines.append(f"  类型: {kind_summary}")
 
     root = res.storage_root
@@ -204,7 +214,8 @@ def format_batch(res: BatchResult) -> str:
             sz = f" {x.size}B" if x.size else ""
             tag = " （已保存过·复用原位置）" if x.reused else ""
             note = f"  [{x.note}]" if x.note else ""
-            lines.append(f"    - {x.kind}: {x.path}{sz}{tag}{note}")
+            label = _KIND_LABELS.get(x.kind, x.kind)
+            lines.append(f"    - {label}: {x.path}{sz}{tag}{note}")
         if len(ok_items) > 10:
             lines.append(f"    ... (+{len(ok_items) - 10} more)")
 
@@ -213,7 +224,8 @@ def format_batch(res: BatchResult) -> str:
         lines.append(f"  失败 ({len(fail_items)}):")
         for x in fail_items[:10]:
             note = f"  [{x.note}]" if x.note else ""
-            lines.append(f"    - {x.kind}: {x.err}{note}")
+            label = _KIND_LABELS.get(x.kind, x.kind)
+            lines.append(f"    - {label}: {x.err}{note}")
         if len(fail_items) > 10:
             lines.append(f"    ... (+{len(fail_items) - 10} more)")
 

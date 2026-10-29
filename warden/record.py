@@ -264,7 +264,9 @@ async def capture(
 
 
 def find_duplicate(storage_root: str, origin_sha256: str, *,
-                   exclude: str = "", group_id: Optional[str] = None) -> str:
+                   exclude: str = "", group_id: Optional[str] = None,
+                   kind: Optional[str] = None,
+                   sender_id: Optional[str] = None) -> str:
     """同群同内容条目先来的那条 id（没有则空串）。
 
     扁平文件有 Storage 的 blake2b 去重、索引也有 sha 行；`_records/` 这一层以前
@@ -272,6 +274,11 @@ def find_duplicate(storage_root: str, origin_sha256: str, *,
     字节。现在 capture()/capture_text() 在这里**直接复用**已有目录（不再建新
     目录、也不再下图），并把原来的 record_id 记进 `duplicate_of_requested`。
     只在**同一个群**内比对：同一内容出现在别的群各存一份是对的（每群语境不同）。
+
+    v1.17.0: 纯文本还要按 kind + sender_id 收窄 —— 正文相同不代表是同一条记录。
+    「alice 发 666、bob 也发 666」以前会被当成重复，第二条直接复用 alice 的条目
+    （发送者/时间全是错的，渲染图还写进 alice 的目录）。聊天记录(forward)仍然
+    只按内容+群比对：同一份转发被转两次，内容与发送者集合确实相同。
     """
     if not origin_sha256:
         return ""
@@ -296,6 +303,12 @@ def find_duplicate(storage_root: str, origin_sha256: str, *,
             # 只比同一个群:同一份内容在不同群各存一份是对的(每群的存档语境不同),
             # 跨群合并会让后一个群的记录指向别的群。
             if group_id is not None and str(other.get("group_id") or "") != str(group_id):
+                continue
+            # 纯文本:正文相同但发送者不同 → 不是同一条记录,不能复用目录
+            if kind is not None and str(other.get("kind") or "") != str(kind):
+                continue
+            if (sender_id is not None
+                    and str(other.get("sender_id") or "") != str(sender_id)):
                 continue
             return str(other.get("record_id") or name)
     return ""
@@ -388,7 +401,8 @@ async def capture_text(
         cleaned.append({"type": kind, "data": dict(data)})
 
     origin = _canonical_sha256(cleaned)
-    dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id)
+    dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id,
+                         kind="text", sender_id=str(sender_id or ""))
     if dup:
         existing = load_entry(storage_root, dup)
         if existing:
@@ -418,7 +432,8 @@ async def capture_text(
         "origin_sha256": origin,
     }
     entry["duplicate_of"] = find_duplicate(
-        storage_root, origin, exclude=rid, group_id=group_id)
+        storage_root, origin, exclude=rid, group_id=group_id,
+        kind="text", sender_id=str(sender_id or ""))
     with open(_entry_path(storage_root, rid), "w", encoding="utf-8") as fh:
         json.dump(entry, fh, ensure_ascii=False, indent=2)
     return entry
