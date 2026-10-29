@@ -4614,7 +4614,14 @@ def test_record_admin_scan_stats_detail():
     st = record_admin.stats(tmp)
     assert st["records"] == 2 and st["nodes"] == 2, st
     assert st["assets"] == 1 and st["missing"] == 0, st
-    assert st["bytes"] == len(png), st
+    # v1.17.0: 占用包含资产 + 渲染图 + 结构化 json(record.json 等),不再只数 assets
+    assert st["bytes"] > len(png), st
+    expect = 0
+    for name in os.listdir(record_store.records_root(tmp)):
+        rec = record_store.load_record(tmp, name)
+        if rec:
+            expect += record_admin._entry_bytes(tmp, name, rec)
+    assert st["bytes"] == expect, (st["bytes"], expect)
     assert st["groups"] == {"g111": 1, "g222": 1}, st
 
     d = record_admin.record_detail(tmp, rid1)

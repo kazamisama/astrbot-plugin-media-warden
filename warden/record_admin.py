@@ -13,8 +13,9 @@ from typing import Any, Optional
 
 from . import record as record_store
 from .record import (
-    LEGACY_FILENAME, RENDER_FILENAME, load_entry, load_record, meta_filename,
-    record_dir, records_root, save_render, uin_reliable,
+    ENTRY_FILENAME, LEGACY_FILENAME, RECORD_FILENAME, RENDER_FILENAME,
+    load_entry, load_record, meta_filename, record_dir, records_root,
+    save_render, uin_reliable,
 )
 
 # v1.14.0 分类管理:一条「保存物」要么是条目(_records/ 下的聊天记录/纯文本),
@@ -112,9 +113,14 @@ def _forward_preview(rec: dict) -> str:
 
 
 def _entry_bytes(root: str, name: str, rec: dict) -> int:
-    """条目占用的总字节:资产 + render.png + 结构化 json。"""
+    """条目占用的总字节:资产 + 渲染图 + 结构化 json(+ 老存档留底)。
+
+    v1.17.0: 以前只算 assets 与 render.png，record.json / entry.json /
+    legacy_forward.json 全没算 —— 页面「存档占用」2.5 MB，磁盘实际 9 MB。
+    """
     render = rec.get("render") if isinstance(rec.get("render"), str) else None
-    files = [render or RENDER_FILENAME]
+    files = [render, RENDER_FILENAME, RECORD_FILENAME, ENTRY_FILENAME,
+             LEGACY_FILENAME]
     return _asset_bytes(rec) + _dir_file_bytes(root, name, files)
 
 
@@ -387,18 +393,15 @@ def stats(root: str) -> dict:
                 gid = str(entry.get("group_id") or "")
                 if gid:
                     out["groups"][gid] = out["groups"].get(gid, 0) + 1
-                out["bytes"] += _dir_file_bytes(root, name, ("entry.json",
-                                                                RENDER_FILENAME))
+                out["bytes"] += _entry_bytes(root, name, entry)
             continue
         out["records"] += 1
         out["kinds"]["forward"] = out["kinds"].get("forward", 0) + 1
         out["nodes"] += int(rec.get("node_count") or 0)
         out["assets"] += len(rec.get("assets") or [])
         out["missing"] += len(rec.get("missing") or [])
-        out["bytes"] += _asset_bytes(rec)
-        # 渲染图也算占用了：以前只数 assets 里的图片字节，页面上「占用 485 KB」
-        # 和磁盘上的实际体积差一个量级。
-        out["bytes"] += _dir_file_bytes(root, name, (str(rec.get("render") or ""),))
+        # 资产 + 渲染图 + 结构化 json 都算占用（见 _entry_bytes）
+        out["bytes"] += _entry_bytes(root, name, rec)
         gid = str(rec.get("group_id") or "")
         if gid:
             out["groups"][gid] = out["groups"].get(gid, 0) + 1
