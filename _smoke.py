@@ -1116,6 +1116,8 @@ def test_plugin_skip_text_only():
         files = []
         for root, _, fs in os.walk(td):
             for f in fs:
+                if f == ".schema_version":   # v1.18.0 归一化闸门文件,不算素材
+                    continue
                 files.append(os.path.join(root, f))
         assert not files
         if inst._index is not None:
@@ -3836,10 +3838,11 @@ def test_conf_schema_covers_all_config_fields():
     # 画布宽度只有一个旋钮(旧的 forward_image_width 已删,它总被 style_width 覆盖)
     assert "forward_image_width" not in fields, "重复的宽度旋钮应已删除"
     assert cfg.auto_forward_mode == "native", cfg.auto_forward_mode
-    # v1.16.0: 三态 forward_render_mode -> 布尔 forward_render_image(json 映射为关)
+    # v1.16.0: 三态 forward_render_mode -> 布尔 forward_render_image;
+    # v1.18.0 去补丁化:旧键不再派生,给了也当未知键忽略
     assert cfg.forward_render_image is True, cfg.forward_render_image
-    _legacy_json, _e = MediaWardenConfig.from_raw_lenient({"forward_render_mode": "json"})
-    assert _legacy_json.forward_render_image is False and not _e, (_legacy_json, _e)
+    _stale, _e = MediaWardenConfig.from_raw_lenient({"forward_render_mode": "json"})
+    assert _stale.forward_render_image is True and not _e, (_stale, _e)
     assert cfg.style_width == 720
     print(f"  OK -> {len(expected)} 个可配字段全覆盖,{len(schema)} 个分组")
 
@@ -3991,18 +3994,14 @@ def test_plugin_forward_without_nodes_reports_failure():
     print(f"  OK -> {results[0].err[:40]}... 且已入库")
 
 
-def test_plugin_warns_on_unimplemented_render_engine():
-    banner("plugin: forward_image_engine=playwright 明确告警并继续用 PIL")
-    import asyncio
-    tmp = tempfile.mkdtemp(prefix="warden_engine_")
-    pl = _build_plugin_for_command(tmp, enable_index=False, log_to_stdout=True)
-    pl.cfg.forward_image_engine = "playwright"
-    logs = []
-    pl._log = lambda m: logs.append(m)
-    asyncio.run(pl.initialize())
-    assert any("forward_image_engine" in m and "PIL" in m for m in logs), logs
-    assert pl._forwarder is not None, "非 pil 引擎不应导致 forwarder 缺失"
-    print("  OK ->", [m for m in logs if "engine" in m][0])
+def test_config_rejects_unimplemented_render_engine():
+    banner("config: forward_image_engine 只接受 pil（旧值报错并回落默认）")
+    cfg, errs = MediaWardenConfig.from_raw_lenient({"forward_image_engine": "playwright"})
+    assert errs and "forward_image_engine" in errs[0], errs
+    assert cfg.forward_image_engine == "pil", cfg.forward_image_engine
+    ok, e2 = MediaWardenConfig.from_raw_lenient({"forward_image_engine": "pil"})
+    assert e2 == [] and ok.forward_image_engine == "pil", (ok.forward_image_engine, e2)
+    print("  OK -> 旧值报错并回落 pil:", errs[0][:70])
 
 
 def test_plugin_reply_to_original_quotes_message():
@@ -4189,7 +4188,7 @@ PHASE5 = [
     test_avatar_fetch_many_isolates_failures,
     test_index_migrates_legacy_schema,
     test_plugin_forward_without_nodes_reports_failure,
-    test_plugin_warns_on_unimplemented_render_engine,
+    test_config_rejects_unimplemented_render_engine,
     test_plugin_reply_to_original_quotes_message,
     test_main_index_reuse_is_scoped_to_platform_and_group,
 ]
@@ -4720,7 +4719,7 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 14, routes
+    assert len(routes) == 13, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/render"] == ("POST",), routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
@@ -4833,7 +4832,7 @@ def test_record_page_routes_and_handlers():
         sys.modules.pop("astrbot.api.web", None)
         if saved is not None:
             sys.modules["astrbot.api.web"] = saved
-    print("  OK ->", "14 条路由 + stats/records/record/asset/thumb/groups/resend/delete/reveal/style*/purge_legacy")
+    print("  OK ->", "13 条路由 + stats/records/record/asset/thumb/groups/resend/render/delete/reveal/style*")
 
 
 def test_plugin_initialize_registers_page_api():
@@ -4846,7 +4845,7 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 14, seen
+    assert len(seen) == 13, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
@@ -5678,13 +5677,14 @@ def test_page_stats_and_kind_filter_use_real_counts():
 
     # 700 张图（时间较新）+ 60 个转发 JSON（时间最老）: 老实现先取最新 500 行
     # 再在 Python 里筛类型，于是「聊天记录」一条都出不来、「图片」永远 500。
+    # v1.18.0 起 kind 由写入方定死（不再按扩展名/文件名猜），这里直接写规范值。
     for i in range(700):
         _mk("i%04d.png" % i, "image", 4, 1720000000 + i)
     for i in range(60):
-        _mk("f%04d_forward_json.json" % i, "forward_json", 8, 1719000000 + i)
-    # 老索引把 GIF 也记成 kind=image:它们要出现在「动图」里,且不能同时算进「图片」
+        _mk("f%04d_forward_json.json" % i, "forward", 8, 1719000000 + i)
+    # GIF 行必须是 kind=gif(升级时 upgrade.normalize 会把老 image+.gif 改过来)
     for i in range(3):
-        _mk("g%02d.gif" % i, "image", 4, 1719800000 + i)
+        _mk("g%02d.gif" % i, "gif", 4, 1719800000 + i)
 
     class _Cfg:
         def save_type_flags(self):
@@ -5795,96 +5795,7 @@ def test_page_native_failure_marks_stale():
             sys.modules["astrbot.api.web"] = saved
     print("  OK -> 失效记 stale(can_native 变 False) / 超时不记")
 
-def test_record_admin_migrates_flat_forwards():
-    """v1.12 之前的扁平 *_forward_json_*.json 迁成条目：能浏览、缺图有痕、留底。"""
-    import asyncio
-    import json
-    from warden.index import AssetIndex
-    banner("record_admin: 老的扁平聊天记录 JSON 迁成条目")
-    tmp = tempfile.mkdtemp(prefix="warden_mig_")
-    logdir = os.path.join(tmp, "961583271", "2510536451")
-    os.makedirs(logdir, exist_ok=True)
-    payload = {"forward": True, "node_count": 2, "nodes": [
-        {"user_id": 1094950020, "time": 1759915385,
-         "sender": {"user_id": 1094950020, "nickname": "武靴箭羽", "card": ""},
-         "message": [{"type": "text", "data": {"text": "老存档第一句"}},
-                     {"type": "image", "data": {"url": "https://expired.example/a.jpg"}}]},
-        {"user_id": 7, "time": 1759915400,
-         "sender": {"user_id": 7, "nickname": "阿七"},
-         "message": [{"type": "text", "data": {"text": "第二句"}}]}]}
-    path = os.path.join(logdir, "20260622_154108_forward_json_3590c155.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False)
-    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
-    index.open()
-    try:
-        index.record(platform="aiocqhttp", group_id="961583271",
-                     sender_id="2510536451", msg_id="1586152977", idx=0,
-                     kind="forward", path=path,
-                     size=os.path.getsize(path), sha16="c" * 16)
-        out = asyncio.run(record_admin.migrate_flat_forwards(tmp, index))
-        assert out == {"converted": 1, "reused": 0, "skipped": 0, "failed": 0}, out
-        recs = record_store.list_records(tmp)
-        assert len(recs) == 1 and recs[0]["kind"] == "forward", recs
-        rid = recs[0]["record_id"]
-        rec = record_store.load_record(tmp, rid)
-        assert rec["node_count"] == 2, rec["node_count"]
-        assert rec["nodes"][1]["segments"][0]["data"]["text"] == "第二句"
-        # 图片 url 早过期:不下载、进 missing,页面上会显示「缺 N 图」
-        assert rec["missing"] and rec["missing"][0]["reason"] == "download_failed", rec["missing"]
-        assert rec["legacy_migrated"] == 1, rec
-        assert rec["legacy_file"] == "legacy_forward.json", rec
-        assert not os.path.exists(path), "原文件应已删除(条目里留了副本)"
-        assert os.path.isfile(os.path.join(record_store.record_dir(tmp, rid),
-                                         "legacy_forward.json"))
-        assert index.list_assets(kinds=["forward"])["total"] == 0
-        detail = record_admin.record_detail(tmp, rid)
-        # 老文件里存的就是短 msg id,所以「转发原消息」理论上可用(原消息过期的话
-        # 第一次会失败并被打上 native_unavailable,之后按钮自动置灰)
-        assert detail["can_native"] is True, detail
-        # 列表预览要能读出正文(以前只能看到 .json 文件名)
-        items = record_admin.scan_items(tmp)["items"]
-        assert "老存档第一句" in items[0]["preview"], items[0]["preview"]
 
-        # 幂等:迁过的行已经不在索引里
-        again = asyncio.run(record_admin.migrate_flat_forwards(tmp, index))
-        assert again == {"converted": 0, "reused": 0, "skipped": 0, "failed": 0}, again
-
-        # 坏的(空)JSON:不迁、不删、计入 failed —— 不要静默删证据
-        bad = os.path.join(logdir, "20260622_160000_forward_json_deadbeef.json")
-        open(bad, "wb").close()
-        index.record(platform="aiocqhttp", group_id="961583271",
-                     sender_id="2510536451", msg_id="1", idx=0,
-                     kind="forward", path=bad, size=0, sha16="d" * 16)
-        out2 = asyncio.run(record_admin.migrate_flat_forwards(tmp, index))
-        assert out2["failed"] == 1 and os.path.isfile(bad), out2
-    finally:
-        index.close()
-    print("  OK -> 迁移 1 条(2 节点/1 缺图/留底), 幂等, 坏文件保留")
-
-def test_plugin_promotes_auto_forward_default():
-    """v1.17.1 默认恢复 native:只有「没启用 + 无目标群 + 仍是旧默认 rebuild」才改。"""
-    banner("plugin: auto_forward_mode 旧默认值跟回 native")
-    MediaWardenStar = main.MediaWardenStar
-
-    class _C:
-        def __init__(self, enabled=False, mode="rebuild", targets=None):
-            self.auto_forward_enabled = enabled
-            self.auto_forward_mode = mode
-            self.forward_target_groups = targets or []
-
-    c = _C()
-    assert MediaWardenStar._promote_auto_forward_default(c) is True
-    assert c.auto_forward_mode == "native", c.auto_forward_mode
-    # 已经启用了 / 有目标群 / 显式选了 native -> 都不改
-    c2 = _C(enabled=True)
-    assert MediaWardenStar._promote_auto_forward_default(c2) is False
-    assert c2.auto_forward_mode == "rebuild", c2.auto_forward_mode
-    c3 = _C(targets=["256678737"])
-    assert MediaWardenStar._promote_auto_forward_default(c3) is False
-    c4 = _C(mode="native")
-    assert MediaWardenStar._promote_auto_forward_default(c4) is False
-    print("  OK -> 未启用的旧默认改回 native;启用/有目标/已显式选择都不动")
 
 def test_record_duplicate_dedupe_and_rerender():
     """同群同内容不新建目录（复用原条目）；插件按当前样式补/重画渲染图。"""
@@ -5935,23 +5846,6 @@ def test_record_duplicate_dedupe_and_rerender():
         storage_root=tmp, fetch_image=fetch_png, ts=1720000500))
     assert rec_other.get("reused") is None and rec_other["record_id"] != rid1
     assert record_store.load_record(tmp, rec_other["record_id"]) is not None
-
-    # 老条目(v1.14.0 之前)没有这个字段且已经各存一份:backfill 只补标记,不删数据
-    import json as _json
-    import shutil as _shutil
-    legacy_rid = record_store.make_record_id("g1", "m9", ts=1720000600)
-    _shutil.copytree(record_store.record_dir(tmp, rid1),
-                     record_store.record_dir(tmp, legacy_rid))
-    lpath = os.path.join(record_store.record_dir(tmp, legacy_rid), "record.json")
-    with open(lpath, "r", encoding="utf-8") as fh:
-        legacy = _json.load(fh)
-    legacy.update({"record_id": legacy_rid, "root_msg_id": "m9",
-                   "captured_ts": 1720000600})
-    legacy.pop("duplicate_of", None)
-    with open(lpath, "w", encoding="utf-8") as fh:
-        _json.dump(legacy, fh, ensure_ascii=False)
-    assert record_store.backfill_duplicates(tmp) >= 1
-    assert record_store.load_record(tmp, legacy_rid)["duplicate_of"] == rid1
 
     # 老存档没有 render.png —— 插件按当前样式补一张
     inst = plugin_main.MediaWardenStar(
@@ -6025,78 +5919,6 @@ def test_plugin_forward_dedupe_reuses_entry():
         print("  OK -> 两条转发一个条目", rid)
 
 
-def test_record_admin_reconcile_flat_renders():
-    """扁平转发渲染图收进条目:已有图的删副本,没有图的直接收编,共享文件不误删。"""
-    import asyncio
-    banner("record_admin: 扁平转发渲染图收进条目（删副本 / 收编）")
-    tmp = tempfile.mkdtemp(prefix="wd_flatrender_")
-    png = b"\x89PNG\r\n\x1a\n" + b"7" * 32
-    png2 = b"\x89PNG\r\n\x1a\n" + b"8" * 40
-
-    async def fetch_png(_data):
-        return png2
-
-    nodes_a = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1720000000,
-                "message": [{"type": "text", "data": {"text": "甲"}},
-                             {"type": "image", "data": {"url": "https://x/a.png"}}]}]
-    nodes_b = [{"sender": {"user_id": 8, "nickname": "阿八"}, "time": 1720000100,
-                "message": [{"type": "text", "data": {"text": "乙"}}]}]
-    rid_a = record_store.make_record_id("g1", "m1", ts=1720000000)
-    rid_b = record_store.make_record_id("g1", "m2", ts=1720000100)
-    asyncio.run(record_store.capture(
-        nodes_a, platform="aiocqhttp", group_id="g1", msg_id="m1",
-        storage_root=tmp, fetch_image=fetch_png, ts=1720000000, record_id=rid_a))
-    assert record_store.save_render(tmp, rid_a, png) == "render.png"
-    # 条目 B 还没有渲染图:旧的扁平副本应该被收编成它的 render.png
-    asyncio.run(record_store.capture(
-        nodes_b, platform="aiocqhttp", group_id="g1", msg_id="m2",
-        storage_root=tmp, fetch_image=fetch_png, ts=1720000100, record_id=rid_b))
-
-    from warden.index import AssetIndex
-    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
-    index.open()
-    flat_dir = os.path.join(tmp, "g1", "u1")
-    os.makedirs(flat_dir, exist_ok=True)
-    dup_path = os.path.join(flat_dir, "20250101_000000_forward_image_aaa.png")
-    with open(dup_path, "wb") as fh:
-        fh.write(png)
-    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
-                 msg_id="m1", idx=100, kind="forward_render",
-                 path=dup_path, size=len(png), sha16="b" * 16)
-    adopt_path = os.path.join(flat_dir, "20250101_000002_forward_image_ccc.png")
-    with open(adopt_path, "wb") as fh:
-        fh.write(png2)
-    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
-                 msg_id="m2", idx=100, kind="forward_render",
-                 path=adopt_path, size=len(png2), sha16="d" * 16)
-    # 被另一条消息共享(Storage 去重)的文件:行删了但文件要留
-    shared_path = os.path.join(flat_dir, "20250101_000003_forward_image_ddd.png")
-    with open(shared_path, "wb") as fh:
-        fh.write(b"not-a-render")
-    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
-                 msg_id="m1", idx=101, kind="forward_render",
-                 path=shared_path, size=12, sha16="c" * 16)
-    index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
-                 msg_id="other", idx=100, kind="forward_render",
-                 path=shared_path, size=12, sha16="c" * 16)
-
-    out = record_admin.reconcile_flat_renders(tmp, index)
-    assert out == {"rows": 2, "files": 2, "adopted": 1}, out
-    assert not os.path.exists(dup_path), "条目已有渲染图 -> 副本删掉"
-    assert not os.path.exists(adopt_path), "收编后扁平原件删掉"
-    assert os.path.exists(shared_path), "被多行共享的文件不该删"
-    assert record_store.has_render(tmp, rid_b) == "render.png"
-    with open(os.path.join(record_store.record_dir(tmp, rid_b), "render.png"), "rb") as fh:
-        assert fh.read() == png2, "收编的应该就是那张旧渲染图"
-    # 剩下共享文件那两条行(内容与条目渲染图不同 -> 不是副本,该留)
-    left = index.list_assets(kinds=["forward_render"], limit=100)["items"]
-    assert len(left) == 2, left
-    assert {r["path"] for r in left} == {shared_path}, left
-    # 第二遍幂等
-    assert record_admin.reconcile_flat_renders(tmp, index) == {
-        "rows": 0, "files": 0, "adopted": 0}
-    index.close()
-    print("  OK -> 删 2 行 + 2 文件,收编 1 张,共享文件保留")
 
 
 # ---------------- PHASE 9 追加（v1.17.0 审计修复） ----------------
@@ -6237,43 +6059,6 @@ def test_page_pagination_beyond_first_page():
     print("  OK -> offset 2050 取到 50 条, offset 1999 取到 5 条")
 
 
-def test_record_admin_purge_orphan_renders():
-    import asyncio
-    from warden.index import AssetIndex
-    banner("record_admin: 一键清理老的扁平转发渲染图(条目内的保留)")
-    tmp = tempfile.mkdtemp(prefix="wd_purge_")
-    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
-    index.open()
-
-    async def _noimg(_d):
-        return None
-
-    try:
-        nodes = [{"sender": {"user_id": 7, "nickname": "a"}, "time": 1,
-                  "message": [{"type": "text", "data": {"text": "x"}}]}]
-        rid = record_store.make_record_id("g1", "keep1", ts=1720000000)
-        asyncio.run(record_store.capture(
-            nodes, platform="aiocqhttp", group_id="g1", msg_id="keep1",
-            storage_root=tmp, fetch_image=_noimg, ts=1720000000, record_id=rid))
-        files = []
-        for i, mid in enumerate(("old1", "old2", "keep1")):
-            p = os.path.join(tmp, "g1", "20260101_00000%d.png" % i)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "wb") as fh:
-                fh.write(b"x" * (i + 1))
-            files.append(p)
-            index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
-                         msg_id=mid, idx=0, kind="forward_render", path=p,
-                         size=i + 1)
-        res = record_admin.purge_orphan_renders(tmp, index)
-        assert res["rows"] == 2 and res["files"] == 2, res
-        assert res["bytes"] == 3, res
-        assert index.count() == 1, index.count()
-        assert not os.path.isfile(files[0]) and not os.path.isfile(files[1])
-        assert os.path.isfile(files[2]), "带条目的 msg_id 不能被清理"
-    finally:
-        index.close()
-    print("  OK -> 删 2 行/2 文件, 条目对应的那张保留")
 
 
 def test_plugin_style_preview_cleans_temp():
@@ -6364,6 +6149,123 @@ def test_plugin_resend_native_failure_marks_unavailable():
     print("  OK -> 失败即记失效(与目标群无关)")
 
 
+
+def test_upgrade_v18_normalizes_and_purges():
+    banner("upgrade: v1.18 一次性归一化（补 kind / 删 legacy / GIF / 空壳 / 备份后删旧渲染图）")
+    import asyncio
+    import json as _json
+    import zipfile
+    from warden.index import AssetIndex
+    from warden import upgrade as upgrade_mod
+    tmp = tempfile.mkdtemp(prefix="wd_upg_")
+
+    # 1) 老条目:没有 kind,带 legacy 字段 + legacy 副本文件
+    rid = record_store.make_record_id("g1", "m1", ts=1720000000)
+    rdir = record_store.record_dir(tmp, rid)
+    os.makedirs(rdir, exist_ok=True)
+    with open(os.path.join(rdir, "record.json"), "w", encoding="utf-8") as fh:
+        _json.dump({"schema_version": 1, "record_id": rid, "platform": "aiocqhttp",
+                    "group_id": "g1", "root_msg_id": "m1",
+                    "captured_ts": 1720000000, "node_count": 0, "nodes": [],
+                    "assets": [], "missing": [],
+                    "legacy_file": "legacy_forward.json", "legacy_migrated": 1,
+                    "legacy_source": "961583271/2510536451/x.json"}, fh)
+    legacy_path = os.path.join(rdir, upgrade_mod.LEGACY_FILENAME)
+    with open(legacy_path, "wb") as fh:
+        fh.write(b"{}")
+    # 2) 新条目已经有 kind,不该被动
+    rec2 = asyncio.run(record_store.capture_text(
+        [{"type": "text", "data": {"text": "hi"}}], platform="aiocqhttp",
+        group_id="g1", msg_id="m2", sender_id="u1", sender_name="甲",
+        storage_root=tmp, ts=1720000010))
+    rid2 = rec2["record_id"]
+    assert not os.path.exists(os.path.join(tmp, upgrade_mod.MARKER_NAME))
+
+    index = AssetIndex(db_path=os.path.join(tmp, "_warden.db"))
+    index.open()
+    try:
+        flat = os.path.join(tmp, "g1", "u1")
+        os.makedirs(flat, exist_ok=True)
+        # 3) 老的 GIF 行是 kind=image
+        gif = os.path.join(flat, "20250101_000000_gif_aaa.gif")
+        with open(gif, "wb") as fh:
+            fh.write(b"GIF89a")
+        index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                     msg_id="m3", idx=0, kind="image", path=gif, size=6,
+                     sha16="a" * 16)
+        # 4) 迁移失败的空壳(57 B、nodes:null)
+        junk = os.path.join(flat, "20250101_000001_forward_json_dead.json")
+        with open(junk, "w", encoding="utf-8") as fh:
+            _json.dump({"forward": True, "node_count": 0, "nodes": None}, fh)
+        index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                     msg_id="m4", idx=0, kind="forward", path=junk,
+                     size=os.path.getsize(junk), sha16="b" * 16)
+        # 5) 两张旧扁平渲染图,其中一张被两行引用
+        render_a = os.path.join(flat, "20250101_000002_forward_image_aaa.png")
+        render_b = os.path.join(flat, "20250101_000003_forward_image_bbb.png")
+        with open(render_a, "wb") as fh:
+            fh.write(b"PNG-A")
+        with open(render_b, "wb") as fh:
+            fh.write(b"PNG-B")
+        # 另一个群有同名文件(模板相同):备份 zip 里必须改名,不能写两条同名 entry
+        other_dir = os.path.join(tmp, "g2", "u2")
+        os.makedirs(other_dir, exist_ok=True)
+        render_c = os.path.join(other_dir, os.path.basename(render_a))
+        with open(render_c, "wb") as fh:
+            fh.write(b"PNG-C")
+        for mid, idx, path, sha in (("m5", 100, render_a, "c" * 16),
+                                    ("m5", 101, render_a, "c" * 16),
+                                    ("m6", 100, render_b, "d" * 16),
+                                    ("m7", 100, render_c, "e" * 16)):
+            index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                         msg_id=mid, idx=idx, kind="forward_render",
+                         path=path, size=5, sha16=sha)
+        before = index.count()
+        assert before == 6, before
+
+        zip_path = os.path.join(tempfile.mkdtemp(prefix="wd_upgzip_"), "backup.zip")
+        rep = upgrade_mod.run_once(tmp, index, backup_zip=zip_path)
+        assert rep["skipped"] is False, rep
+        assert rep["entries"] == 1 and rep["legacy_removed"] == 1, rep
+        assert rep["gif_rows"] == 1, rep
+        assert rep["junk_rows"] == 1, rep
+        assert rep["rows"] == 4 and rep["files"] == 3 and rep["bytes"] == 15, rep
+        assert rep["packed"] == 3 and os.path.isfile(zip_path), rep
+
+        # 条目:补了 kind、legacy 字段与副本都没了
+        rec = record_store.load_record(tmp, rid)
+        assert rec["kind"] == "forward", rec
+        assert not [k for k in rec if k.startswith("legacy_")], rec
+        assert not os.path.exists(legacy_path)
+        assert record_store.load_entry(tmp, rid2)["kind"] == "text"
+
+        # 索引:GIF 行换了 kind,空壳行/渲染行删掉了,共享文件只删一次
+        assert [r["path"] for r in index.list_assets(kinds=["gif"])["items"]] == [gif]
+        assert index.list_assets(kinds=["image"])["total"] == 0
+        assert index.list_assets(kinds=["forward"])["total"] == 0, "空壳行应删"
+        assert not os.path.exists(junk)
+        assert not os.path.exists(render_a) and not os.path.exists(render_b)
+        assert not os.path.exists(render_c)
+        assert index.count() == 1, index.count()
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            manifest = _json.loads(zf.read("manifest.json").decode("utf-8"))
+        assert "manifest.json" in names and len(manifest["rows"]) == 4, names
+        file_names = [n for n in names if n.startswith("files/")]
+        assert len(file_names) == 3, names
+        assert len(set(file_names)) == 3, "同名文件必须改名,不能两条同名 entry"
+
+        # 闸门:marker + PRAGMA user_version,第二次直接跳过
+        assert upgrade_mod.read_version(tmp) == 2
+        assert int(index._conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+        again = upgrade_mod.run_once(tmp, index, backup_zip=zip_path)
+        assert again["skipped"] is True, again
+        assert index.count() == 1, "重跑不该二次删除"
+    finally:
+        index.close()
+    print("  OK -> 1 条目归一化 / 删 1 legacy / GIF 1 行 / 空壳 1 行 / 渲染 4 行 3 文件已备份(同名已改名)")
+
+
 PHASE9 = [
     # v1.14.0: 类型门控 + 纯文本条目
     test_policy_media_kind_and_type_flags,
@@ -6383,17 +6285,14 @@ PHASE9 = [
     test_record_detail_render_and_uin_reliability,
     test_page_stats_and_kind_filter_use_real_counts,
     test_page_native_failure_marks_stale,
-    test_record_admin_migrates_flat_forwards,
-    test_plugin_promotes_auto_forward_default,
     test_record_duplicate_dedupe_and_rerender,
     test_plugin_forward_dedupe_reuses_entry,
-    test_record_admin_reconcile_flat_renders,
     # v1.17.0: 审计修复的回归 + 之前定义了却没注册的 4 个用例
+    test_upgrade_v18_normalizes_and_purges,
     test_index_delete_shared_file_keeps_bytes,
     test_record_text_dedupe_is_per_sender,
     test_plugin_text_receipt_has_preview,
     test_page_pagination_beyond_first_page,
-    test_record_admin_purge_orphan_renders,
     test_plugin_style_preview_cleans_temp,
     test_record_admin_node_payloads_keep_time,
     test_plugin_resend_native_failure_marks_unavailable,

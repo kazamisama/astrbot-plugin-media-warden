@@ -262,7 +262,7 @@ def _upgrade_qq_image_url(url: str) -> str:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.17.3: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除/旧渲染图清理) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列), 命令仅管理员可用",
+    "群聊素材守门人 v1.18.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), 命令仅管理员可用",
     VERSION,
 )
 class MediaWardenStar(Star):
@@ -288,34 +288,7 @@ class MediaWardenStar(Star):
             f"| concurrent={self.cfg.max_concurrent}"
         )
 
-    @staticmethod
-    def _promote_auto_forward_default(cfg) -> bool:
-        """v1.17.1 把默认值恢复成 native:旧配置跟着升级。
-
-        v1.17.0 曾把默认改成 rebuild,理由是「跨群原地转发必失败」—— 那是误判:
-        QQ 的原地转发是按 **NapCat 内存里的短 id 缓存** 找消息的,与目标群无关,
-        缓存里有(机器人启动后收到/发过、且没被 5000 条 LRU 挤掉)就能保装扮地
-        发到任何群,缓存里没有才失败。既然能成功,默认就该先试 native。
-        只在「功能没启用、目标群为空、值还是 rebuild」时静默改回 native:
-        这三种条件下改了没有任何行为变化;用户真开过自动转发就尊重他的选择。
-        返回是否改了(调用方负责写回配置)。
-        """
-        if getattr(cfg, "auto_forward_enabled", False):
-            return False
-        if getattr(cfg, "auto_forward_mode", "") != "rebuild":
-            return False
-        if getattr(cfg, "forward_target_groups", None):
-            return False
-        cfg.auto_forward_mode = "native"
-        return True
-
     async def initialize(self) -> None:
-        if self._promote_auto_forward_default(self.cfg):
-            # 静默升级默认值并写回配置:重启后不再反复提示
-            self._persist_config({"auto_forward_mode": self.cfg.auto_forward_mode})
-            self._log(
-                f"auto_forward_mode: rebuild -> {self.cfg.auto_forward_mode} "
-                f"(v1.17.1 恢复 native 默认;想省掉那一次失败尝试就改回 rebuild)")
         self._storage = Storage(
             root=self.cfg.storage_root,
             dedupe=self.cfg.dedupe,
@@ -331,13 +304,6 @@ class MediaWardenStar(Star):
         except Exception as e:
             self._log(f"avatar cache init failed: {e!r} — runs without avatars")
             self._avatar_cache = None
-        # 引擎只有 pil 落地:另外两个取值留着兼容旧配置,但必须说清楚(不静默生效)
-        engine = (self.cfg.forward_image_engine or "pil").lower()
-        if engine != "pil":
-            self._log(
-                f"forward_image_engine={engine!r} 未实现 — 实际使用 PIL 渲染"
-                f"(明确告警而非静默降级)"
-            )
         try:
             # 提前探测 Pillow:forwarder 模块本身不 import PIL(全在函数内),
             # 所以等到渲染时才失败会让每条消息都白跑一次,这里提前降级到 JSON。
@@ -364,43 +330,48 @@ class MediaWardenStar(Star):
             except Exception as e:
                 self._log(f"index init failed: {e!r} — runs without index")
                 self._index = None
-        if self._index is not None:
-            try:
-                # 旧数据里每次存档都会多落一份扁平 forward_image_*.png,而渲染图
-                # 其实已经住在条目里。字节完全相同的副本收掉(只删行/无人引用的文件)。
-                from .warden import record_admin as _radmin
-                fixed = _radmin.reconcile_flat_renders(
-                    self.cfg.storage_root, self._index)
-                if fixed["rows"]:
-                    self._log(
-                        f"flat forward renders reconciled: {fixed['rows']} row(s), "
-                        f"{fixed['files']} file(s) removed, {fixed['adopted']} adopted "
-                        f"into entries"
-                    )
-            except Exception as e:
-                self._log(f"flat render cleanup failed: {e!r}")
-        if self._index is not None:
-            try:
-                # v1.12 之前聊天记录存成扁平 *_forward_json_*.json:页面只看到
-                # 文件卡片。迁成条目后才能浏览节点、重渲染、重建转发。
-                from .warden import record_admin as _radmin2
-                mig = await _radmin2.migrate_flat_forwards(
-                    self.cfg.storage_root, self._index)
-                # skipped 基本只意味着「那个 0 节点的旧坏文件还在」,每次启动都报一遍是噪音
-                if mig["converted"] or mig["reused"] or mig["failed"]:
-                    self._log(
-                        "flat forwards migrated into entries: "
-                        f"{mig['converted']} converted, {mig['reused']} reused, "
-                        f"{mig['skipped']} skipped, {mig['failed']} failed")
-            except Exception as e:
-                self._log(f"flat forward migration failed: {e!r}")
+        # v1.18.0: 旧数据只归一化一次,之后代码里不再有兼容分支(见 warden/upgrade.py)。
+        # 归一化包含:补 kind、删 legacy_forward.json、GIF 行改 kind、删空壳行、
+        # 打包备份后删除 v1.16 之前多余的扁平渲染图。
         try:
-            # v1.14.0 之前存的条目没有 duplicate_of,这里补一次(只写需要变的文件)
-            n = record_store.backfill_duplicates(self.cfg.storage_root)
-            if n:
-                self._log(f"duplicate markers backfilled: {n} entry file(s)")
+            from .warden import upgrade as _upgrade
+            root_abs = os.path.abspath(self.cfg.storage_root)
+            backup = os.path.join(os.path.dirname(root_abs),
+                                  "warden_legacy_renders_v1.18.zip")
+            db_path = getattr(self._index, "db_path", None)
+
+            def _run_upgrade() -> dict:
+                # 打包 1 GB 级备份要一两分钟:放线程里跑,别堵事件循环。
+                # sqlite 连接不能跨线程,线程内另开一条(主连接此时空闲)。
+                from .warden.index import AssetIndex as _Idx
+                own = None
+                try:
+                    if db_path:
+                        own = _Idx(db_path=db_path)
+                        own.open()
+                    return _upgrade.run_once(self.cfg.storage_root, own,
+                                             backup_zip=backup)
+                finally:
+                    if own is not None:
+                        own.close()
+
+            rep = await asyncio.to_thread(_run_upgrade)
+            if rep.get("skipped"):
+                self._log(f"schema v{rep['version']}: 已归一化,跳过")
+            else:
+                self._log(
+                    "upgrade v1.18: "
+                    f"entries={rep.get('entries', 0)} "
+                    f"legacy_removed={rep.get('legacy_removed', 0)} "
+                    f"gif_rows={rep.get('gif_rows', 0)} "
+                    f"junk_rows={rep.get('junk_rows', 0)} "
+                    f"renders={rep.get('rows', 0)} rows/"
+                    f"{rep.get('files', 0)} files/"
+                    f"{rep.get('bytes', 0)} B "
+                    f"(backup={rep.get('backup') or 'none'})"
+                )
         except Exception as e:
-            self._log(f"duplicate backfill failed: {e!r}")
+            self._log(f"upgrade failed: {type(e).__name__}: {e!r}")
         try:
             # dashboard 插件页面(pages/dashboard)的后端:老版本 AstrBot 没有
             # register_web_api 时安静跳过,页面本身也就不会被发现。
@@ -1873,7 +1844,7 @@ class MediaWardenStar(Star):
             else:
                 # 存档也失败了(PIL 缺失 / 目录不可写):退回扁平 JSON 兜底,至少留住内容。
                 comp_json = Component(
-                    kind="forward_json", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
+                    kind="forward", name=f"forward_{ctx.msg_id}_{ctx.idx}.json",
                     raw=comp.raw,
                 )
                 try:
@@ -1890,7 +1861,7 @@ class MediaWardenStar(Star):
                     results.append(self._failed(
                         comp, ctx, "json",
                         f"json save: {type(e).__name__}: {e}", e,
-                        subject=f"forward_json:{ctx.msg_id}#{ctx.idx}",
+                        subject=f"forward:{ctx.msg_id}#{ctx.idx}",
                         failure_kind="save",
                     ))
                 else:

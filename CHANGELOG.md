@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.18.0
+
+去补丁化：历史遗留形态收敛成**一次**启动归一化，之后代码里不再有「为旧数据兜底」的分支。
+
+### 升级前必读
+
+1. **升级时会把 v1.16 之前多存的扁平渲染图删掉**（索引 `kind=forward_render`，本机 857 张 / 1.25 GB）。删之前**先打包**到 `<storage_root>` 旁边的 `warden_legacy_renders_v1.18.zip`（含 `manifest.json` 与每个文件）；日志会打出打包与删除数量。zip 可以留着核对，也可以直接删。
+2. **条目里的 `legacy_forward.json` 会被删除**，`record.json` 里的 `legacy_file` / `legacy_migrated` / `legacy_source` 字段一并去掉（归一化后的节点已在 `record.json` 里，重发/重渲染不需要原始副本）。
+3. **不再自动迁移「扁平聊天记录 JSON」**：v1.14.0 起启动时会 `migrate_flat_forwards()` 把 v1.12 之前的 `…_forward_json_*.json` 迁成条目；v1.18.0 删掉了这条迁移。还留在扁平目录里、未迁移的老 JSON 保持原样（页面里仍作为普通文件行可见），需要的话请在升级**前**用 v1.17.x 跑一次。
+4. **`forward_image_engine` 只接受 `pil`**：playwright / wkhtml 的旧值从本版起是配置错误（回落默认 `pil`，日志里说明），不再「受理 + 告警」。
+5. **归一化只跑一次**：闸门是 `<storage_root>/.schema_version`（内容 `2`）+ 索引 `PRAGMA user_version=2`。删掉 marker 会让它下次启动重跑（幂等，已删的东西不会二次删）。
+
+### Removed（删掉的兼容分支）
+
+- `record_admin.migrate_flat_forwards` / `reconcile_flat_renders` / `purge_orphan_renders`、`record.backfill_duplicates`、`record.LEGACY_FILENAME`、`main._promote_auto_forward_default`。
+- 页面路由 `page/purge_legacy`（13 条路由）、`get_stats` 的 `legacy_renders` / `legacy_bytes`、「清理旧渲染图」按钮与「旧渲染图」类型标签。
+- `record_admin.flat_item` 里的三类推断：`forward_json` → 聊天记录、`forward_render` → 旧渲染图、按 `.gif` 扩展名改类型。索引 `kind` 现在由写入方决定，读到什么就是什么。
+- `config.from_raw_lenient` 的 `forward_render_mode` 派生（旧键直接忽略）、`forward_image_engine` 的旧值告警分支。
+- `index.open()` 不再无条件把 `PRAGMA user_version` 写回 1（只升不降），否则 upgrade 的闸门会被抹掉。
+
+### Added
+
+- `warden/upgrade.py`：`SCHEMA_VERSION=2`、`marker_path/read_version/write_version`、`normalize_entries()`（补 `kind`、删 legacy 副本与字段）、`purge_legacy_renders(index, backup_zip)`（zip 里写 `manifest.json` + `files/<basename>`，按 path 归组删行，引用归零才删文件）、`run_once(storage_root, index, backup_zip=…)`（版本 ≥2 直接 `{"skipped": True}`）。
+- `index.backfill_gif_kind()`（`kind=image` 且路径以 `.gif` 结尾 → `gif`）、`index.set_user_version(version)`。
+- `main.initialize()` 里的一次性归一化调用 + 一行汇总日志；`storage_root` 旁边的 zip 备份。
+- 空壳转发行清理：`kind=forward`、≤256 B、`.json`、`nodes` 为空的迁移残骸（本机 1 条）。
+
+### Fixed
+
+- **upgrade 闸门被索引冲掉**：`index.open()` 原来每次都 `PRAGMA user_version = 1`，把 upgrade 写的 2 覆盖回去；现在只在更低时写入。
+- **备份 zip 里同名文件被写重**：不同群的落盘文件名按同一模板生成会撞名（本机 11 组），`zipfile` 允许写两条同名 entry、解压时只剩最后一条 —— 备份等于残缺。现在 arcname 撞名时加序号（`files/0001_<name>`），并有用例断言 zip 内名字唯一。
+- **归一化堵住事件循环**：第一版在 `initialize()` 里同步跑，1.2 GB 备份让事件循环卡了 111 s（`Event loop delay` 告警）。现在 `await asyncio.to_thread(...)`，线程内另开一条 sqlite 连接（连接不能跨线程），升级期间消息处理不再停摆。
+- **回执/索引里的 `forward_json`**：存档失败退回扁平 JSON 时 `Component.kind` 与 failure subject 都改回 `forward`，`reporter._KIND_LABELS` 删掉 `forward_json` 条目（内部类型名不再泄漏到回执）。
+
+### Tests
+
+- 冒烟 165 → **162 项**（Phase 9: 34 → 31）：删掉四个只测已删 API 的用例（`test_record_admin_migrates_flat_forwards`、`test_record_admin_reconcile_flat_renders`、`test_record_admin_purge_orphan_renders`、`test_plugin_promotes_auto_forward_default`），`test_plugin_warns_on_unimplemented_render_engine` 改成 `test_config_rejects_unimplemented_render_engine`（断言旧值算配置错误并回落 `pil`）。
+- 新增 `test_upgrade_v18_normalizes_and_purges`：造老条目（无 `kind` + 三个 legacy 字段 + `legacy_forward.json`）、老 GIF 行、空壳行、两张旧渲染图（其中一张被两行共享）→ 断言归一化结果、zip 内容（manifest 3 行 / 2 个文件）、marker 与 `user_version=2`、二次调用 `skipped`。
+- `test_plugin_skip_text_only` 忽略 `.schema_version`（归一化闸门不是素材）；`test_page_stats_and_kind_filter_use_real_counts` 改用规范 `kind`（`forward` / `gif`），不再依赖扩展名推断。
+
 ## v1.17.3
 
 两个独立的小修：样式页也被套上同样的固定布局；自动转发不再对「复用旧条目」的重复内容再发一遍。

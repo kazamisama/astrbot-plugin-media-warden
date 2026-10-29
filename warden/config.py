@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-VERSION = "1.17.3"
+VERSION = "1.18.0"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 导出文件的 version 是 index.export_json 里写死的整数 1(见 warden/index.py),
 # 这里曾有一个从未被使用的 EXPORT_FORMAT_VERSION="1.0" —— 两个"版本号"互不相干,
@@ -117,9 +117,12 @@ class MediaWardenConfig:
         if self.match_mode not in ("whitelist", "blacklist"):
             raise ValueError(f"invalid match_mode: {self.match_mode!r}")
 
-        if self.forward_image_engine not in ("pil", "playwright", "wkhtml"):
+        # v1.18.0: 只有 pil 实现。playwright / wkhtml 的旧值不再受理(以前是
+        # 「受理但告警」的兼容分支,现在直接报配置错误)。
+        if self.forward_image_engine != "pil":
             raise ValueError(
-                f"invalid forward_image_engine: {self.forward_image_engine!r}"
+                f"invalid forward_image_engine: {self.forward_image_engine!r} "
+                f"(only 'pil' is implemented)"
             )
         if self.max_concurrent < 1:
             raise ValueError(
@@ -243,11 +246,8 @@ class MediaWardenConfig:
     def from_raw_lenient(cls, raw: dict | None) -> tuple["MediaWardenConfig", List[str]]:
         """按字段容错构造:合法字段保留,非法字段跳过并记录错误."""
         raw = cls._flatten_raw(raw or {})
-        # v1.16.0 兼容:老配置里的三态 forward_render_mode 派生出新开关。
-        # json =「不要图」-> False;image / both 都是「要图」-> True。
-        legacy_mode = raw.pop("forward_render_mode", None)
-        if legacy_mode is not None and "forward_render_image" not in raw:
-            raw["forward_render_image"] = str(legacy_mode).strip().lower() != "json"
+        # v1.18.0: 不再为旧配置键做派生。schema 之外/已删除的键会被直接忽略,
+        # 想改行为请在 WebUI 里改当前 schema 的键。
         known = {f.name for f in cls.__dataclass_fields__.values() if f.init}
         errors: List[str] = []
         kwargs: dict = {}

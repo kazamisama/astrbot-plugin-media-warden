@@ -13,22 +13,17 @@ from typing import Any, Optional
 
 from . import record as record_store
 from .record import (
-    ENTRY_FILENAME, LEGACY_FILENAME, RECORD_FILENAME, RENDER_FILENAME,
+    ENTRY_FILENAME, RECORD_FILENAME, RENDER_FILENAME,
     load_entry, load_record, meta_filename, record_dir, records_root,
     save_render, uin_reliable,
 )
 
 # v1.14.0 分类管理:一条「保存物」要么是条目(_records/ 下的聊天记录/纯文本),
 # 要么是老的扁平落盘文件(图片/动图/视频/文档,索引库里一行一条)。
-KINDS = ("image", "gif", "video", "file", "voice", "text", "forward",
-         "render")
+KINDS = ("image", "gif", "video", "file", "voice", "text", "forward")
 KIND_LABELS = {
     "image": "图片", "gif": "动图", "video": "视频", "file": "文档",
     "voice": "语音", "text": "纯文本", "forward": "聊天记录",
-    # v1.17.0: v1.16 之前每次转发还额外落一张扁平的 forward_image_*.png
-    # (索引 kind=forward_render)。它们与任何条目都不重叠，以前混在「图片」里，
-    # 现在单独一类，能看到也能一键清理。
-    "render": "旧渲染图",
 }
 
 
@@ -113,15 +108,10 @@ def _forward_preview(rec: dict) -> str:
 
 
 def _entry_bytes(root: str, name: str, rec: dict) -> int:
-    """条目占用的总字节:资产 + 渲染图 + 结构化 json(+ 老存档留底)。
-
-    v1.17.0: 以前只算 assets 与 render.png，record.json / entry.json /
-    legacy_forward.json 全没算 —— 页面「存档占用」2.5 MB，磁盘实际 9 MB。
-    """
+    """条目占用的总字节:资产 + 渲染图 + 结构化 json。"""
     render = rec.get("render") if isinstance(rec.get("render"), str) else None
     files: list[str] = []
-    for fname in (render, RENDER_FILENAME, RECORD_FILENAME, ENTRY_FILENAME,
-                  LEGACY_FILENAME):
+    for fname in (render, RENDER_FILENAME, RECORD_FILENAME, ENTRY_FILENAME):
         if fname and fname not in files:   # render 常等于 render.png,别算两遍
             files.append(fname)
     return _asset_bytes(rec) + _dir_file_bytes(root, name, files)
@@ -188,13 +178,6 @@ def flat_item(root: str, row: dict) -> Optional[dict]:
     if rel.startswith(".."):
         return None
     kind = str(row.get("kind") or "unknown")
-    if kind in ("forward_json", "forward"):
-        kind = "forward"
-    elif kind == "forward_render":
-        kind = "render"
-    elif kind == "image" and path.lower().endswith(".gif"):
-        # 老索引把 GIF 也记成 image:列表里要显示「动图」,和 SQL 侧的扩展名切分一致
-        kind = "gif"
     return {
         "source": "flat",
         "asset_id": int(row.get("id") or 0),
@@ -528,159 +511,11 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "render": str(rec.get("render") or ""),
         "has_render": bool(rec.get("render")),
         "duplicate_of": str(rec.get("duplicate_of") or ""),
-        # 从老的扁平 *_forward_json_*.json 迁移来的条目:页面上标一下出处,
-        # 免得用户以为这些 2026-06 的记录是「新存的」。
-        "legacy_file": str(rec.get("legacy_file") or ""),
-        "legacy_source": str(rec.get("legacy_source") or ""),
         # 页面用它把「转发原消息」标成「原消息已失效」，而不是留一个点了必敗的主按钮
         "native_unavailable": bool(rec.get("native_unavailable")),
         "uin_reliable": uin_reliable(nodes_out),
         "nodes": nodes_out,
     }
-
-
-def _file_sha256(path: str) -> str:
-    import hashlib
-    h = hashlib.sha256()
-    try:
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
-    except OSError:
-        return ""
-    return h.hexdigest()
-
-
-def reconcile_flat_renders(root: str, index) -> dict:
-    """把「聊天记录的渲染图」收进条目，不再作为独立的扁平图片存在。
-
-    v1.14.0 之前每次存档都会经 Storage 再落一份 `forward_image_*.png`：同一张
-    渲染图在磁盘上两份，页面「图片」分类里还单独成一条 —— 与「一个条目两种形态」
-    自相矛盾。新存档已经不落扁平副本了，这个函数整理旧数据：
-
-    - 条目**已有** render.png：字节相同的扁平副本 → 删行（无人引用的文件一起删）；
-    - 条目**还没有** render.png：把旧的扁平副本**收进条目**（复制成 render.png），
-      再删行 —— 老条目立刻有渲染图，不用手动点「重渲染」；
-    - 那批行指向多份不同字节（说不清哪张才是）时不动，留给「重渲染」。
-
-    文件可能被别的行共享（Storage 去重），那时只删行、不删文件。
-    """
-    out = {"rows": 0, "files": 0, "adopted": 0}
-    if index is None:
-        return out
-    base = records_root(root)
-    if not os.path.isdir(base):
-        return out
-    entries = {}
-    for name in os.listdir(base):
-        rec = load_record(root, name) or {}
-        msg_id = str(rec.get("root_msg_id") or "")
-        if not msg_id:
-            continue
-        render = rec.get("render") if isinstance(rec.get("render"), str) else ""
-        sha = ""
-        if render:
-            sha = _file_sha256(os.path.join(record_dir(root, name), render))
-        entries[msg_id] = (str(rec.get("record_id") or name), sha)
-    if not entries:
-        return out
-    try:
-        rows = index.list_assets(kinds=["forward_render"], limit=100000)["items"]
-    except Exception:
-        return out
-    path_count: dict = {}
-    by_msg: dict = {}
-    for row in rows:
-        path = str(row.get("path") or "")
-        path_count[path] = path_count.get(path, 0) + 1
-        by_msg.setdefault(str(row.get("msg_id") or ""), []).append(row)
-
-    def _drop(row) -> None:
-        path = str(row.get("path") or "")
-        try:
-            index.delete_row(int(row.get("id") or 0))
-        except Exception:
-            return
-        out["rows"] += 1
-        left = path_count.get(path, 1) - 1
-        path_count[path] = max(0, left)
-        if left <= 0 and path:
-            try:
-                os.remove(path)
-                out["files"] += 1
-            except OSError:
-                pass
-
-    for msg_id, (rid, render_sha) in entries.items():
-        group = [r for r in by_msg.get(msg_id) or []
-                 if str(r.get("path") or "") and os.path.isfile(str(r.get("path") or ""))]
-        if not group:
-            continue
-        if render_sha:
-            for row in group:
-                if _file_sha256(str(row["path"])) == render_sha:
-                    _drop(row)
-            continue
-        shas = {_file_sha256(str(r["path"])) for r in group}
-        if len(shas) != 1 or "" in shas:
-            continue
-        try:
-            with open(str(group[0]["path"]), "rb") as fh:
-                blob = fh.read()
-        except OSError:
-            continue
-        if not blob or not save_render(root, rid, blob):
-            continue
-        out["adopted"] += 1
-        for row in group:
-            _drop(row)
-    return out
-    out = {"rows": 0, "files": 0}
-    if index is None:
-        return out
-    base = records_root(root)
-    if not os.path.isdir(base):
-        return out
-    renders = {}
-    for name in os.listdir(base):
-        rec = load_record(root, name) or {}
-        render = rec.get("render")
-        msg_id = str(rec.get("root_msg_id") or "")
-        if not (isinstance(render, str) and render and msg_id):
-            continue
-        full = os.path.join(record_dir(root, name), render)
-        sha = _file_sha256(full)
-        if sha:
-            renders[msg_id] = sha
-    if not renders:
-        return out
-    try:
-        rows = index.list_assets(kinds=["forward_render"], limit=100000)["items"]
-    except Exception:
-        return out
-    path_rows: dict = {}
-    for row in rows:
-        path_rows.setdefault(str(row.get("path") or ""), 0)
-        path_rows[str(row.get("path") or "")] += 1
-    for row in rows:
-        msg_id = str(row.get("msg_id") or "")
-        path = str(row.get("path") or "")
-        if msg_id not in renders or not path:
-            continue
-        if _file_sha256(path) != renders[msg_id]:
-            continue
-        try:
-            index.delete_row(int(row.get("id") or 0))
-        except Exception:
-            continue
-        out["rows"] += 1
-        if path_rows.get(path, 0) <= 1:
-            try:
-                os.remove(path)
-                out["files"] += 1
-            except OSError:
-                pass
-    return out
 
 
 def resolve_asset(root: str, record_id: str, rel_path: str) -> Optional[str]:
@@ -755,45 +590,6 @@ def delete_flat(root: str, rel_path: str, *, keep_file: bool = False) -> dict:
     except OSError as e:
         return {"deleted": False, "reason": f"{type(e).__name__}: {e}"}
     return {"deleted": True, "path": full}
-
-
-def purge_orphan_renders(root: str, index) -> dict:
-    """清理老版本落下的**扁平**转发渲染图（索引 kind='forward_render'）。
-
-    v1.16 起渲染图只住在条目 `_records/<id>/render.png` 里；这批行是每次转发额外
-    存一份的旧产物，与任何条目的 msg_id 都不重叠（生产库实测 857 行 / 1.25 GB）。
-    按 path 归组：同文件被多行共享时只删一次文件；文件还有别的 kind 的行在用就
-    只删行。带条目的 msg_id 的行一律跳过 —— 那是真存档的一部分。
-    """
-    entry_msgs = {str(rec.get("root_msg_id") or "")
-                  for _, rec in _iter_records(root)}
-    entry_msgs.discard("")
-    rows = index.list_assets(limit=None, kinds=["forward_render"])["items"]
-    by_path: dict = {}
-    for r in rows:
-        if str(r.get("msg_id") or "") in entry_msgs:
-            continue
-        by_path.setdefault(str(r.get("path") or ""), []).append(r)
-    n_rows = n_files = n_bytes = 0
-    for path, group in by_path.items():
-        for r in group:
-            rid = r.get("id")
-            if not rid:
-                continue
-            try:
-                n_rows += int(index.delete_row(int(rid)) or 0)
-            except Exception:
-                continue
-        if not path or index.count_path(path):
-            continue
-        try:
-            size = os.path.getsize(path)
-            os.remove(path)
-        except OSError:
-            continue
-        n_files += 1
-        n_bytes += size
-    return {"rows": n_rows, "files": n_files, "bytes": n_bytes}
 
 
 def delete_record(root: str, record_id: str) -> dict:
@@ -938,95 +734,3 @@ async def _no_images(_data: dict) -> Optional[bytes]:
     """迁移时不下去下载：老 JSON 里的 url 早过期，直接记成 missing 更诚实。"""
     return None
 
-
-def legacy_nodes(payload: Any) -> list:
-    """从老的 `*_forward_json_*.json` 里取节点列表（结构就是 OneBot 节点）。"""
-    if not isinstance(payload, dict):
-        return []
-    nodes = payload.get("nodes")
-    if not isinstance(nodes, list):
-        return []
-    return [n for n in nodes if isinstance(n, dict)]
-
-
-async def migrate_flat_forwards(root: str, index) -> dict:
-    """把 v1.12 之前的扁平聊天记录 JSON 迁移成 `_records/` 条目。
-
-    那批文件（`20260622_154108_forward_json_3590c155.json`，本机 56 个）在页面上
-    只能当「文件卡片」看：读不到节点、也不能重建转发。内容其实都在 JSON 里，
-    所以迁成条目后它们和 v1.12 之后存的聊天记录一样能浏览 / 重渲染 / 转发。
-
-    迁移不下载图片（url 早已过期）：图片段原样留在 `segments` 里，同时进
-    `missing`（reason=download_failed），页面上会显示「缺 N 图」。原始 JSON 复制
-    成条目目录里的 `legacy_forward.json` 留底，然后删索引行与原文件。
-
-    幂等：迁移过的行已经不在索引里，再跑一次是 0。
-    """
-    out = {"converted": 0, "reused": 0, "skipped": 0, "failed": 0}
-    if index is None:
-        return out
-    try:
-        # 生产库里这批文件的 kind 是 `forward`(不是 forward_json,那是更早的写法),
-        # 所以两种都收,再用 .json 扩展名把真正的记录文件挑出来。
-        rows = index.list_assets(kinds=["forward", "forward_json"],
-                                 limit=100000).get("items") or []
-    except Exception:
-        return out
-    for row in rows:
-        path = str(row.get("path") or "")
-        if not path.lower().endswith(".json"):
-            continue  # 不是老聊天记录 JSON(比如另一个 kind 混进来的行)
-        if not os.path.isfile(path):
-            out["skipped"] += 1
-            continue
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                payload = json.load(fh)
-        except (OSError, ValueError):
-            # 空文件/坏 JSON 留着不动，下次人工处理；不要静默删证据
-            out["failed"] += 1
-            continue
-        nodes = legacy_nodes(payload)
-        if not nodes:
-            out["skipped"] += 1
-            continue
-        group_id = str(row.get("group_id") or "")
-        msg_id = str(row.get("msg_id") or "")
-        ts = int(row.get("ts") or 0) or None
-        rid = record_store.make_record_id(group_id, msg_id, ts)
-        try:
-            rec = await record_store.capture(
-                nodes, platform=str(row.get("platform") or "aiocqhttp"),
-                group_id=group_id, msg_id=msg_id, storage_root=root,
-                fetch_image=_no_images, ts=ts, record_id=rid)
-        except Exception:
-            out["failed"] += 1
-            continue
-        target = str(rec.get("record_id") or rid)
-        rdir = record_dir(root, target)
-        try:
-            os.makedirs(rdir, exist_ok=True)
-            # 同内容的第二个文件会命中 capture 的去重、复用同一条目，所以留底
-            # 文件名带上原文件指纹，避免互相覆盖。
-            rel = os.path.relpath(path, root) if os.path.isabs(path) else path
-            sha8 = str(row.get("sha16") or "")[:8] or "legacy"
-            legacy_name = LEGACY_FILENAME
-            if os.path.exists(os.path.join(rdir, legacy_name)):
-                legacy_name = f"legacy_forward_{sha8}.json"
-            with open(os.path.join(rdir, legacy_name), "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False)
-            record_store.set_meta(root, target, legacy_source=str(rel),
-                                  legacy_file=legacy_name, legacy_migrated=1)
-        except OSError:
-            out["failed"] += 1
-            continue
-        try:
-            index.delete_row(row.get("id"))
-        except Exception:
-            pass
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        out["reused" if rec.get("reused") else "converted"] += 1
-    return out

@@ -1,17 +1,68 @@
-# 交接文档 · astrbot-plugin-media-warden v1.17.3
+# 交接文档 · astrbot-plugin-media-warden v1.18.0
 
 ## 1. 当前状态
 
 - 项目：`astrbot-plugin-media-warden`（AstrBot 群聊素材守门人插件）
-- 版本：v1.17.3（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.17.3 给样式页套上同一套固定布局，并让「复用旧条目」不再重复自动转发，见 §1.-10；v1.17.2 是存档页布局修正 —— 整页固定、左右面板各自滚动，见 §1.-9；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
+- 版本：v1.18.0（`warden/config.py`、`metadata.yaml`、入口 `@register` 已同步；v1.18.0 是「去补丁化」—— 旧数据只做**一次**启动归一化（`warden/upgrade.py`，闸门 `.schema_version` + `user_version=2`），随后删掉全部旧数据兼容分支，**变化见 §1.-11**；v1.17.3 给样式页套上同一套固定布局，并让「复用旧条目」不再重复自动转发，见 §1.-10；v1.17.2 是存档页布局修正 —— 整页固定、左右面板各自滚动，见 §1.-9；v1.17.1 更正 v1.17.0 的「跨群原地转发必失败」误判 —— 原地转发与目标群无关，只取决于 NapCat 进程内短 id 缓存，**变化见下面 §1.-8**；v1.17.0 是针对生产数据的审计修复（共享文件按行删 / 文本去重按发送人 / 语音开关 / 旧渲染图清理 / 分页与统计 / 转发时间戳），见 §1.-7；v1.16.0 是渲染开关布尔化（`forward_render_mode` → `forward_render_image`，不再落扁平 JSON）+ 内联节点存档修复，**变化见下面 §1.-5**；v1.15.0 是配置页重做（九组重排 / 删重复旋钮 / native 默认），见 §1.-4；v1.14.0 是按类型采集 + 分类管理 + 样式页；v1.13.0 是 dashboard 存档页面见 §1.-2；v1.12.0 是聊天记录存档/重发见 §1.-1；v1.11.0 是第二轮审计修复见 §1.-0；v1.10.0 的重构/补齐见 §1.0）
 - **环境（2026-10-11 起）：NapCat `4.18.37` + QQ `9.9.26.44498`** —— 这一条是硬依赖，
   详见 §1.-6；升级/重装 NapCat 后必须用 `C:\application\NapCat\start-napcat.bat` 启动
 - 分支：`main`
 - Git：v1.9.0（`04ed9e0`）/ v1.9.1（`9f735cc`）/ v1.9.2（`440fc22`）/ v1.9.3（`6ea8bf9`）/ v1.9.4（诊断版，未提交）/ v1.9.5（`683b720`）/ v1.9.6（`eb95122`）/ v1.9.7（`832b6b4`，诊断版）/ v1.9.8（`54315ae`）/ v1.9.9 / v1.10.0 / v1.11.0 / v1.12.0（`7396611` + `f3368ca`）/ v1.13.0（八笔小步提交）/ v1.14.0（`ba83bbf` → `4ef1afe` → `b8cb445` → `18e8544`）各一批提交（显式路径，未用 `git add -A`）
-- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=33, total=164)`
+- 测试基线：`python -X utf8 _smoke.py` → `ALL OK (phase1=22 phase2=16 phase3=21 phase4=26 phase5=27 phase6=4 phase7=12 phase8=3 phase9=31, total=162)`
 
 
-## 1.-10 v1.17.3（样式页布局 + 复用条目不重复转发，当前版本）
+## 1.-11 v1.18.0（去补丁化：一次性归一化 + 删兼容分支，当前版本）
+
+### 结论来源
+
+用户 m05259：「我们要做长远考虑，不一定需要对旧数据打补丁做适配」。据此定了三件事（ask_user_question 三项全部选推荐项）：857 张旧扁平渲染图**打包备份后删除**、55 个 `legacy_forward.json` **删除**、**一次性归一化 + 删掉全部兼容代码**。闸门用 `<storage_root>/.schema_version`（内容 `2`）与索引 `PRAGMA user_version=2`，跑过一次就永久跳过。
+
+### 1) 新增 `warden/upgrade.py`（一次性归一化）
+
+- `SCHEMA_VERSION = 2`、`MARKER_NAME = ".schema_version"`、`LEGACY_FILENAME = "legacy_forward.json"`（只有这里还认这个名字）；`marker_path/read_version/write_version`。
+- `normalize_entries(storage_root)`：逐条目给 `record.json` 补 `kind="forward"`、删 `legacy_file` / `legacy_migrated` / `legacy_source` 字段、删条目里的 `legacy_forward.json`。
+- `purge_legacy_renders(index, backup_zip)`：取 `kind=forward_render` 行 → 写 zip（`manifest.json` + `files/<basename>`）→ 按 path 归组 `delete_row` → `count_path` 归零才 `os.remove`。返回 `{rows, files, bytes, packed, packed_bytes, backup, backup_files}`。
+- `_drop_junk_forwards(index)`：`kind=forward` + `.json` + ≤256 B + `nodes` 为空的迁移残骸，删行并在无引用时删文件。
+- `run_once(storage_root, index=None, *, backup_zip=None, purge_renders=True)`：版本 ≥2 返回 `{"skipped": True, "version": 2}`；否则依次跑归一化、`index.backfill_gif_kind()`、空壳清理、渲染图清理、`index.set_user_version(2)`、`write_version`。每步单独 try/except（归一化失败不该拦住插件启动）。
+- `main.initialize()`：索引 open 之后调用一次，`backup` = `os.path.join(os.path.dirname(os.path.abspath(storage_root)), "warden_legacy_renders_v1.18.zip")`；成功打一行 `upgrade v1.18: entries=… legacy_removed=… gif_rows=… junk_rows=… renders=… rows/… files/… B (backup=…)`，跳过则打 `schema v2: 已归一化,跳过`。
+
+### 2) 删掉的兼容分支
+
+- `record_admin.migrate_flat_forwards`（v1.14.0 的扁平聊天记录迁移）、`reconcile_flat_renders`、`purge_orphan_renders`、`_file_sha256`、`legacy_nodes`。
+- `record.backfill_duplicates`、`record.LEGACY_FILENAME`。
+- `main._promote_auto_forward_default`（v1.15.0/v1.17.1 的默认值迁移）与 `forward_image_engine` 旧值告警块。
+- 页面 `page/purge_legacy` 路由（14 → **13** 条）、`get_stats` 的 `legacy_renders` / `legacy_bytes`、app.js 的「清理旧渲染图」按钮与「旧渲染图」类型标签（`KIND_ORDER` / `KIND_LABELS` 去掉 `render`）。
+- `record_admin.KINDS` 去掉 `render`；`flat_item` 不再做 `forward_json` / `forward_render` / `.gif` 扩展名三类推断 —— 索引 `kind` 由写入方决定，读到什么就是什么。
+- `config.from_raw_lenient` 的 `forward_render_mode` 派生（旧键当未知键忽略）；`forward_image_engine != "pil"` 直接 `ValueError`（"only 'pil' is implemented"）。
+- 前端的「迁移自老存档」pill、`record_detail` 里的 `legacy_file` / `legacy_source`、`_entry_bytes` 里的 `LEGACY_FILENAME`。
+
+顺带修的坑：`index.open()` 原来每次都 `PRAGMA user_version = 1`，会把 upgrade 写的 2 覆盖回去（闸门失效）—— 改成**只升不降**（当前值 < SCHEMA_VERSION 才写）。
+
+### 3) 行为变化 / 升级前必读
+
+1. **857 张旧扁平渲染图（1.25 GB）**：先打包到 storage_root 旁边的 `warden_legacy_renders_v1.18.zip`，再删行删文件。条目里的 `render.png` 不受影响。
+2. **条目里的 `legacy_forward.json` 被删**（约 3.4 MB），`record.json` 已有归一化节点。
+3. **不再自动迁移未迁的老扁平聊天记录 JSON** —— v1.12 之前那些 `…_forward_json_*.json` 若还没迁，升级后保持原样（仅作为普通文件行可见）。要在升级前迁，用 v1.17.x 跑一次。
+4. `forward_image_engine` 的 playwright / wkhtml 旧值从本版起算**配置错误**（回落 `pil` 并在日志里说明）。
+5. 存档失败退回扁平 JSON 时的 `Component.kind` 与 failure subject 从 `forward_json` 改成 `forward`；`reporter._KIND_LABELS` 去掉 `forward_json`。
+
+### 4) 测试
+
+- 冒烟 165 → **162**（Phase 9: 34 → 31）。删四个只测已删 API 的用例；`test_plugin_warns_on_unimplemented_render_engine` → `test_config_rejects_unimplemented_render_engine`（断言旧值算配置错误、回落 `pil`）。
+- 新增 `test_upgrade_v18_normalizes_and_purges`（老条目 + legacy 副本 + GIF 行 + 空壳行 + 三张旧渲染图：一张被两行共享、一张在别的群但同名 → 断言归一化、zip（manifest 4 行 / 3 文件 / **名字唯一**）、marker 与 `user_version=2`、二次 `skipped`）。
+- 适配：`test_plugin_skip_text_only` 忽略 `.schema_version`；`test_page_stats_and_kind_filter_use_real_counts` 用规范 `kind`（`forward` / `gif`）；路由数 14 → 13（两处）。
+
+### 5) 本机实测（2026-10-29 14:07，重载 v1.18.0）
+
+- 日志：`upgrade v1.18: entries=58 legacy_removed=55 gif_rows=2477 junk_rows=1 renders=857 rows/842 files/1279359988 B (backup=C:\Users\chiriu\.astrbot\data\warden_legacy_renders_v1.18.zip)`；再次重载 `schema v2: 已归一化,跳过`。
+- 备份 zip：**1,293,809,134 B**，853 个文件 entry（857 行 / 853 个不同路径，15 行是共享 path），manifest 857 行。**11 组同名 basename**（不同群模板撞名）已自动改成 `files/0001_<name>` 这类名字；重建后的 zip 无重名（原始实现写了两条同名 entry，解压只剩最后一条 —— 已修 + 加测试）。
+- page/stats：`flat_total` 7490 → **6632**、`flat_bytes` 5,266,143,004 → **3,955,704,655**、`records` 59（`_records` 占用 9,458,206 → **5,387,861**）；`kind=image` **4155** + `kind=gif` **2477** + `kind=forward` 59 = 6691（= 6632 扁平 + 59 条目）。`legacy_renders` / `legacy_bytes` 字段已不存在。
+- marker `<storage_root>/.schema_version` = `2`；索引 `PRAGMA user_version` = 2。
+- **事件循环**：第一版把归一化同步跑在 `initialize()` 里，1.2 GB 备份把事件循环卡了 111 s（日志 `Event loop lag detected: 111.938s`）→ 已改成 `await asyncio.to_thread(_run_upgrade)`，线程内另开一条 sqlite 连接（连接不能跨线程）；改后重载无 lag，且 `skipped` 路径几乎零成本。
+
+
+
+## 1.-10 v1.17.3（样式页布局 + 复用条目不重复转发）
 
 用户 m05183「还有什么问题吗？」→ 本轮审计发现两条真问题并修掉。
 

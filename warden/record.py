@@ -34,7 +34,6 @@ ENTRY_FILENAME = "entry.json"
 RECORD_FILENAME = "record.json"
 RENDER_FILENAME = "render.png"
 # 迁移自「扁平 forward JSON」的条目会在自己目录里留一份原始文件(取证/回滚用)
-LEGACY_FILENAME = "legacy_forward.json"
 
 
 def _safe_token(value: Any) -> str:
@@ -313,45 +312,6 @@ def find_duplicate(storage_root: str, origin_sha256: str, *,
             return str(other.get("record_id") or name)
     return ""
 
-
-def backfill_duplicates(storage_root: str) -> int:
-    """给老条目补 `duplicate_of`（v1.14.0 之前存的没有这个字段）。返回改动条数。
-
-    按目录名排序 = 按 captured_ts 先后，先来的先见到，后来的指向它。只在这条
-    记录的字段确实要变时才写盘。
-    """
-    base = records_root(storage_root)
-    if not os.path.isdir(base):
-        return 0
-    changed = 0
-    seen: dict = {}
-    for name in sorted(os.listdir(base)):
-        for fname in (RECORD_FILENAME, ENTRY_FILENAME):
-            path = os.path.join(record_dir(storage_root, name), fname)
-            if not os.path.isfile(path):
-                continue
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-            except (OSError, ValueError):
-                continue
-            sha = str(data.get("origin_sha256") or "")
-            key = (str(data.get("group_id") or ""), sha)
-            dup = seen.get(key, "") if sha else ""
-            if str(data.get("duplicate_of") or "") != dup:
-                data["duplicate_of"] = dup
-                try:
-                    with open(path, "w", encoding="utf-8") as fh:
-                        json.dump(data, fh, ensure_ascii=False, indent=2)
-                except OSError:
-                    pass
-                else:
-                    changed += 1
-            if sha:
-                seen.setdefault((str(data.get("group_id") or ""), sha),
-                                str(data.get("record_id") or name))
-            break
-    return changed
 
 
 def _entry_path(storage_root: str, record_id: str) -> str:

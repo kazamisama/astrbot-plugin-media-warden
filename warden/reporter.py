@@ -17,7 +17,7 @@ from typing import List, Optional
 _KIND_LABELS = {
     "image": "图片", "gif": "动图", "video": "视频", "file": "文档",
     "voice": "语音", "text": "纯文本", "forward": "聊天记录",
-    "forward_render": "聊天记录渲染图", "forward_json": "聊天记录",
+    "forward_render": "聊天记录渲染图",
 }
 
 

@@ -185,7 +185,7 @@
         "type": "bool",
         "default": true,
         "description": "把聊天记录渲染成图片",
-        "hint": "开：条目里存结构化记录 + 一张 render.png；关：只存结构化记录（record.json），不画图。旧配置的 forward_render_mode=json 会自动映射成关闭。"
+        "hint": "开：条目里存结构化记录 + 一张 render.png；关：只存结构化记录（record.json），不画图。v1.18.0 起旧键 forward_render_mode 不再解析（缺新键就按默认开）。"
       },
       "forward_render_max_nodes": {
         "type": "int",
@@ -201,7 +201,7 @@
           "pil"
         ],
         "description": "渲染引擎",
-        "hint": "目前只有 PIL（纯 Python，无外部依赖）。旧配置里的 playwright / wkhtml 会打一条告警并继续用 PIL。"
+        "hint": "目前只有 PIL（纯 Python，无外部依赖）。playwright / wkhtml 的旧值从 v1.18.0 起会被当成配置错误（插件回落默认 pil 并在日志里说明）。"
       },
       "enable_user_avatar": {
         "type": "bool",

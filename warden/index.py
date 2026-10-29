@@ -138,7 +138,11 @@ class AssetIndex:
         self._conn.executescript(SCHEMA_TABLES)
         self.migrated = self._ensure_columns()
         self._conn.executescript(SCHEMA_INDEXES)
-        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        # 只升不降:upgrade.run_once 会把 user_version 写成它自己的版本(2),
+        # 如果这里每次都无条件写回 SCHEMA_VERSION(1),那个闸门就被抹掉了。
+        cur = int(self._conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        if cur < SCHEMA_VERSION:
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
 
     def _ensure_columns(self) -> list[str]:
@@ -373,6 +377,23 @@ class AssetIndex:
         c = self._require()
         return int(c.execute("SELECT COUNT(*) FROM assets WHERE path = ?",
                              (str(path),)).fetchone()[0] or 0)
+
+    def backfill_gif_kind(self) -> int:
+        """v1.18.0: 老索引把 GIF 记成 image,靠页面按扩展名特判。
+
+        归一化时一次性改掉,之后类型只看 kind 字段。
+        """
+        c = self._require()
+        cur = c.execute(
+            "UPDATE assets SET kind = 'gif' "
+            "WHERE kind = 'image' AND lower(path) LIKE '%.gif'")
+        c.commit()
+        return int(cur.rowcount or 0)
+
+    def set_user_version(self, version: int) -> None:
+        c = self._require()
+        c.execute("PRAGMA user_version = %d" % int(version))
+        c.commit()
 
     def summary(self, *, kinds: Optional[list] = None,
                 group_id: Optional[str] = None, q: str = "") -> dict:

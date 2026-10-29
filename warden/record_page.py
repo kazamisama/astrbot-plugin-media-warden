@@ -83,8 +83,6 @@ class RecordPageApi:
                  "media-warden 渲染样式(保存)")
         register(f"{PAGE_PREFIX}/style_preview", self.style_preview, ["POST"],
                  "media-warden 渲染样式(实时预览)")
-        register(f"{PAGE_PREFIX}/purge_legacy", self.purge_legacy, ["POST"],
-                 "media-warden 清理老的扁平转发渲染图")
         return True
 
     # ---------------- 内部 ----------------
@@ -103,19 +101,15 @@ class RecordPageApi:
 
     # ---------------- 处理函数 ----------------
 
-    # 页面类型 → 索引库里真实的 kind 值。老版本把转发渲染图单独记成
-    # forward_render、把转发 JSON 记成 forward_json，页面把它们并到
-    # 「图片 / 聊天记录」两类里，否则这两批文件在页面上永远点不到。
+    # 页面类型 → 索引库里真实的 kind 值。v1.18.0 起归一化已把老 GIF 行的
+    # kind 改成 gif、老转发 JSON 并进条目,所以这里只做同名映射(不再按扩展名猜)。
     _FLAT_KIND_MAP = {
-        # v1.17.0: forward_render 不再并进「图片」—— 857 张没有条目的旧渲染图
-        # 以前被算作图片，既点不开也筛不掉；现在单列「旧渲染图」，可一键清理。
         "image": ["image"],
-        "render": ["forward_render"],
         "gif": ["gif"],
         "video": ["video"],
         "file": ["file"],
         "voice": ["voice"],
-        "forward": ["forward", "forward_json"],
+        "forward": ["forward"],
     }
 
     def _flat_kinds(self, kind: str):
@@ -155,9 +149,6 @@ class RecordPageApi:
         # 「发图会自动保存」(v1.14.0 起每一类都是可开关的)。
         data["save_types"] = self._save_type_flags()
         # v1.17.0: 老的扁平转发渲染图单独计数（以前混在「图片」里，1.25 GB 看不见）
-        legacy = self._flat_summary(kinds=["forward_render"])
-        data["legacy_renders"] = int(legacy["total"])
-        data["legacy_bytes"] = int(legacy["bytes"])
         return {"status": "ok", "data": data}
 
     def _save_type_flags(self) -> dict:
@@ -345,20 +336,6 @@ class RecordPageApi:
                 if rb.get("ok"):
                     rb["note"] = f"转发原消息不可用（{res.get('error')}），已改用重建转发"
                     res = rb
-        return {"status": "ok", "data": res}
-
-    async def purge_legacy(self):
-        """删掉 v1.16 之前每次转发额外落下的扁平渲染图（它们没有对应条目）。
-
-        只删 kind=forward_render 的行与文件；带条目 msg_id 的行跳过。
-        """
-        index = getattr(self.plugin, "_index", None)
-        if index is None:
-            return {"status": "error", "message": "索引未启用", "data": {}}
-        try:
-            res = record_admin.purge_orphan_renders(self._root, index)
-        except Exception as e:
-            return {"status": "error", "message": f"清理失败: {e!r}", "data": {}}
         return {"status": "ok", "data": res}
 
     # ---------------- 样式页 ----------------

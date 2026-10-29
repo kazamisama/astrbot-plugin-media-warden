@@ -8,12 +8,11 @@
 
   var KIND_LABELS = {
     all: "全部", image: "图片", gif: "动图", video: "视频", file: "文档",
-    voice: "语音", text: "纯文本", forward: "聊天记录", render: "旧渲染图"
+    voice: "语音", text: "纯文本", forward: "聊天记录"
   };
-  // v1.17.0: voice 补上（以前有标签但不在开关表里，六类全关也照存）；
-  // render 是 v1.16 之前每次转发额外落下的扁平渲染图，单列一类才能清理。
+  // v1.17.0: voice 补上（以前有标签但不在开关表里，六类全关也照存）。
   var KIND_ORDER = ["all", "image", "gif", "video", "file", "voice",
-                    "text", "forward", "render"];
+                    "text", "forward"];
   // v1.14.0 起七类**各自**有保存开关(没有「总是自动保存」的类别):
   // 空列表/类型标签上的「关」标记都靠这张表说明真相。
   var KIND_FLAGS = {
@@ -132,29 +131,6 @@
     $("stats").innerHTML = parts.map(function (p) {
       return "<span>" + esc(p[0]) + " <b>" + esc(p[1]) + "</b></span>";
     }).join("");
-    // v1.17.0: 老版本每次转发都多存一张扁平渲染图（没有对应条目）。以前它们
-    // 混在「图片」里，1.25 GB 既看不见也筛不掉 —— 这里给一个显式清理入口。
-    if (s.legacy_renders) {
-      $("stats").innerHTML += '<span><button class="btn" id="btn-purge-legacy" ' +
-        'title="只删 v1.16 之前额外落下的扁平转发渲染图；条目里的 render.png 不受影响">' +
-        "清理旧渲染图 " + esc(s.legacy_renders) + " 张（" +
-        esc(fmtBytes(s.legacy_bytes || 0)) + "）</button></span>";
-      $("btn-purge-legacy").addEventListener("click", purgeLegacy);
-    }
-  }
-
-  async function purgeLegacy() {
-    var n = (state.stats && state.stats.legacy_renders) || 0;
-    if (!(await askConfirm("删除 " + n + " 张旧的扁平转发渲染图？" +
-        "它们没有对应的存档条目（条目里的 render.png 不受影响），不可恢复。"))) return;
-    try {
-      var r = unwrap(await post("purge_legacy", {}));
-      toast("已清理 " + (r.rows || 0) + " 行索引 / " + (r.files || 0) +
-        " 个文件（" + fmtBytes(r.bytes || 0) + "）");
-      await Promise.all([loadStats(), loadList()]);
-    } catch (e) {
-      toast("清理失败：" + e.message, true);
-    }
   }
 
   function renderKinds() {
@@ -233,7 +209,7 @@
       var key = KIND_FLAGS[state.kind];
       if (kindOff(state.kind)) {
         return "「" + label + "」这一类当前是关的（配置项 " + key +
-          "），打开后才会存。六类都能单独开关。";
+          "），打开后才会存。七类都能单独开关。";
       }
       return "这一类还没有保存过内容。七类（图片 / 动图 / 视频 / 文档 / 语音 / 纯文本 / 聊天记录）都能在插件配置里单独开关。";
     }
@@ -362,8 +338,6 @@
       '<span class="pill">群 ' + esc(d.group_id || "-") + "</span>" +
       (d.sender_name ? '<span class="pill">' + esc(d.sender_name) + "</span>" : "") +
       (isForward ? '<span class="pill">' + esc(d.node_count) + " 节点</span>" : "") +
-      (d.legacy_file ? '<span class="pill" title="迁移自老的扁平存档 ' +
-        esc(d.legacy_source || d.legacy_file) + '">迁移自老存档</span>' : "") +
       (isForward && d.root_msg_id ? (d.can_native
         ? '<span class="pill">原消息 ' + esc(d.root_msg_id) + "</span>"
         : '<span class="pill warn" title="QQ 那边已经取不到这条原消息(过期/撤回),只能用重建转发">原消息已失效</span>') : "") +
@@ -482,7 +456,7 @@
       '<button class="btn" id="btn-open">打开目录</button>' +
       '<button class="btn danger" id="btn-flat-delete">删除文件</button></div>';
     var body = "";
-    if (it.kind === "image" || it.kind === "gif" || it.kind === "render") {
+    if (it.kind === "image" || it.kind === "gif") {
       body = '<div class="render-wrap"><img class="thumb render-img" id="flat-img" ' +
         'alt="加载中…" title="点击查看原图"></div>';
     }

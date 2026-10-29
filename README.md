@@ -30,6 +30,7 @@
 - v1.15.0：**配置页重做** —— schema 九组按「监听 → 存什么 → 存到哪 → 下载 → 渲染 → 样式 → 自动转发 → 回执 → 日志」排序，每组标题带序号、hint 只写现状；删掉与 `style_width` 重复的 `forward_image_width`，渲染引擎选项收成 `pil`（只有它实现），`auto_forward_mode` 默认改成 `native`（优先保装扮，失败自动回退；旧配置在「没启用 + 没目标群 + 仍是旧默认」时才跟着升级）；组键保持不变（只改标题）—— 实测组键改名会让 AstrBot 按新 schema 重写配置文件、把旧值丢掉；冒烟 151 项
 - v1.16.0：**渲染开关布尔化** —— 三态 `forward_render_mode`(image/json/both) 收成一个开关 `forward_render_image`（开 = 条目里画 `render.png`，关 = 只留 `record.json`）；旧配置的 `json` 自动映射成关闭，`image`/`both` 映射成开启。条目里本来总有 `record.json`，所以不再产生「扁平的额外 JSON 副本」，一条转发只回一个结果；顺手修了内联节点（`{"type":"node","data":{…}}` 包装形态）存档成空壳的问题；冒烟 152 项
 - v1.17.0：**审计修复** —— 删共享扁平文件不再连坐（按行删 + 引用归零才删字节）；`resolve_flat` 先 normpath 再判 `_records` 前缀（`./_records/…` 绕不过去了）；纯文本去重按发送人收窄（不同人发同一句话各存一条）；语音补上 `save_voice` 开关、未知类型默认不存；857 张老的扁平转发渲染图单列「旧渲染图」并可一键清理；分页能翻到第 2000 条之后；`/warden stats` 纳入存档、`prune --records` 才删存档；重建转发带原时间戳；纯文本回执带渲染图预览；样式预览不再泄漏临时目录、下载闸门不再被迟到缓存占住；冒烟 164 项。**注：本版「自动转发恒用重建 / 跨群 native 必失败」两条结论是误判，已在 v1.17.1 更正**
+- v1.18.0：**去补丁化（一次性归一化）** —— 按「不为旧数据长期留着补丁」的结论，升级时跑**一次** `warden/upgrade.py`（闸门 `<storage_root>/.schema_version` + 索引 `PRAGMA user_version=2`）：条目补 `kind`、删 `legacy_forward.json` 与 `legacy_*` 字段、老 GIF 行 `kind=image` 改成 `gif`、删迁移失败的空壳行；v1.16 之前多存的扁平渲染图（`kind=forward_render`）**先打包成 zip 备份再删**。同时删掉全部兼容分支：`migrate_flat_forwards` / `reconcile_flat_renders` / `purge_orphan_renders` +「清理旧渲染图」按钮 / `backfill_duplicates` / 按扩展名猜类型 / 旧配置键派生 / `_promote_auto_forward_default` / 引擎旧值告警（playwright/wkhtml 现在直接算配置错误）。冒烟 162 项
 - v1.17.3：**样式页同一套固定布局**（不再有外层滚动条、面板各自滚动）+ **复用条目不再重复自动转发**（同内容在源群再发一次时跳过）；冒烟 165 项
 - v1.17.2：**存档页整页固定** —— 外层不再出现整页滚动条，左右两块面板同高同边距、各自内部滚动（列表 / 详情正文），窄屏改为上下两段各自滚动；纯样式改动，冒烟仍 164 项
 - v1.17.1：**纠正「跨群原地转发必失败」的误判** —— NapCat 的 `get_msg` 与 `forward_group_single_msg` 都按**进程内短 id 缓存**（LRU 5000 条，重启清空）找消息，跟目标群无关：缓存里有就能保气泡/挂件/头像发到任何群，缓存丢了（重启 / 被挤掉 / 消息过期）才回「消息不存在」。所以自动转发恢复「先 native、失败回退 rebuild」，`auto_forward_mode` 默认回到 `native`，页面「转发原消息」不再限定原群；失败仍会记成原消息失效（缓存丢了就是丢了）。冒烟 164 项
@@ -131,9 +132,9 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `forward_render_image` | `true` | 开：条目里画一张 `render.png`（结构化数据本来就在 `record.json`）；关：只留结构化记录。旧配置 `forward_render_mode=json` 自动映射成关闭 |
+| `forward_render_image` | `true` | 开：条目里画一张 `render.png`（结构化数据本来就在 `record.json`）；关：只留结构化记录。v1.18.0 起旧键 `forward_render_mode` 不再解析（缺新键就按默认开） |
 | `forward_render_max_nodes` | `30` | 超过就只存结构化、不出图 |
-| `forward_image_engine` | `pil` | 只有 `pil`（纯 Python，无外部依赖）；旧配置里的 playwright/wkhtml 会打告警并继续用 PIL |
+| `forward_image_engine` | `pil` | 只有 `pil`（纯 Python，无外部依赖）；playwright/wkhtml 的旧值从 v1.18.0 起算配置错误（回落默认 `pil` 并在日志里说明） |
 | `enable_user_avatar` | `true` | 渲染时画头像（qlogo.cn，失败静默跳过） |
 | `avatar_size` | `36` | 头像直径（像素） |
 | `avatar_timeout_s` | `10` | 头像抓取超时（qlogo 冷启动可能要 5s+） |
@@ -222,6 +223,7 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 - **`_warden.db`** —— 每存一个文件记一条元数据，支撑 `/warden list|stats|lookup|export|prune`。删除只丢台账，已存文件不受影响。
 - **`_blake/`** —— 内容指纹指针，指向首存真实文件。命中则复用原路径，不重复写盘。
 - **`_avatars/`** —— 转发节点头像缓存，按容量 LRU 淘汰。
+- **`.schema_version`** —— v1.18.0 的一次性归一化闸门（内容是 `2`）。删掉它会让插件下次启动**重跑**归一化（幂等，已删的不会二次删；但旧渲染图不会再备份，因为已经不在了）。
 - **`_records/`** —— 条目存档（v1.12.0，v1.14.0 并入纯文本）：**聊天记录**一条合并转发一个目录（`record.json` 原样保留每节点每段的结构，`assets/` 存节点内图片的**字节**，blake2b-16 命名、同字节只落一份）；**纯文本**一条消息一个目录（`entry.json` 存段与元数据）。两者都能再写一张 `render.png`，页面里「结构化 / 渲染图」切换就是读这两样。老的 `<group>/<sender>/…_forward_json_*.json` 只留 url、rkey 一过期就废；`missing` 字段如实记录取不到的图。
 
 ## 命令
@@ -248,21 +250,21 @@ AstrBot WebUI → 插件管理 → astrbot-plugin-media-warden → 配置。sche
 3. 右侧详情：逐节点列出每段内容（文本 / 图片缩略图 / 表情 / @），缩略图点开看原图；取不到图的段会标出 `missing` 原因
 4. 详情底部：**发到**（目标群下拉，带群名，默认原群）+ **转发原消息**（转原消息本体，气泡/挂件/头像/原时间戳都在，要求原消息还在群里，过期会自动改用重建）+ **重建转发**（按存档重拼，内容一致但没有装扮，随时可用）+ 重渲染 / 打开目录 / 删除（删整个 `_records/<id>/`，不可恢复）
 
-**v1.14.0 分类管理**：顶部类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 语音 / 纯文本 / 聊天记录 / 旧渲染图）同时覆盖两类保存物 —— `_records/` 里的条目，以及老的扁平落盘文件（索引库里一行一条，按 `kind` 分类）。右侧「结构化 / 渲染图」切换看同一个条目的两种形态；「发到」的目标群下拉带群名（默认这条记录原来的群），两个转发按钮都用它 —— **转发原消息**保装扮但依赖原消息还在，**重建转发**不依赖、但没有装扮；纯文本条目没有合并转发可发，只提供浏览/删除/打开目录。
+**v1.14.0 分类管理**：顶部类型标签（全部 / 图片 / 动图 / 视频 / 文档 / 语音 / 纯文本 / 聊天记录）同时覆盖两类保存物 —— `_records/` 里的条目，以及老的扁平落盘文件（索引库里一行一条，按 `kind` 分类）。右侧「结构化 / 渲染图」切换看同一个条目的两种形态；「发到」的目标群下拉带群名（默认这条记录原来的群），两个转发按钮都用它 —— **转发原消息**保装扮但依赖原消息还在，**重建转发**不依赖、但没有装扮；纯文本条目没有合并转发可发，只提供浏览/删除/打开目录。
 
 「重渲染」按**当前**样式重画这条的 `render.png` —— v1.14.0 之前存的条目没有渲染图（标签都不出现），改了样式之后旧图也还是旧样式，两者都靠它。同一份内容被转发两次时（同一个群内），**不会**再建第二个目录：直接复用原来那条（`reused`，图片也不再下一次），页面只看到一条。跨群不合并 —— 同一内容出现在别的群各存一份是对的。老版本已经存成两个目录的，第二条仍带 `duplicate_of` 显示「内容重复」徽章（不会自动删）。
 
-聊天记录的渲染图以前会**再落一份扁平 PNG**，于是「图片」分类里多出一条、磁盘上两份字节。现在它只存在于条目目录的 `render.png`（只有存档失败时才回退扁平落盘）；插件启动时会把旧数据整理一遍：条目已有渲染图的删掉扁平副本，条目还没有的把那张旧图收编成 `render.png` —— 老条目因此**无需手动重渲染**就有图了。v1.12 之前那些没有条目的老渲染图仍然作为独立「图片」存在（它们本来就没有结构化存档）。
+聊天记录的渲染图以前会**再落一份扁平 PNG**，于是「图片」分类里多出一条、磁盘上两份字节。现在它只存在于条目目录的 `render.png`（只有存档失败时才回退扁平落盘）；v1.18.0 的一次性归一化会把这批多出来的扁平副本**打包备份后删掉**（见下），条目里的 `render.png` 一律不动。
 
-**老扁平聊天记录自动迁移**（v1.14.0 起，启动时跑一次）：v1.12.0 之前的聊天记录存成 `…_forward_json_*.json`，页面上只是文件卡片。现在 `record_admin.migrate_flat_forwards()` 把它们迁成 `_records/` 条目 —— 节点能看、能重渲染、能重建转发；图片 url 早已过期，所以不下载、进 `missing`（页面显示「缺 N 图」），原始 JSON 复制成条目里的 `legacy_forward.json` 留底，扁平文件与索引行随后删掉。列表预览也从文件名变成正文。幂等，坏 JSON 不迁不删。
+**一次性归一化（v1.18.0，启动时只跑一次）**：历史上叠过三层「补丁式兼容」—— 扁平聊天记录迁成条目、扁平渲染图收进条目、重复条目回填标记。按「长远考虑、不为旧数据长期留补丁」的结论，这些在 v1.18.0 收敛成**一次** `warden/upgrade.py`：闸门是 `<storage_root>/.schema_version`（内容 `2`）与索引 `PRAGMA user_version=2`，跑过就跳过（日志 `schema v2: 已归一化,跳过`），中途崩溃下次启动重跑且幂等。它做四件事：① 老条目补 `kind`、删 `legacy_forward.json` 与 `legacy_*` 字段；② 索引里老的 GIF 行 `kind=image` 改成 `gif`；③ 删迁移失败留下的空壳行（≤256 B、`nodes:null` 的扁平 forward JSON）；④ v1.16 之前多存的扁平渲染图（`kind=forward_render`，本机 857 张 / 1.25 GB）**先打包成 zip**（默认 `<storage_root>` 旁边的 `warden_legacy_renders_v1.18.zip`，含 `manifest.json` + 文件）再删行删文件。跑完日志一行 `upgrade v1.18: entries=… legacy_removed=… gif_rows=… junk_rows=… renders=… rows/… files/… B (backup=…)`。**升级前请读 CHANGELOG 的「升级前必读」**：`legacy_forward.json` 会被删，v1.12 之前那些**没有条目**的老扁平聊天记录 JSON 也不再被自动迁移。
 
 类型标签会标出**当前关掉的类别**（「纯文本 · 关」并淡化），空列表也直接说原因（这一类关了 / 还没存过 / 群和人还没配）—— v1.14.0 起各类都是开关，v1.17.0 补上语音，没有「默认自动存」的类型，页面上不再写含糊的「发图会自动保存」。
 
-**旧渲染图（v1.17.0）**：v1.16 之前每存一条聊天记录，除了条目里的 `render.png`，还会额外落一张扁平的 `*_forward_image_*.png`（索引 `kind=forward_render`）。这批文件与任何条目的消息 id 都不重叠，以前混在「图片」里 —— 既点不开也筛不掉。现在单列「旧渲染图」一类，统计栏出现「清理旧渲染图 N 张」按钮：只删这批没有条目的扁平副本，**条目里的 `render.png` 不受影响**。
+**关于老的扁平渲染图**：v1.16 之前每存一条聊天记录，除了条目里的 `render.png`，还会额外落一张扁平的 `*_forward_image_*.png`（索引 `kind=forward_render`）。v1.17.0 曾把它们单列「旧渲染图」并给了「清理旧渲染图」按钮；v1.18.0 起归一化会在备份后直接清掉这批数据，类型标签与按钮一并下线 —— **条目里的 `render.png` 不受影响**。
 
-几个容易踩的点都在页面里处理掉了：老 GIF 在索引里记的是 `image`，筛选按扩展名再分一次，「动图」标签能筛到 2026-10-28 之前存的那批；「转发原消息」失败且原因是原消息不存在时，会往条目元数据写 `native_unavailable`，之后那条按钮就是灰的、头部显示「原消息已失效」（网络抖动不写，避免一次超时永久禁掉）；删除用页内蒙层确认（桌面版的 `window.confirm` 不保证弹得出来）；列表标题写「共 N 条 · 已加载 M」，和底部的「加载更多」不再打架。
+几个容易踩的点都在页面里处理掉了：老 GIF 行在 v1.18.0 归一化时已改成 `kind=gif`，不再需要按扩展名二次筛选；「转发原消息」失败且原因是原消息不存在时，会往条目元数据写 `native_unavailable`，之后那条按钮就是灰的、头部显示「原消息已失效」（网络抖动不写，避免一次超时永久禁掉）；删除用页内蒙层确认（桌面版的 `window.confirm` 不保证弹得出来）；列表标题写「共 N 条 · 已加载 M」，和底部的「加载更多」不再打架。
 
-页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,groups,resend,render,delete,reveal,style,style_save,style_preview,purge_legacy}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
+页面后端是插件自己注册的 Web API：`/<plugin>/page/{stats,records,record,asset,thumb,groups,resend,render,delete,reveal,style,style_save,style_preview}`，走页面桥（带 dashboard 鉴权）。宿主是没有 `context.register_web_api` 的老版本 AstrBot 时，启动日志里只说一句「page api unavailable」，命令照常工作。
 
 缩略图经 `page/thumb` 读成 base64 内联显示：`<img>` 直接指后端 URL 带不上 Authorization 头，而桌面版（Tauri）不一定留着 dashboard 的 cookie —— 桥接接口两边都通。单张 >8 MB 时只回错误、让用户走下载。
 
@@ -285,7 +287,7 @@ python -X utf8 _smoke.py
 python -m pytest -q _smoke.py
 ```
 
-无外部 AstrBot 依赖，不发起真实网络。当前共 **164 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 26 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 33），覆盖：
+无外部 AstrBot 依赖，不发起真实网络。当前共 **162 项**（Phase 1: 22 / Phase 2: 16 / Phase 3: 21 / Phase 4: 26 / Phase 5: 27 / Phase 6: 4 / Phase 7: 12 / Phase 8: 3 / Phase 9: 31），覆盖：
 
 - 配置加载 / 校验 / 非法字段按字段容错并保留有效值；**宿主的 schema 分组嵌套配置**能被摊平读取（顶层同名键优先）
 - 策略匹配：白名单 / 黑名单 / 私聊跳过 / 空列表不限 / 群 ID 大小写归一
