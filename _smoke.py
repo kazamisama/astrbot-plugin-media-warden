@@ -5342,6 +5342,50 @@ def test_plugin_auto_forward_native_first_then_rebuild():
         print("  OK -> 先 native,失败才 rebuild")
 
 
+def test_plugin_auto_forward_skips_reused_entry():
+    import asyncio
+    banner("plugin: 复用旧条目(同内容再发)不再往目标群重复转发")
+    with tempfile.TemporaryDirectory() as td:
+        inst = plugin_main.MediaWardenStar(
+            plugin_main.MediaWardenStar.__init__.__globals__["Context"](),
+            config={
+                "storage_root": td, "match_mode": "blacklist",
+                "forward_render_image": False, "enable_index_db": False,
+                "reply_preview": False, "auto_forward_enabled": True,
+                "auto_forward_mode": "native",
+                "forward_target_groups": ["961583271"],
+            },
+        )
+        asyncio.run(inst.initialize())
+        calls = []
+
+        class _Bot:
+            async def call_action(self, action, **kw):
+                calls.append(action)
+                if action == "get_msg":
+                    return {"message": [{"type": "forward",
+                                         "data": {"id": "FWD-1"}}]}
+                return {"status": "ok"}
+
+        inst._qq_bot = lambda: _Bot()
+        nodes = [{"sender": {"user_id": 7, "nickname": "阿七"}, "time": 1718600000,
+                  "message": [{"type": "text", "data": {"text": "hi"}}]}]
+        ctx = SaveContext(platform="aiocqhttp", group_id="999",
+                          sender_id="u1", sender_name="alice",
+                          msg_id="1481691615", idx=0, ts=1718600000)
+        comp = Component(kind="forward", meta={"nodes": nodes})
+        asyncio.run(inst._save_forward(comp, ctx, None))
+        assert calls == ["get_msg", "forward_group_single_msg"], calls
+        # 同一段内容在源群再发一次:存档复用原条目 -> 目标群不该收到第二条
+        calls.clear()
+        ctx2 = SaveContext(platform="aiocqhttp", group_id="999",
+                           sender_id="u1", sender_name="alice",
+                           msg_id="1481691616", idx=0, ts=1718600000)
+        asyncio.run(inst._save_forward(comp, ctx2, None))
+        assert calls == [], calls
+        print("  OK -> 复用条目不再转发,首次仍走 native")
+
+
 def test_forwarder_apply_style_and_avatar_shape():
     import asyncio, io
     banner("forwarder: apply_style(颜色/圆角/字号/时间格式/头像形状)")
@@ -6330,6 +6374,7 @@ PHASE9 = [
     test_record_admin_categories_and_flat,
     test_plugin_forward_auto_forward_to_target_groups,
     test_plugin_auto_forward_native_first_then_rebuild,
+    test_plugin_auto_forward_skips_reused_entry,
     test_forwarder_apply_style_and_avatar_shape,
     test_plugin_style_update_and_page,
     test_config_reads_nested_schema_groups,
