@@ -6002,7 +6002,11 @@ def test_index_paths_normalized_across_spellings():
     index2 = AssetIndex(db_path=db)
     index2.open()
     try:
-        assert index2.paths_normalized >= 1, index2.paths_normalized
+        # Windows: 混合写法会被启动归一; POSIX: 两种写法本来就相同 -> 归一空转
+        if os.sep == "\\":
+            assert index2.paths_normalized >= 1, index2.paths_normalized
+        else:
+            assert index2.paths_normalized == 0, index2.paths_normalized
         rows = index2.list_assets(kinds=["gif"])["items"]
         assert len(rows) == 2, rows
         assert {r["path"] for r in rows} == {first.path}, rows
