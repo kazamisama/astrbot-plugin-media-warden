@@ -238,6 +238,12 @@
       if (it.source === "flat") {
         badges.push('<span class="pill" title="老的扁平落盘文件,不在 _records/ 条目里">磁盘文件</span>');
         badges.push('<span class="pill">' + esc(fmtBytes(it.bytes)) + "</span>");
+        // 内容去重只存一份字节,同一文件可能被多条消息引用 —— 标出来,
+        // 免得两个一模一样的条目看着像重复落盘(v1.18.2)。
+        if (it.shared && it.shared > 1) {
+          badges.push('<span class="pill ok" title="同一个文件被 ' + esc(it.shared) +
+            ' 条消息引用（内容去重只存一份字节）">共用 ' + esc(it.shared) + " 条</span>");
+        }
       } else {
         badges.push('<span class="pill">' + esc(it.node_count) + " 节点</span>");
         if (it.asset_count) badges.push('<span class="pill">' + esc(it.asset_count) + " 图</span>");

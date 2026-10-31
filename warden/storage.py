@@ -326,7 +326,7 @@ class Storage:
         full = os.path.join(self.root, rel)
         if os.path.exists(full) and digest:
             if _file_matches_digest(full, digest, len(data)):
-                return SaveResult(path=full, size=len(data),
+                return SaveResult(path=os.path.normpath(full), size=len(data),
                                   reused=True, blake16=digest)
 
         # 路径越权检查(防恶意模板或 symlink 把文件写到外面)
@@ -353,7 +353,11 @@ class Storage:
                 self._write_pointer(digest, full)
             except OSError:
                 pass
-        return SaveResult(path=full, size=len(data), reused=False, blake16=digest)
+        # 路径写法必须和 _existing_for_digest 的复用分支一致(normpath):
+        # 两种写法指向同一个文件,却会让索引的 count_path 按字符串数不到对方,
+        # 「删一行,没人引用才删字节」因此误删(v1.18.2)。
+        return SaveResult(path=os.path.normpath(full), size=len(data),
+                          reused=False, blake16=digest)
 
     def _assert_within_root(self, path: str) -> None:
         """防路径越权:确保 path 在 self._real_root 内."""

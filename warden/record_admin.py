@@ -198,6 +198,8 @@ def flat_item(root: str, row: dict) -> Optional[dict]:
         "path": path,
         "rel": rel,
         "sha16": str(row.get("sha16") or ""),
+        # 同一份字节被几条消息引用(内容去重只存一份):页面用它说明「不是重复落盘」
+        "shared": int(row.get("shared") or 1),
     }
 
 

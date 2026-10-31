@@ -301,7 +301,7 @@ def _comp_keys(comp: Component) -> set:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.18.1: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), 命令仅管理员可用",
+    "群聊素材守门人 v1.18.2: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, 命令仅管理员可用",
     VERSION,
 )
 
@@ -370,6 +370,13 @@ class MediaWardenStar(Star):
                     db_path=os.path.join(self.cfg.storage_root, "_warden.db")
                 )
                 self._index.open()
+                if self._index.paths_normalized:
+                    # v1.18.2: 首存与去重复用以前写的路径分隔符不同,
+                    # 同一文件两种字符串会让引用计数漏数(删一行误删别人的字节)。
+                    self._log(
+                        f"index: 归一化 {self._index.paths_normalized} 条历史路径"
+                        "（分隔符混用会让引用计数漏数）"
+                    )
             except Exception as e:
                 self._log(f"index init failed: {e!r} — runs without index")
                 self._index = None

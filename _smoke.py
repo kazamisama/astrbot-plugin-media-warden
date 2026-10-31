@@ -5960,6 +5960,61 @@ def test_index_delete_shared_file_keeps_bytes():
     print("  OK -> 共享文件按行删,引用归零才删字节")
 
 
+def test_index_paths_normalized_across_spellings():
+    banner("index: 首存/去重两种路径写法归一 + shared 计数(不再漏数引用)")
+    import sqlite3
+    from warden.index import AssetIndex
+    tmp = tempfile.mkdtemp(prefix="wd_sep_")
+    st = Storage(root=tmp, dedupe=True,
+                 pattern="{group_id}/{sender_id}/{short_id}{ext}", max_bytes=1000)
+    comp = Component(kind="image", name="a.gif", url="http://x/a.gif")
+    ctx1 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                       sender_name="alice", msg_id="m1", idx=0, ts=1718600000)
+    first = st.save(b"GIF89a-bytes", comp, ctx1, mime="image/gif")
+    # v1.18.2: 首次落盘返回的路径必须是 os.path.normpath 形态(和去重复用一致)
+    assert first.path == os.path.normpath(first.path), first.path
+    ctx2 = SaveContext(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                       sender_name="alice", msg_id="m2", idx=0, ts=1718600001)
+    second = st.save(b"GIF89a-bytes", comp, ctx2, mime="image/gif")
+    assert second.reused and second.path == first.path, (second.path, first.path)
+
+    db = os.path.join(tmp, "_warden.db")
+    index = AssetIndex(db_path=db)
+    index.open()
+    try:
+        index.record(platform="aiocqhttp", group_id="g1", sender_id="u1",
+                     msg_id="m1", idx=0, kind="gif", path=first.path,
+                     size=len(b"GIF89a-bytes"), sha16="cd" * 8)
+    finally:
+        index.close()
+    # 模拟老行:同一个文件,但路径里混着 "/"(首存写法)
+    mixed = first.path.replace(os.sep, "/")
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "INSERT INTO assets (ts, platform, group_id, sender_id, msg_id, idx,"
+            " kind, path, size, sha16) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (1, "aiocqhttp", "g1", "u1", "m2", 0, "gif", mixed,
+             len(b"GIF89a-bytes"), "cd" * 8))
+        con.commit()
+    finally:
+        con.close()
+    index2 = AssetIndex(db_path=db)
+    index2.open()
+    try:
+        assert index2.paths_normalized >= 1, index2.paths_normalized
+        rows = index2.list_assets(kinds=["gif"])["items"]
+        assert len(rows) == 2, rows
+        assert {r["path"] for r in rows} == {first.path}, rows
+        assert all(r["shared"] == 2 for r in rows), rows
+        # 两种写法都要数到 2 行(以前混用写法只数到 1,删一行会误删字节)
+        assert index2.count_path(first.path) == 2
+        assert index2.count_path(mixed) == 2
+        assert index2.forget_path(mixed) == 2
+    finally:
+        index2.close()
+    print("  OK -> 两种写法归一,count/forget/shared 一致")
+
 def test_record_text_dedupe_is_per_sender():
     import asyncio
     banner("record: 纯文本去重按发送人收窄(不同人发同一句话各自成条)")
@@ -6290,6 +6345,7 @@ PHASE9 = [
     # v1.17.0: 审计修复的回归 + 之前定义了却没注册的 4 个用例
     test_upgrade_v18_normalizes_and_purges,
     test_index_delete_shared_file_keeps_bytes,
+    test_index_paths_normalized_across_spellings,
     test_record_text_dedupe_is_per_sender,
     test_plugin_text_receipt_has_preview,
     test_page_pagination_beyond_first_page,

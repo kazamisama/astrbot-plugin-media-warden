@@ -131,12 +131,14 @@ class AssetIndex:
         self.db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
         self.migrated: list[str] = []
+        self.paths_normalized = 0
 
     def open(self) -> None:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.executescript(SCHEMA_TABLES)
         self.migrated = self._ensure_columns()
+        self.paths_normalized = self._normalize_paths()
         self._conn.executescript(SCHEMA_INDEXES)
         # 只升不降:upgrade.run_once 会把 user_version 写成它自己的版本(2),
         # 如果这里每次都无条件写回 SCHEMA_VERSION(1),那个闸门就被抹掉了。
@@ -157,6 +159,27 @@ class AssetIndex:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
                 added.append(f"{table}.{name}")
         return added
+
+    def _normalize_paths(self) -> int:
+        """把历史行里的路径写法归一(Windows 上 "/" 与 "\\" 混用)。
+
+        v1.18.2: 首存走 os.path.join(root, rel)(rel 里是 "/"),去重复用走
+        os.path.normpath(全 "\\") —— 同一个文件两种字符串,count_path 的引用
+        计数就会漏数:删掉一行时以为没人引用,把别人还在用的字节删了。
+        这里幂等地归一一次(POSIX 上 normpath 不改东西,等于空转)。
+        """
+        c = self._require()
+        changed = []
+        for asset_id, path in c.execute("SELECT id, path FROM assets"):
+            if not path:
+                continue
+            fixed = os.path.normpath(str(path))
+            if fixed != path:
+                changed.append((fixed, int(asset_id)))
+        if changed:
+            c.executemany("UPDATE assets SET path = ? WHERE id = ?", changed)
+            c.commit()
+        return len(changed)
 
     def close(self) -> None:
         if self._conn is not None:
@@ -180,7 +203,7 @@ class AssetIndex:
             "idx, kind, path, size, sha16, forward_meta) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (int(time.time()), platform, group_id, sender_id, msg_id,
-             idx, kind, path, size, sha16,
+             idx, kind, os.path.normpath(str(path)), size, sha16,
              json.dumps(forward_meta) if forward_meta else None),
         )
         c.commit()
@@ -326,7 +349,28 @@ class AssetIndex:
                 cols + " LIMIT ? OFFSET ?",
                 params + [max(1, int(limit)), max(0, int(offset))],
             ))
+        self._mark_shared(rows)
         return {"total": int(total), "items": rows}
+
+    def _mark_shared(self, rows: list) -> None:
+        """给每行标 shared:同一个物理文件被几条索引引用(内容去重的结果)。
+
+        归一化之后同一文件只有一种写法,按 path 精确分组即可。页面用它说明
+        「这几条不是重复落盘,是同一份字节被多条消息引用」。
+        """
+        paths = sorted({str(r.get("path") or "") for r in rows if r.get("path")})
+        if not paths:
+            return
+        c = self._require()
+        counts: dict[str, int] = {}
+        for i in range(0, len(paths), 400):
+            chunk = paths[i:i + 400]
+            sql = ("SELECT path, COUNT(*) FROM assets WHERE path IN ("
+                   + ",".join("?" * len(chunk)) + ") GROUP BY path")
+            for path, n in c.execute(sql, chunk):
+                counts[str(path)] = int(n)
+        for r in rows:
+            r["shared"] = counts.get(str(r.get("path") or ""), 1)
 
     def find_by_sha(self, sha16: str) -> list[dict]:
         c = self._require()
@@ -342,7 +386,8 @@ class AssetIndex:
         if not path:
             return 0
         c = self._require()
-        cur = c.execute("DELETE FROM assets WHERE path = ?", (str(path),))
+        cur = c.execute("DELETE FROM assets WHERE path = ?",
+                        (os.path.normpath(str(path)),))
         c.commit()
         return int(cur.rowcount or 0)
 
@@ -368,7 +413,7 @@ class AssetIndex:
             return 0
         c = self._require()
         return int(c.execute("SELECT COUNT(*) FROM assets WHERE path = ?",
-                             (str(path),)).fetchone()[0] or 0)
+                             (os.path.normpath(str(path)),)).fetchone()[0] or 0)
 
     def backfill_gif_kind(self) -> int:
         """v1.18.0: 老索引把 GIF 记成 image,靠页面按扩展名特判。
