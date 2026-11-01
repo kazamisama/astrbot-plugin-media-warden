@@ -1874,11 +1874,11 @@ def _ResultE():
 
 
 def test_commands_require_admin_permission():
-    banner("commands: all eight /warden commands registered ADMIN")
+    banner("commands: all nine /warden commands registered ADMIN")
     admin = plugin_main.filter.PermissionType.ADMIN
     decorated = [c for c in PERMISSION_CALLS if c == admin]
-    assert len(decorated) == 8, PERMISSION_CALLS
-    print("  OK -> 8 commands registered with PermissionType.ADMIN")
+    assert len(decorated) == 9, PERMISSION_CALLS
+    print("  OK -> 9 commands registered with PermissionType.ADMIN")
 
 
 def test_plugin_e2e_image_triggers_image_result():
@@ -4465,6 +4465,141 @@ def test_record_capture_backfills_video_on_reuse():
     print("  OK -> 复用 + 补齐 + 写回 record.json")
 
 
+def test_record_fingerprint_ignores_volatile_url():
+    import asyncio
+    import json
+    banner("record: 同内容只换了 rkey 再存档 → 复用(v1.20.0 指纹忽略 url)")
+
+    def nodes_for(rkey, text="hi"):
+        return [{"sender": {"user_id": 1, "nickname": "n"}, "time": 5,
+                 "message": [{"type": "image",
+                              "data": {"file": "abc.jpg", "file_size": "10",
+                                       "url": "https://mm/abc.jpg?rkey=" + rkey}},
+                             {"type": "text", "data": {"text": text}}]}]
+
+    async def fetch(data):
+        return b"\x89PNG\r\n\x1a\n" + b"x" * 8
+
+    tmp = tempfile.mkdtemp(prefix="wd_record_fp_")
+    rec1 = asyncio.run(record_store.capture(
+        nodes_for("AAA"), platform="aiocqhttp", group_id=7, msg_id="1",
+        storage_root=tmp, fetch_image=fetch, ts=1720000000))
+    assert not rec1.get("reused"), rec1
+    assert rec1.get("origin_sha256_norm"), rec1
+
+    # 同一条内容被重新转发：url/rkey 变了，指纹不该变
+    rec2 = asyncio.run(record_store.capture(
+        nodes_for("BBB"), platform="aiocqhttp", group_id=7, msg_id="2",
+        storage_root=tmp, fetch_image=fetch, ts=1720000100))
+    assert rec2.get("reused") is True, rec2
+    assert rec2["record_id"] == rec1["record_id"], rec2
+
+    # 内容真的变了（正文明明不同）还是两条
+    rec3 = asyncio.run(record_store.capture(
+        nodes_for("CCC", text="bye"), platform="aiocqhttp", group_id=7, msg_id="3",
+        storage_root=tmp, fetch_image=fetch, ts=1720000200))
+    assert not rec3.get("reused"), rec3
+    assert rec3["record_id"] != rec1["record_id"], rec3
+
+    # 老记录的旧指纹（含 url）也要能配上：删掉 norm 字段再存一次
+    path = os.path.join(record_store.record_dir(tmp, rec3["record_id"]),
+                        "record.json")
+    with open(path, "r", encoding="utf-8") as fh:
+        saved = json.load(fh)
+    saved.pop("origin_sha256_norm", None)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(saved, fh, ensure_ascii=False)
+    rec4 = asyncio.run(record_store.capture(
+        nodes_for("DDD", text="bye"), platform="aiocqhttp", group_id=7, msg_id="4",
+        storage_root=tmp, fetch_image=fetch, ts=1720000300))
+    assert rec4.get("reused") is True and rec4["record_id"] == rec3["record_id"], rec4
+    print("  OK -> 换 rkey 认得出、内容变了不误合、老条目也能匹配")
+
+
+def test_record_backfill_record_refetches_missing():
+    import asyncio
+    banner("record: 补齐缺失媒体 backfill_record(页面按钮/命令的底层)")
+    tmp = tempfile.mkdtemp(prefix="wd_record_bf2_")
+    nodes = [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+              "message": [{"type": "image",
+                           "data": {"file": "a.jpg", "url": "https://mm/a.jpg?rkey=1"}}]}]
+
+    async def boom(data):
+        raise RuntimeError("http 400")
+
+    async def ok(data):
+        return b"\x89PNG\r\n\x1a\n" + b"y" * 6
+
+    rec = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id=3, msg_id="b1",
+        storage_root=tmp, fetch_image=boom, ts=1720000000))
+    assert rec["missing"] and rec["assets"] == [], rec
+    rid = rec["record_id"]
+
+    res = asyncio.run(record_store.backfill_record(tmp, rid, {"image": ok}))
+    assert res["ok"] and res["added"] == 1, res
+    assert res["missing"] == [], res
+    loaded = record_store.load_record(tmp, rid)
+    assert len(loaded["assets"]) == 1, loaded["assets"]
+    assert loaded["assets"][0]["kind"] == "image", loaded["assets"]
+    assert os.path.isfile(os.path.join(
+        record_store.record_dir(tmp, rid),
+        loaded["assets"][0]["path"].replace("/", os.sep)))
+
+    # 再补一次：没有缺口就不该再下载
+    calls = {"n": 0}
+
+    async def counting(data):
+        calls["n"] += 1
+        return await ok(data)
+
+    res2 = asyncio.run(record_store.backfill_record(tmp, rid, {"image": counting}))
+    assert res2["added"] == 0 and calls["n"] == 0, (res2, calls)
+    # 不存在的 id / 非聊天记录
+    assert asyncio.run(record_store.backfill_record(tmp, "nope", {}))["ok"] is False
+    print("  OK -> 只补缺口、补完写盘、重试幂等")
+
+
+def test_plugin_record_backfill_wiring():
+    import asyncio
+    banner("plugin: record_backfill 用插件自己的 fetcher 表补媒体")
+    ctx = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        pl = plugin_main.MediaWardenStar(ctx, config={
+            "storage_root": td, "enable_index_db": True,
+            "log_to_stdout": False, "save_videos": True,
+        })
+        asyncio.run(pl.initialize())
+        root = pl._records_root()
+
+        async def boom(data):
+            raise RuntimeError("http 400")
+
+        nodes = [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+                  "message": [{"type": "image",
+                               "data": {"file": "a.jpg",
+                                        "url": "https://mm/a.jpg?rkey=1"}}]}]
+        rec = asyncio.run(record_store.capture(
+            nodes, platform="aiocqhttp", group_id=1, msg_id="bf3",
+            storage_root=root, fetch_image=boom, ts=1720000000))
+        assert rec["missing"], rec
+
+        async def ok(data):
+            return b"\x89PNG\r\n\x1a\n" + b"z" * 5
+
+        original = pl._record_fetchers
+        pl._record_fetchers = lambda: {"image": ok}  # 不打真网络
+        try:
+            res = asyncio.run(pl.record_backfill(rec["record_id"]))
+        finally:
+            pl._record_fetchers = original
+        assert res["ok"] and res["added"] == 1, res
+        loaded = record_store.load_record(root, rec["record_id"])
+        assert len(loaded["assets"]) == 1 and not loaded["missing"], loaded
+        _close_index_safely(pl)
+    print("  OK -> 插件入口补媒体成功")
+
+
 def test_record_list_records_order_and_bad_dirs():
     import asyncio
     banner("record: list_records 按时间倒序, load_record 对坏目录返回 None")
@@ -4868,12 +5003,13 @@ def test_record_page_routes_and_handlers():
     api = record_page.RecordPageApi(pl)
     assert api.register_routes() is True
     routes = {r[0]: r[2] for r in pl.context.routes}
-    assert len(routes) == 13, routes
+    assert len(routes) == 14, routes
     assert record_page.PAGE_PREFIX + "/stats" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/render"] == ("POST",), routes
     assert record_page.PAGE_PREFIX + "/thumb" in routes, routes
     assert record_page.PAGE_PREFIX + "/groups" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/resend"] == ("POST",), routes
+    assert routes[record_page.PAGE_PREFIX + "/backfill"] == ("POST",), routes
     assert record_page.PAGE_PREFIX + "/reveal" in routes, routes
     assert record_page.PAGE_PREFIX + "/style" in routes, routes
     assert routes[record_page.PAGE_PREFIX + "/style_save"] == ("POST",), routes
@@ -4994,7 +5130,7 @@ def test_plugin_initialize_registers_page_api():
         lambda route, handler, methods=None, desc="": seen.append(route))
     asyncio.run(pl.initialize())
     assert pl._page_api is not None, "page api 应已注册"
-    assert len(seen) == 13, seen
+    assert len(seen) == 14, seen
     assert record_page.PAGE_PREFIX + "/stats" in seen, seen
 
     tmp2 = tempfile.mkdtemp(prefix="warden_page_init_none_")
@@ -5012,6 +5148,9 @@ PHASE7 = [
     test_record_capture_video_asset,
     test_record_capture_without_video_fetcher_skips,
     test_record_capture_backfills_video_on_reuse,
+    test_record_fingerprint_ignores_volatile_url,
+    test_record_backfill_record_refetches_missing,
+    test_plugin_record_backfill_wiring,
     test_record_list_records_order_and_bad_dirs,
     test_record_image_ref_rules,
     test_plugin_record_from_quoted_forward,

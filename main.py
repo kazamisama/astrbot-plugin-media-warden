@@ -301,7 +301,7 @@ def _comp_keys(comp: Component) -> set:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.19.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, v1.19.0 存档内视频落字节 + 页面内联播放 + 重建带视频, 命令仅管理员可用",
+    "群聊素材守门人 v1.20.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, v1.19.0 存档内视频落字节 + 页面内联播放 + 重建带视频, v1.20.0 内容去重忽略易变字段 + 补齐缺失媒体(页面按钮 / /warden 补媒体), 命令仅管理员可用",
     VERSION,
 )
 
@@ -2235,6 +2235,7 @@ class MediaWardenStar(Star):
             return None
         hi = _upgrade_qq_image_url(url)
         candidates = [hi, url] if hi != url else [url]
+        errors = []
         for cand in candidates:
             try:
                 dl = await download(
@@ -2245,8 +2246,12 @@ class MediaWardenStar(Star):
                     max_bytes=self.cfg.max_file_size_bytes,
                 )
                 return dl.data
-            except Exception:
+            except Exception as e:
+                errors.append(e)
                 continue
+        if errors:
+            # record 里只会留一句 download_failed；具体是 400 还是超时看日志
+            self._log(f"存档图片下载失败（{len(errors)} 次尝试）: {errors[-1]!r}")
         return None
 
     async def _record_fetch_video(self, data: dict) -> Optional[bytes]:
@@ -2261,6 +2266,7 @@ class MediaWardenStar(Star):
             return None
         hi = _upgrade_qq_image_url(url)
         candidates = [hi, url] if hi != url else [url]
+        errors = []
         for cand in candidates:
             try:
                 dl = await download(
@@ -2271,9 +2277,29 @@ class MediaWardenStar(Star):
                     max_bytes=self.cfg.max_file_size_bytes,
                 )
                 return dl.data
-            except Exception:
+            except Exception as e:
+                errors.append(e)
                 continue
+        if errors:
+            self._log(f"存档视频下载失败（{len(errors)} 次尝试）: {errors[-1]!r}")
         return None
+
+    def _record_fetchers(self) -> dict:
+        """存档/补媒共用的 fetcher 表（视频开关关掉就不补视频）。"""
+        fetchers: dict = {"image": self._record_fetch_image}
+        if self.cfg.save_videos:
+            fetchers["video"] = self._record_fetch_video
+        return fetchers
+
+    async def record_backfill(self, rid: str) -> dict:
+        """重试一条存档里缺失的媒体（页面「补齐缺失媒体」与 /warden 补媒体 共用）。"""
+        try:
+            return await record_store.backfill_record(
+                self._records_root(), str(rid or ""), self._record_fetchers())
+        except Exception as e:
+            self._log(f"record backfill failed: {e!r}")
+            return {"ok": False, "reason": f"{type(e).__name__}: {e}",
+                    "added": 0, "assets": 0, "missing": []}
 
     async def _resolve_forward_nodes(self, comp: Component,
                                     event: AstrMessageEvent) -> Optional[list]:
@@ -2448,6 +2474,53 @@ class MediaWardenStar(Star):
         if miss:
             text += f" / 缺失 {miss}"
         text += f"\n  目录: {record_store.record_dir(root, rec['record_id'])}"
+        yield event.plain_result(text)
+
+    @filter.command("warden 补媒体")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_warden_backfill(self, event: AstrMessageEvent, arg: str = ""):
+        """用法: /warden 补媒体 [list|<record_id>|all]
+
+        按存档里还留着的 url 重试下载当时没下成的图片/视频。rkey 过期就补不上 ——
+        这类只能等下次重新存档（内容指纹命中时会顺手补回来）。
+        """
+        root = self._records_root()
+        target = (arg or "").strip()
+        rows = record_store.list_records(root, 200)
+        if target in ("", "list", "ls"):
+            missing_rows = [r for r in rows if r.get("missing_count")]
+            if not missing_rows:
+                yield event.plain_result("[Warden] 没有缺媒体的存档")
+                return
+            lines = ["## 缺媒体的存档(最近 20 条)"]
+            for r in missing_rows[:20]:
+                stamp = time.strftime("%m-%d %H:%M",
+                                      time.localtime(r["captured_ts"]))
+                lines.append(f"{r['record_id']}  {stamp}  缺 {r['missing_count']} 项")
+            lines.append("用法: /warden 补媒体 <record_id>  ——  /warden 补媒体 all")
+            yield event.plain_result("\n".join(lines))
+            return
+        if target in ("all", "全部"):
+            targets = [r["record_id"] for r in rows if r.get("missing_count")][:20]
+            if not targets:
+                yield event.plain_result("[Warden] 没有缺媒体的存档")
+                return
+        else:
+            targets = [target]
+        done = 0
+        added = 0
+        left = 0
+        for rid in targets:
+            res = await self.record_backfill(rid)
+            if not res.get("ok"):
+                yield event.plain_result(f"[Warden] {rid}: {res.get('reason') or '补齐失败'}")
+                continue
+            done += 1
+            added += int(res.get("added") or 0)
+            left += len(res.get("missing") or [])
+        text = f"[Warden] 补媒体: {done}/{len(targets)} 条处理完，补下 {added} 项"
+        if left:
+            text += f"，仍有 {left} 项缺失（链接多半已过期，等下次重新存档）"
         yield event.plain_result(text)
 
     @filter.command("warden 重发")

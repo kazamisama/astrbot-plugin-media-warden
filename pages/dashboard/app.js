@@ -396,6 +396,14 @@
         '<button class="btn" id="btn-rebuild" title="按存档重新拼一条合并转发：内容一致，但没有气泡/挂件/原时间戳">重建转发</button>' +
         '<p class="actions-note">「转发原消息」发的是原消息本体，气泡/挂件/头像/原时间戳都在，发到哪个群都行；只要原消息还在机器人的短 id 缓存里就能成功，缓存失效（重启/过期/被挤掉）时自动改用重建。「重建转发」按存档重拼，内容一致但没有装扮，随时可用。</p>';
     }
+    // v1.20.0: 当时没下成的图片/视频，可以按记录里还留着的 url 重试一次
+    // （rkey 过期就补不上，按钮只在真缺东西时出现）
+    var missN = (d.missing || []).length;
+    if (missN) {
+      actions += '<button class="btn" id="btn-backfill" ' +
+        'title="按存档里还留着的 url 重试下载缺失的媒体；链接过期就补不了">' +
+        "补齐缺失媒体 (" + missN + ")</button>";
+    }
     // 老存档(v1.14.0 之前)没有 render.png;改了样式之后旧图也还是旧样式 ——
     // 两者都靠这个按钮按**当前**样式重画(节点与图片字节都在条目目录里)。
     actions += '<button class="btn" id="btn-rerender">重渲染</button>' +
@@ -457,6 +465,8 @@
     syncNative();
     var brr = $("btn-rerender");
     if (brr) brr.addEventListener("click", function () { doRerender(rid); });
+    var bbf = $("btn-backfill");
+    if (bbf) bbf.addEventListener("click", function () { doBackfill(rid); });
     $("btn-open").addEventListener("click", function () { doReveal({ id: rid }); });
     $("btn-delete").addEventListener("click", function () {
       doDelete({ id: rid }, "删除这个条目？（结构化数据 + 渲染图 + 图片资产一起删，不可恢复）");
@@ -579,6 +589,20 @@
     } catch (e) {
       toast("重渲染失败：" + e.message, true);
       if (btn) { btn.disabled = false; btn.textContent = "重渲染"; }
+    }
+  }
+
+  async function doBackfill(rid) {
+    var btn = $("btn-backfill");
+    if (btn) { btn.disabled = true; btn.textContent = "补齐中…"; }
+    try {
+      var r = unwrap(await post("backfill", { id: rid }));
+      toast((r && r.message) || "已补齐");
+      var d = unwrap(await api("record", { id: rid }));
+      renderDetail(d);
+    } catch (e) {
+      toast("补齐失败：" + e.message, true);
+      if (btn) { btn.disabled = false; btn.textContent = "补齐缺失媒体"; }
     }
   }
 

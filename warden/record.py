@@ -173,6 +173,75 @@ def dry_nodes(nodes: list) -> list:
     return out
 
 
+# 每次转发都会变的字段：rkey 嵌在 url 里，path 是宿主的本地缓存路径。
+# 内容去重必须忽略它们，否则「同一条转发转两次」永远被算成两条记录。
+_VOLATILE_SEG_KEYS = ("url", "path")
+
+
+def _norm_segments(segments: list) -> list:
+    """段列表的稳定形态：去掉 url/path，保留 file（内容标识）。"""
+    out: list = []
+    for seg in segments or []:
+        if not isinstance(seg, dict):
+            continue
+        kind = str(seg.get("type") or "").lower()
+        data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+        kept = {k: v for k, v in data.items() if k not in _VOLATILE_SEG_KEYS}
+        if not kept and data:
+            # 段里只有 url 能区分内容（没有 file）—— 抹掉会把它变成空段，退回原样
+            kept = dict(data)
+        out.append({"type": kind, "data": kept})
+    return out
+
+
+def fingerprint_forward(nodes: list) -> str:
+    """聊天记录的内容指纹：结构与 dry_nodes 一致，但段数据已归一化。
+
+    与 dry_nodes 的分工：dry_nodes 落盘用（保留原始 url），这里只用来判断
+    「是不是同一条内容」。v1.20.0 起 dedupe 改用这个，rkey 变了也认得出。
+    """
+    out: list = []
+    for ni, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            continue
+        uin, name = node_identity(node)
+        out.append({"index": ni, "uin": uin, "name": name,
+                    "time": int(_payload(node).get("time") or 0),
+                    "segments": _norm_segments(_segments(node))})
+    return _canonical_sha256(out)
+
+
+def fingerprint_text(segments: list) -> str:
+    """纯文本条目的内容指纹（同样忽略 url/path）。"""
+    return _canonical_sha256(_norm_segments(segments))
+
+
+def _norm_record_fingerprint(meta: dict) -> str:
+    """给**存量条目**重算归一化指纹（老记录只存了带 url 的旧指纹）。"""
+    if not isinstance(meta, dict):
+        return ""
+    nodes = meta.get("nodes")
+    if isinstance(nodes, list):
+        out: list = []
+        for ni, node in enumerate(nodes):
+            if not isinstance(node, dict):
+                continue
+            try:
+                ts = int(node.get("time") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            out.append({"index": int(node.get("index", ni)),
+                        "uin": str(node.get("uin") or "0"),
+                        "name": str(node.get("name") or ""),
+                        "time": ts,
+                        "segments": _norm_segments(node.get("segments") or [])})
+        return _canonical_sha256(out)
+    segs = meta.get("segments")
+    if isinstance(segs, list):
+        return _canonical_sha256(_norm_segments(segs))
+    return ""
+
+
 _TRANSIENT_RECORD_KEYS = ("reused", "duplicate_of", "duplicate_of_requested")
 
 
@@ -242,6 +311,46 @@ async def _backfill_media(record: dict, nodes: list, storage_root: str,
     return added
 
 
+def _stored_nodes_for_backfill(record: dict) -> list:
+    """把存档里落下的节点还原成 OneBot 形状（_segments 只认 message/content）。
+
+    record.json 里节点是 {index,uin,name,time,segments}，而 _backfill_media 走的是
+    capture 那条路（_segments/_payload），所以这里要翻一次面。
+    """
+    out: list = []
+    for node in record.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        out.append({"sender": {"user_id": node.get("uin"),
+                               "nickname": node.get("name")},
+                    "time": node.get("time"),
+                    "message": [s for s in node.get("segments") or []
+                                if isinstance(s, dict)]})
+    return out
+
+
+async def backfill_record(storage_root: str, record_id: str,
+                          fetchers: dict) -> dict:
+    """按存档里还留着的 url 重试下载缺失媒体（页面按钮 / `/warden 补媒体` 共用）。
+
+    只补 (node,seg) 还没有资产的段；已经有的字节不会重下。url 过期时补不上，
+    剩下的 missing 保持原样（页面会如实显示「缺失」）。
+    """
+    record = load_record(storage_root, record_id)
+    if record is None:
+        return {"ok": False, "reason": "not_found", "added": 0,
+                "assets": 0, "missing": []}
+    if str(record.get("kind") or "") != "forward":
+        return {"ok": False, "reason": "not_forward", "added": 0,
+                "assets": len(record.get("assets") or []),
+                "missing": record.get("missing") or []}
+    added = await _backfill_media(record, _stored_nodes_for_backfill(record),
+                                  storage_root, record_id, fetchers)
+    return {"ok": True, "added": added,
+            "assets": len(record.get("assets") or []),
+            "missing": record.get("missing") or []}
+
+
 async def capture(
     nodes: list,
     *,
@@ -268,10 +377,12 @@ async def capture(
     # 指纹只归一化结构（段 data 原样），与后面写进 record.json 的节点同形。
     dry = dry_nodes(nodes)
     origin = _canonical_sha256(dry)
+    origin_norm = fingerprint_forward(nodes)
     fetchers: dict = {"image": fetch_image}
     if fetch_video is not None:
         fetchers["video"] = fetch_video
-    dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id)
+    dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id,
+                         origin_norm=origin_norm)
     if dup:
         existing = load_record(storage_root, dup)
         if existing:
@@ -347,10 +458,12 @@ async def capture(
         "render": None,
         "uin_reliable": uin_reliable(out_nodes),
         "origin_sha256": _canonical_sha256(out_nodes),
+        "origin_sha256_norm": origin_norm,
     }
     # 同内容被转发两次 → 后来的记下先来的 id（不合并目录，重发要各用各的 msg_id）
     record["duplicate_of"] = find_duplicate(
-        storage_root, record["origin_sha256"], exclude=rid, group_id=group_id)
+        storage_root, record["origin_sha256"], exclude=rid, group_id=group_id,
+        origin_norm=origin_norm)
     with open(os.path.join(root, "record.json"), "w", encoding="utf-8") as fh:
         json.dump(record, fh, ensure_ascii=False, indent=2)
     return record
@@ -359,7 +472,8 @@ async def capture(
 def find_duplicate(storage_root: str, origin_sha256: str, *,
                    exclude: str = "", group_id: Optional[str] = None,
                    kind: Optional[str] = None,
-                   sender_id: Optional[str] = None) -> str:
+                   sender_id: Optional[str] = None,
+                   origin_norm: str = "") -> str:
     """同群同内容条目先来的那条 id（没有则空串）。
 
     扁平文件有 Storage 的 blake2b 去重、索引也有 sha 行；`_records/` 这一层以前
@@ -391,7 +505,16 @@ def find_duplicate(storage_root: str, origin_sha256: str, *,
                     other = json.load(fh)
             except (OSError, ValueError):
                 continue
-            if str(other.get("origin_sha256") or "") != origin_sha256:
+            stored_raw = str(other.get("origin_sha256") or "")
+            stored_norm = str(other.get("origin_sha256_norm") or "")
+            # 先比老指纹（含 url/rkey，转一次就变），再比归一化指纹（v1.20.0）。
+            # 存量条目没有 norm 字段，就现算一遍 —— 老记录不会因为升级而「失联」。
+            same = bool(origin_sha256) and stored_raw == origin_sha256
+            if not same and origin_norm:
+                same = (stored_norm == origin_norm
+                        or (not stored_norm
+                            and _norm_record_fingerprint(other) == origin_norm))
+            if not same:
                 continue
             # 只比同一个群:同一份内容在不同群各存一份是对的(每群的存档语境不同),
             # 跨群合并会让后一个群的记录指向别的群。
@@ -455,8 +578,10 @@ async def capture_text(
         cleaned.append({"type": kind, "data": dict(data)})
 
     origin = _canonical_sha256(cleaned)
+    origin_norm = fingerprint_text(segments)
     dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id,
-                         kind="text", sender_id=str(sender_id or ""))
+                         kind="text", sender_id=str(sender_id or ""),
+                         origin_norm=origin_norm)
     if dup:
         existing = load_entry(storage_root, dup)
         if existing:
@@ -484,10 +609,11 @@ async def capture_text(
         "missing": [],
         "render": None,
         "origin_sha256": origin,
+        "origin_sha256_norm": origin_norm,
     }
     entry["duplicate_of"] = find_duplicate(
         storage_root, origin, exclude=rid, group_id=group_id,
-        kind="text", sender_id=str(sender_id or ""))
+        kind="text", sender_id=str(sender_id or ""), origin_norm=origin_norm)
     with open(_entry_path(storage_root, rid), "w", encoding="utf-8") as fh:
         json.dump(entry, fh, ensure_ascii=False, indent=2)
     return entry
@@ -589,6 +715,7 @@ def list_records(storage_root: str, limit: int = 20) -> list:
                 "captured_ts": rec.get("captured_ts", 0),
                 "node_count": rec.get("node_count", 0),
                 "asset_count": len(rec.get("assets") or []),
+                "missing_count": len(rec.get("missing") or []),
                 "group_id": rec.get("group_id", ""),
                 "root_msg_id": rec.get("root_msg_id", ""),
             })

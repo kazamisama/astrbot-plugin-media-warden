@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.20.0
+
+两件跟「同一份内容被转两次」有关的事：**内容去重不再被 rkey 干扰**，**当时没下成的媒体可以补**。
+
+### Added
+
+- 存档详情多了「补齐缺失媒体 (N)」按钮：按记录里还留着的 url 重试下载缺失的图片/视频，只补缺口（已经有的字节不重下），结果写回 `record.json`。补不上（rkey 过期）时会如实说「仍有 N 项缺失」。
+- `/warden 补媒体 [list|<record_id>|all]`：命令版同一条链路（`list` 看谁还缺、`all` 一次补最近 20 条）。
+- `record.backfill_record` 是上面两者的底层：`load_record` → 还原 OneBot 节点形状 → 走与存档同一个 `_backfill_media`。
+
+### Fixed
+
+- **同一条转发转两次不会再存成两条记录**：内容指纹（`origin_sha256_norm`）忽略 `url`/`path` 这类每次转发都会变的字段，只留 `file` 等内容标识。以前 dedupe 比的是含 rkey 的原始 JSON，rkey 一变就「认不出」，同一份内容被存成多个目录。
+- 存量条目没有新指纹字段时，`find_duplicate` 会**现算**一遍归一化指纹再比 —— 升级后老记录照样能被复用命中，不会因为加了新字段而「失联」。
+- 媒体下载失败不再只留一句 `download_failed`：插件日志会打「存档图片/视频下载失败（N 次尝试）: 具体异常」，下次能一眼看出是 HTTP 400（rkey 过期）还是超时。
+
+### 说明
+
+- 指纹只影响「要不要复用旧条目」，不影响 `record.json` 里保留的原始段数据（url 仍原样留着，重发时优先用 `assets/` 字节）。
+- `list_records` 摘要新增 `missing_count`，命令与页面都靠它判断「缺几项」。
+
+### Verified
+
+- 冒烟 `ALL OK (… total=169)`：新增 3 条用例（换 rkey 仍复用 / 内容变了不误合 / 老条目缺 norm 字段也能匹配；`backfill_record` 只补缺口且幂等；插件入口 `record_backfill` 走自己的 fetcher 表）。
+
 ## v1.19.0
 
 聊天记录存档现在会把**节点里的视频字节**一起落盘 —— 以前视频段只剩一段原始 JSON（`url` 是带 rkey 的临时链接），页面/重发都只能看到 `[video file=... url=...]` 文本，链接一过期就彻底没了。

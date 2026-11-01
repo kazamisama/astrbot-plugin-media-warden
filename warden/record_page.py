@@ -85,6 +85,8 @@ class RecordPageApi:
                  "media-warden 按当前样式重画渲染图（补老存档）")
         register(f"{PAGE_PREFIX}/delete", self.delete, ["POST"],
                  "media-warden 删除存档")
+        register(f"{PAGE_PREFIX}/backfill", self.backfill, ["POST"],
+                 "media-warden 补齐缺失媒体（按存档里剩余的 url 重下）")
         register(f"{PAGE_PREFIX}/reveal", self.reveal, ["POST"],
                  "media-warden 在资源管理器里打开目录")
         register(f"{PAGE_PREFIX}/style", self.get_style, ["GET"],
@@ -473,6 +475,43 @@ class RecordPageApi:
         except OSError as e:
             return {"status": "error", "message": f"打开失败: {e!r}", "data": {}}
         return {"status": "ok", "data": {"opened": True, "path": target}}
+
+    async def backfill(self):
+        """重试一条存档里缺失的媒体（v1.20.0）。
+
+        只按记录里还留着的 url 重下；rkey 过期就补不上，返回的 message 会如实说
+        还有几项缺。真正的下载逻辑在插件（record_backfill），这里只管 HTTP 壳。
+        """
+        from astrbot.api.web import request
+        body = await request.json(default={}) or {}
+        if not isinstance(body, dict):
+            body = {}
+        rid = str(body.get("id") or "")
+        if not rid:
+            return {"status": "error", "message": "缺少 id", "data": {}}
+        fn = getattr(self.plugin, "record_backfill", None)
+        if not callable(fn):
+            return {"status": "error", "message": "当前插件版本不支持补齐媒体",
+                    "data": {}}
+        res = await fn(rid)
+        if not res.get("ok"):
+            reason = str(res.get("reason") or "补齐失败")
+            if reason == "not_found":
+                reason = "存档不存在"
+            elif reason == "not_forward":
+                reason = "只有聊天记录存档有可补的媒体"
+            return {"status": "error", "message": reason, "data": res}
+        detail = record_admin.record_detail(self._root, rid) or {}
+        left = len(detail.get("missing") or [])
+        added = int(res.get("added") or 0)
+        if added:
+            msg = f"补齐 {added} 项媒体"
+        else:
+            msg = "没有可补的媒体"
+        if left:
+            msg += f"；仍有 {left} 项缺失（链接已过期或没留地址）"
+        return {"status": "ok", "message": msg,
+                "data": {"added": added, "missing": left}}
 
     async def delete(self):
         from astrbot.api.web import request
