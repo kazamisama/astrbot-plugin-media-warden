@@ -246,7 +246,12 @@
         }
       } else {
         badges.push('<span class="pill">' + esc(it.node_count) + " 节点</span>");
-        if (it.asset_count) badges.push('<span class="pill">' + esc(it.asset_count) + " 图</span>");
+        // v1.20.2: 以前拿 asset_count 一律写「N 图」，视频也被算进图里。
+    if (it.image_count) badges.push('<span class="pill">' + esc(it.image_count) + " 图</span>");
+    if (it.video_count) badges.push('<span class="pill">' + esc(it.video_count) + " 视频</span>");
+    if (!it.image_count && !it.video_count && it.asset_count) {
+      badges.push('<span class="pill">' + esc(it.asset_count) + " 媒体</span>");
+    }
         if (it.has_render) badges.push('<span class="pill ok">有渲染图</span>');
         // 同内容被转发两次:保留两条(各自的原消息 id 不同,重发要各用各的),但要标出来
         if (it.duplicate_of) {
@@ -321,6 +326,13 @@
         return '<p class="seg-dim">[视频：这条存档建立时还没存视频字节]</p>';
       }
       return '<p class="seg-dim">[视频]</p>';
+    }
+    if (seg.type === "forward") {
+      // v1.20.2: 嵌套的合并转发。内容按层级展开在后面的节点里，这里只留标记；
+      // 以前这段落到 raw 分支，页面显示的是 "[forward id=…]" 原文。
+      var fid = seg.id ? " " + esc(seg.id) : "";
+      return '<p class="seg-dim">[嵌套聊天记录' + fid + "：" +
+        (seg.expanded ? "内容已展开在下方" : "没取到内容") + "]</p>";
     }
     var label = seg.type;
     if (seg.raw && typeof seg.raw === "object") {
@@ -417,9 +429,14 @@
     } else {
       body = (d.nodes || []).map(function (n) {
         var segs = (n.segments || []).map(renderSegment).join("");
+        // v1.20.2: 嵌套转发展开出来的节点按层级缩进，不然子节点和外层那个
+        // [嵌套聊天记录] 看起来是同一层，分不清哪几条是转发里的内容。
+        var depth = n.depth || 0;
+        var cls = "node" + (depth > 0 ? " nested" + Math.min(depth, 3) : "");
         // uin 不可信时不显示：NapCat 有时给整条记录同一个 user_id（转发创建者），
         // 照抄会看成「两个不同昵称共用一个 QQ 号」。
-        return '<div class="node"><div class="node-head">' +
+        return '<div class="' + cls + '"><div class="node-head">' +
+          (depth > 0 ? '<span class="pill">嵌套第' + depth + "层</span>" : "") +
           '<span class="name">' + esc(n.name || n.uin || "?") + "</span>" +
           (n.uin && d.uin_reliable !== false ? "<span>(" + esc(n.uin) + ")</span>" : "") +
           (n.time ? "<span>" + esc(fmtTs(n.time)) + "</span>" : "") +
@@ -427,6 +444,12 @@
       }).join("");
       if (isForward && !segsHasImages(d)) {
         body += '<p class="hint">这条聊天记录没有内嵌图片/视频（或当时没取到）。</p>';
+      }
+      // v1.20.2: 老存档没记嵌套层级，缩进是按结构推测出来的，得说清楚
+      if (d.depth_guessed) {
+        body += '<p class="hint">这条存档建于 v1.20.2 之前，没记下嵌套层级。' +
+          "上面的缩进是按结构推测的：外层那个「[嵌套聊天记录]」后面、到下一个嵌套转发之前的节点，" +
+          "算作那次转发的内容。</p>";
       }
     }
     $("detail").innerHTML = head + detailTabs(d) +
@@ -596,8 +619,19 @@
     var btn = $("btn-backfill");
     if (btn) { btn.disabled = true; btn.textContent = "补齐中…"; }
     try {
-      var r = unwrap(await post("backfill", { id: rid }));
-      toast((r && r.message) || "已补齐");
+      // 这里不能先 unwrap：它只返回 resp.data，会把服务端写好的 message
+      // （「补齐 N 项 / 仍有 N 项缺失」）丢掉，于是不管成没成都弹「已补齐」。
+      var resp = await post("backfill", { id: rid });
+      if (!resp || resp.status === "error") {
+        throw new Error((resp && resp.message) || "补齐失败");
+      }
+      var res = unwrap(resp) || {};
+      var left = res.missing || 0;
+      var added = res.added || 0;
+      var msg = resp.message
+        || (added ? "补齐 " + added + " 项媒体" : "没有可补的媒体")
+        + (left ? "；仍有 " + left + " 项缺失（链接已过期或没留地址）" : "");
+      toast(msg, left > 0 && !added);
       var d = unwrap(await api("record", { id: rid }));
       renderDetail(d);
     } catch (e) {

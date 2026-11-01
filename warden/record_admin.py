@@ -270,6 +270,68 @@ def scan_items(root: str, *, q: str = "", group: str = "", kind: str = "",
             "kinds": list(KINDS), "labels": dict(KIND_LABELS)}
 
 
+def _is_forward_wrapper(node: dict) -> bool:
+    """只装着一个 forward 段的节点 —— 嵌套合并转发的容器（展开前/后的外层节点）。"""
+    segs = node.get("segments") or []
+    return (len(segs) == 1 and isinstance(segs[0], dict)
+            and str(segs[0].get("type") or "") == "forward")
+
+
+def _node_depths(nodes: list) -> tuple[list, bool]:
+    """每个节点的嵌套层级，以及「层级是推测出来的」标记。
+
+    v1.20.2 起 capture 会把 main._expand_forward_nodes 打的
+    __warden_nested_depth 写进 record.json；那之前的存档没有 depth，全展开成一
+    层，页面就分不出外层节点和转发里的内容。老存档按结构推测：一个只装着
+    forward 段的节点是嵌套转发的容器，它后面到下一个容器之前的节点都算那次
+    转发的内容。推测出来的会在页面上标明，不当中确凿数据。
+    """
+    nodes = [n for n in nodes or [] if isinstance(n, dict)]
+    if not nodes:
+        return [], False
+    stored = [int(n.get("depth") or 0) for n in nodes]
+    if any(d > 0 for d in stored):
+        return stored, False
+    depths = [0] * len(nodes)
+    guessed = False
+    for pos, node in enumerate(nodes):
+        if not _is_forward_wrapper(node):
+            continue
+        nxt = pos + 1
+        while nxt < len(nodes) and not _is_forward_wrapper(nodes[nxt]):
+            depths[nxt] = max(depths[nxt], 1)
+            guessed = True
+            nxt += 1
+    return depths, guessed
+
+
+def _media_counts(rec: dict) -> tuple[int, int]:
+    """(图片数, 视频数) —— 按资产 kind 数；老资产没 kind 时回查段类型。
+
+    v1.20.2: 列表以前直接拿 asset_count 当「N 图」，于是「1 视频 + 1 图」
+    被写成「2 图」。视频和图片在页面上要分开说。
+    """
+    seg_kind: dict = {}
+    for node in rec.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        for si, seg in enumerate(node.get("segments") or []):
+            if isinstance(seg, dict):
+                seg_kind[(node.get("index"), si)] = str(seg.get("type") or "")
+    images = videos = 0
+    for asset in rec.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        kind = str(asset.get("kind") or "")
+        if not kind:
+            kind = seg_kind.get((asset.get("node"), asset.get("seg")), "")
+        if kind == "video":
+            videos += 1
+        elif kind in ("image", "gif"):
+            images += 1
+    return images, videos
+
+
 def _forward_item(root: str, rec: dict, name: str) -> dict:
     nodes = [n for n in rec.get("nodes") or [] if isinstance(n, dict)]
     preview = _forward_preview(rec) or ("%d 节点" % len(nodes) if nodes else "")
@@ -284,6 +346,8 @@ def _forward_item(root: str, rec: dict, name: str) -> dict:
         "sender_name": str(nodes[0].get("name") or "") if nodes else "",
         "node_count": int(rec.get("node_count") or len(nodes)),
         "asset_count": len(rec.get("assets") or []),
+        "image_count": _media_counts(rec)[0],
+        "video_count": _media_counts(rec)[1],
         "missing_count": len(rec.get("missing") or []),
         "bytes": _entry_bytes(root, name, rec),
         "preview": preview[:80],
@@ -321,6 +385,8 @@ def scan_records(root: str, *, q: str = "", group: str = "",
             "root_msg_id": str(rec.get("root_msg_id") or ""),
             "node_count": int(rec.get("node_count") or len(nodes)),
             "asset_count": len(rec.get("assets") or []),
+            "image_count": _media_counts(rec)[0],
+            "video_count": _media_counts(rec)[1],
             "missing_count": len(rec.get("missing") or []),
             "bytes": _entry_bytes(root, name, rec),
             "preview": preview[:80],
@@ -463,9 +529,14 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         if isinstance(miss, dict):
             miss_reason[(miss.get("node"), miss.get("seg"))] =                 str(miss.get("reason") or "")
     nodes_out = []
-    for node in rec.get("nodes") or []:
-        if not isinstance(node, dict):
-            continue
+    raw_nodes = [n for n in rec.get("nodes") or [] if isinstance(n, dict)]
+    depths, depth_guessed = _node_depths(raw_nodes)
+    for pos, node in enumerate(raw_nodes):
+        depth = depths[pos]
+        # 后一个节点的层级更深 ⇒ 这个节点里的嵌套转发已经展开在下面，
+        # 页面就不用再显示一个孤零零的 [forward …] 段（v1.20.2）。
+        child_open = (depths[pos + 1] > depth
+                      if pos + 1 < len(depths) else False)
         segs_out = []
         for seg in node.get("segments") or []:
             if not isinstance(seg, dict):
@@ -499,6 +570,10 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
                 else:
                     # 老存档（视频能力之前建的）：字节压根没存，别冒充「下载失败」
                     item["nostore"] = True
+            elif kind == "forward":
+                # 嵌套合并转发：以前落到 raw 里，页面就只会显示 "[forward …]" 原文
+                item["id"] = str(data.get("id") or data.get("file") or "")
+                item["expanded"] = child_open
             elif kind == "at":
                 item["qq"] = str(data.get("qq") or "")
             elif kind == "face":
@@ -512,6 +587,7 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
             "uin": str(node.get("uin") or ""),
             "name": str(node.get("name") or ""),
             "time": int(node.get("time") or 0),
+            "depth": depth,
             "segments": segs_out,
         })
     return {
@@ -522,6 +598,7 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         "root_msg_id": str(rec.get("root_msg_id") or ""),
         "captured_ts": int(rec.get("captured_ts") or 0),
         "can_native": _can_native(rec),
+        "depth_guessed": depth_guessed,
         "schema_version": int(rec.get("schema_version") or 0),
         "node_count": int(rec.get("node_count") or len(nodes_out)),
         "asset_count": len(rec.get("assets") or []),
@@ -631,9 +708,9 @@ def node_payloads(rec: dict, base_dir: str) -> list:
     assets = {(a.get("node"), a.get("seg")): a
               for a in rec.get("assets") or [] if isinstance(a, dict)}
     out = []
-    for node in rec.get("nodes") or []:
-        if not isinstance(node, dict):
-            continue
+    nodes = [n for n in rec.get("nodes") or [] if isinstance(n, dict)]
+    depths, _ = _node_depths(nodes)
+    for pos, node in enumerate(nodes):
         content = []
         for si, seg in enumerate(node.get("segments") or []):
             if not isinstance(seg, dict):
@@ -662,6 +739,14 @@ def node_payloads(rec: dict, base_dir: str) -> list:
                     continue
                 content.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(blob).decode()}})
+            elif kind == "forward":
+                # 嵌套合并转发：内容已经按层展开成后面的节点了，再留一条
+                # "[嵌套聊天记录]" 会让重发出来的记录看不出层级、还重复一段。
+                nxt = depths[pos + 1] if pos + 1 < len(depths) else 0
+                if nxt > depths[pos]:
+                    continue
+                content.append({"type": "text",
+                                "data": {"text": "[嵌套聊天记录]"}})
             elif kind == "video":
                 # v1.19.0: 存档里的视频字节也一起重发；没下到字节时留占位
                 asset = assets.get((node.get("index"), si))

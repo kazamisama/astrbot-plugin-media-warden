@@ -72,6 +72,25 @@ def _payload(node: dict) -> dict:
     return node
 
 
+def _node_depth(node: dict) -> int:
+    """节点在嵌套合并转发里的层级（main._expand_forward_nodes 打的标）。
+
+    v1.20.2 起写进 record.json：页面要按层级缩进，不然外层那一个
+    `[forward id=…]` 段和展开出来的子节点看起来就是同一层。
+    """
+    for src in (node, _payload(node)):
+        if not isinstance(src, dict):
+            continue
+        raw = src.get("__warden_nested_depth")
+        if raw is None:
+            continue
+        try:
+            return max(0, min(int(raw), 9))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _segments(node: dict) -> list:
     body = _payload(node)
     segs = body.get("message")
@@ -441,6 +460,7 @@ async def capture(
                            "sha16": sha16, "bytes": len(blob)})
         out_nodes.append({"index": ni, "uin": uin, "name": name,
                           "time": int(_payload(node).get("time") or 0),
+                          "depth": _node_depth(node),
                           "segments": segments})
 
     record = {

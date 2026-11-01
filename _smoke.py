@@ -6500,6 +6500,73 @@ def test_record_admin_node_payloads_keep_time():
     print("  OK -> time 原样带回", payloads[0]["data"]["time"])
 
 
+def test_record_nested_forward_depth_and_media_counts():
+    import asyncio
+    banner("record/record_admin: 嵌套转发分层显示 + 图/视频分开计数 (v1.20.2)")
+    tmp = tempfile.mkdtemp(prefix="wd_nest_")
+    # 外层节点里是嵌套转发（内容已按 depth=1 展开成下面的子节点）
+    nodes = [
+        {"sender": {"user_id": 9, "nickname": "外层"}, "time": 1718600000,
+         "__warden_nested_depth": 0,
+         "message": [{"type": "forward", "data": {"id": "7703061342258914109"}}]},
+        {"sender": {"user_id": 8, "nickname": "里层"}, "time": 1718600001,
+         "__warden_nested_depth": 1,
+         "message": [{"type": "text", "data": {"text": "里面的话"}},
+                     {"type": "image",
+                      "data": {"file": "a.jpg",
+                               "url": "https://example.invalid/a.jpg"}}]},
+    ]
+
+    async def _img(_d):
+        return b"\xff\xd8\xff" + b"0" * 40
+
+    rid = record_store.make_record_id("g1", "m9", ts=1720000000)
+    asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id="g1", msg_id="m9",
+        storage_root=tmp, fetch_image=_img, ts=1720000000, record_id=rid))
+    rec = record_store.load_record(tmp, rid)
+    assert [n.get("depth") for n in rec["nodes"]] == [0, 1], rec["nodes"]
+
+    detail = record_admin.record_detail(tmp, rid)
+    assert [n["depth"] for n in detail["nodes"]] == [0, 1], detail["nodes"]
+    fseg = detail["nodes"][0]["segments"][0]
+    assert (fseg["type"] == "forward" and fseg["expanded"] is True
+            and fseg["id"] == "7703061342258914109"), fseg
+
+    # 重建转发时，已展开的嵌套转发不要再留一条占位文本（会重复一段）
+    payloads = record_admin.node_payloads(rec, record_store.record_dir(tmp, rid))
+    texts = [c.get("data", {}).get("text")
+             for p in payloads for c in p["data"]["content"]]
+    assert "[嵌套聊天记录]" not in texts, texts
+    assert "里面的话" in texts, texts
+
+    # 列表计数：图 / 视频分开数，不再一律叫「N 图」
+    counts = record_admin._media_counts(rec)
+    assert counts == (1, 0), counts
+    rec["assets"].append({"node": 1, "seg": 1, "kind": "video", "path": "v.mp4",
+                          "sha16": "x", "bytes": 1})
+    item = record_admin._forward_item(tmp, rec, rid)
+    assert (item["image_count"], item["video_count"]) == (1, 1), item
+    assert detail["depth_guessed"] is False, detail.get("depth_guessed")
+
+    # v1.20.2 之前的存档没有 depth：按「只装 forward 段的节点是容器」推测层级，
+    # 并标 depth_guessed，页面据此说明这是推测
+    old_nodes = [
+        {"sender": {"user_id": 5, "nickname": "外"}, "time": 2,
+         "message": [{"type": "forward", "data": {"id": "F1"}}]},
+        {"sender": {"user_id": 6, "nickname": "内"}, "time": 3,
+         "message": [{"type": "text", "data": {"text": "老内容"}}]},
+    ]
+    rid2 = record_store.make_record_id("g1", "m10", ts=1720000001)
+    asyncio.run(record_store.capture(
+        old_nodes, platform="aiocqhttp", group_id="g1", msg_id="m10",
+        storage_root=tmp, fetch_image=_img, ts=1720000001, record_id=rid2))
+    old = record_admin.record_detail(tmp, rid2)
+    assert old["depth_guessed"] is True, old.get("depth_guessed")
+    assert [n["depth"] for n in old["nodes"]] == [0, 1], old["nodes"]
+    print("  OK -> depth=[0,1](老存档推测), forward.id/expanded, 图 1 / 视频 1")
+
+
 def test_plugin_resend_native_failure_marks_unavailable():
     import asyncio
     banner("record_page: 原地转发失败(短 id 缓存失效)记成「原消息已失效」")
@@ -6692,6 +6759,7 @@ PHASE9 = [
     test_page_pagination_beyond_first_page,
     test_plugin_style_preview_cleans_temp,
     test_record_admin_node_payloads_keep_time,
+    test_record_nested_forward_depth_and_media_counts,
     test_plugin_resend_native_failure_marks_unavailable,
     test_forwarder_emoji_mixed_layout,
     test_recover_raw_url_overrides_local_jpeg,
