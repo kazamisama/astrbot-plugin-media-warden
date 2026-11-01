@@ -301,7 +301,7 @@ def _comp_keys(comp: Component) -> set:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.20.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, v1.19.0 存档内视频落字节 + 页面内联播放 + 重建带视频, v1.20.0 内容去重忽略易变字段 + 补齐缺失媒体(页面按钮 / /warden 补媒体), 命令仅管理员可用",
+    "群聊素材守门人 v1.20.1: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, v1.19.0 存档内视频落字节 + 页面内联播放 + 重建带视频, v1.20.0 内容去重忽略易变字段 + 补齐缺失媒体(页面按钮 / /warden 补媒体), v1.20.1 关渲染图时节点图也预下载(修「存档时根本没下」), 命令仅管理员可用",
     VERSION,
 )
 
@@ -1650,9 +1650,12 @@ class MediaWardenStar(Star):
         failed_urls = 0
         if want_image:
             await self._fetch_forward_avatars(nodes, ctx)
-            blob_by_url, node_imgs, url_count, failed_urls = (
-                await self._download_forward_images(nodes)
-            )
+        # v1.20.1: 节点图**总是**预下载 —— 存档要把字节写进 assets/，跟画不画渲染图无关。
+        # 以前只在渲染时才下，于是关掉「生成渲染图」的用户，所有转发内嵌图都记成
+        # download_failed（点「补齐缺失媒体」又能补，等于存档时根本没试过）。
+        blob_by_url, node_imgs, url_count, failed_urls = (
+            await self._download_forward_images(nodes)
+        )
         rid, archived = await self._archive_forward(raw_nodes, ctx, blob_by_url)
         if want_image:
             result = await self._save_forward_render(
@@ -1816,9 +1819,17 @@ class MediaWardenStar(Star):
         if not raw_nodes:
             return rid, None
 
+        fallbacks = {"n": 0}
+
         async def _archive_image(data, _blobs=blob_by_url):
             ref = record_store.image_ref(data)
-            return _blobs.get(ref) if ref else None
+            if ref and ref in _blobs:
+                return _blobs[ref]
+            # 预下载是按「组件侧的 url」做键的，节点原始 data 里的 url 可能只差一个
+            # 参数（appid/rkey/协议头），命中不了就现下 —— 否则这张图会被错记成
+            # download_failed，看上去像 QQ 抽风，其实是这里没去下。
+            fallbacks["n"] += 1
+            return await self._record_fetch_image(data)
 
         try:
             archived: Optional[dict] = await record_store.capture(
@@ -1833,6 +1844,8 @@ class MediaWardenStar(Star):
         except Exception as e:
             self._log(f"forward archive failed: {type(e).__name__}: {e!r}")
             return rid, None
+        if fallbacks["n"]:
+            self._log(f"archive: {fallbacks['n']} 张节点图没命中预下载结果，存档时直连补取")
         if archived is not None:
             if archived.get("reused"):
                 # 同群同内容已经存过:不建新目录,后面直接写进原条目

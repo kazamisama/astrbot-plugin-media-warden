@@ -4600,6 +4600,51 @@ def test_plugin_record_backfill_wiring():
     print("  OK -> 插件入口补媒体成功")
 
 
+def test_forward_archive_images_fetched_without_render():
+    import asyncio
+    banner("forward: 关掉渲染图时节点图也要存档(以前全记成 download_failed)")
+    ctx0 = plugin_main.MediaWardenStar.__init__.__globals__["Context"]()
+    with tempfile.TemporaryDirectory() as td:
+        pl = plugin_main.MediaWardenStar(ctx0, config={
+            "storage_root": td, "enable_index_db": True,
+            "log_to_stdout": False, "forward_render_image": False,
+        })
+        asyncio.run(pl.initialize())
+        calls = {"dl": 0, "img": 0}
+
+        async def fake_download_images(nodes):
+            calls["dl"] += 1
+            return {}, {}, 0, 0  # 模拟预下载没命中（键不一致/渲染关闭）
+
+        async def fake_image(data):
+            calls["img"] += 1
+            return b"\x89PNG\r\n\x1a\n" + b"q" * 4
+
+        pl._download_forward_images = fake_download_images
+        pl._record_fetch_image = fake_image
+
+        nodes = [{"type": "node", "data": {
+            "user_id": "u1", "nickname": "alice", "time": 1718600000,
+            "content": [{"type": "image",
+                         "data": {"file": "x.jpg",
+                                  "url": "https://mm/x.jpg?rkey=1"}}]}}]
+        comp = Component(kind="forward", meta={"nodes": nodes})
+        ctx = SaveContext(platform="aiocqhttp", group_id="g1",
+                          sender_id="sender", sender_name="sender",
+                          msg_id="m-img", idx=0, ts=1718600000)
+        asyncio.run(pl._save_forward(comp, ctx, None))
+        # 关掉渲染图时也必须预下载节点图（存档要落字节）
+        assert calls["dl"] == 1, calls
+        assert calls["img"] == 1, calls
+        rows = record_store.list_records(pl._records_root(), 5)
+        assert rows, rows
+        rec = record_store.load_record(pl._records_root(), rows[0]["record_id"])
+        assert len(rec.get("assets") or []) == 1, rec.get("assets")
+        assert rec.get("missing") == [], rec.get("missing")
+        _close_index_safely(pl)
+    print("  OK -> 渲染关闭也预下载 + 没命中就直连补取")
+
+
 def test_record_list_records_order_and_bad_dirs():
     import asyncio
     banner("record: list_records 按时间倒序, load_record 对坏目录返回 None")
@@ -5151,6 +5196,7 @@ PHASE7 = [
     test_record_fingerprint_ignores_volatile_url,
     test_record_backfill_record_refetches_missing,
     test_plugin_record_backfill_wiring,
+    test_forward_archive_images_fetched_without_render,
     test_record_list_records_order_and_bad_dirs,
     test_record_image_ref_rules,
     test_plugin_record_from_quoted_forward,
