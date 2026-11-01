@@ -173,6 +173,75 @@ def dry_nodes(nodes: list) -> list:
     return out
 
 
+_TRANSIENT_RECORD_KEYS = ("reused", "duplicate_of", "duplicate_of_requested")
+
+
+def _write_record_json(root: str, record: dict) -> None:
+    """把 record 写回条目目录（去掉只在内存里用的复用标记）。"""
+    clean = {k: v for k, v in record.items() if k not in _TRANSIENT_RECORD_KEYS}
+    with open(os.path.join(root, RECORD_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump(clean, fh, ensure_ascii=False, indent=2)
+
+
+async def _backfill_media(record: dict, nodes: list, storage_root: str,
+                          record_id: str, fetchers: dict) -> int:
+    """给**已存在**的条目补齐缺失的媒体字节，返回补了几份（0 = 没动）。
+
+    v1.19.0: 复用一个旧条目时调用。老存档（视频能力之前建的）里视频只有原始
+    JSON；只要 url 还没过期，重新存档一次就能把字节补进去（节点结构没变，
+    资产不在内容指纹里，所以补资产不会让旧条目变成「另一条」）。
+    """
+    root = record_dir(storage_root, record_id)
+    if not os.path.isdir(root):
+        return 0
+    have = {(a.get("node"), a.get("seg")) for a in record.get("assets") or []
+            if isinstance(a, dict)}
+    missing = [m for m in record.get("missing") or [] if isinstance(m, dict)]
+    added = 0
+    for ni, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            continue
+        for si, seg in enumerate(_segments(node)):
+            kind = str(seg.get("type") or "").lower()
+            fetch = fetchers.get(kind)
+            if fetch is None or (ni, si) in have:
+                continue
+            data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+            url = image_ref(data)
+            if url is None:
+                continue
+            try:
+                blob = await fetch(data)
+            except Exception:
+                blob = None
+            if not blob:
+                continue
+            sha16 = hashlib.blake2b(blob, digest_size=8).hexdigest()
+            rel = f"assets/{sha16}{_guess_ext(blob, data)}"
+            full = os.path.join(root, rel.replace("/", os.sep))
+            try:
+                if not os.path.exists(full):
+                    os.makedirs(os.path.dirname(full), exist_ok=True)
+                    with open(full, "wb") as fh:
+                        fh.write(blob)
+            except OSError:
+                continue
+            record.setdefault("assets", []).append({
+                "node": ni, "seg": si, "kind": kind, "path": rel,
+                "sha16": sha16, "bytes": len(blob)})
+            have.add((ni, si))
+            missing = [m for m in missing
+                       if not (m.get("node") == ni and m.get("seg") == si)]
+            added += 1
+    if added:
+        record["missing"] = missing
+        try:
+            _write_record_json(root, record)
+        except OSError:
+            return 0
+    return added
+
+
 async def capture(
     nodes: list,
     *,
@@ -199,11 +268,20 @@ async def capture(
     # 指纹只归一化结构（段 data 原样），与后面写进 record.json 的节点同形。
     dry = dry_nodes(nodes)
     origin = _canonical_sha256(dry)
+    fetchers: dict = {"image": fetch_image}
+    if fetch_video is not None:
+        fetchers["video"] = fetch_video
     dup = find_duplicate(storage_root, origin, exclude=rid, group_id=group_id)
     if dup:
         existing = load_record(storage_root, dup)
         if existing:
             existing = dict(existing)
+            # v1.19.0: 复用一个**旧条目**时顺手补齐它缺的媒体字节 —— 老存档（视频
+            # 能力之前建的）只要 url 还有效，重新存档一次就能把视频补进去。
+            try:
+                await _backfill_media(existing, nodes, storage_root, dup, fetchers)
+            except Exception:  # 补齐失败不影响「同内容复用」这个结论
+                pass
             existing["reused"] = True
             existing["duplicate_of"] = dup
             existing["duplicate_of_requested"] = rid
@@ -215,9 +293,6 @@ async def capture(
     out_nodes: list = []
     assets: list = []
     missing: list = []
-    fetchers: dict = {"image": fetch_image}
-    if fetch_video is not None:
-        fetchers["video"] = fetch_video
 
     for ni, node in enumerate(nodes):
         if not isinstance(node, dict):

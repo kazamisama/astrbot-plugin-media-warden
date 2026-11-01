@@ -8,6 +8,7 @@
 
 - `record.capture` 新增可选的 `fetch_video` 回调（同一条「url → 下载 → assets/<sha16>.<ext>」链路）；落盘后资产带 `kind: "image" | "video"`，`missing` 条目也带 `kind`，页面能区分「图缺失 / 视频缺失」。
 - 魔数识别视频扩展名（ISO BMFF `ftyp` → `.mp4`/`.mov`、`RIFF…AVI `、EBML → `.webm`），下不到时仍退段里的文件名。
+- 复用同内容旧条目时顺手**补齐**它缺的媒体字节（`record._backfill_media`），老条目重新存档一次即可补上视频（url 仍有效时）。
 - 存档详情里视频段映射到资产（`asset`/`bytes`/`sha16`），页面显示「▶ 加载视频（10.0 MB）」，点一下内联播放（base64 走同一个鉴权 `thumb` 接口，单条上限 64 MB）；`thumb` 的 MIME 表补了 mp4/mov/webm/mkv/avi。
 - `/warden 存档` 回执与 `重发 list` 改称「媒体」（视频单列）；列表缺失徽标改成「缺 N 项媒体」。
 - 重建转发（页面「重建转发」/ `/warden 重发`）带视频：`record_admin.node_payloads` 用 `base64://` 发 video 段，没有字节时留 `[视频]` 占位；AstrBot 组件路径 `record.build_nodes` 用 `Video.fromFileSystem`。
@@ -15,13 +16,13 @@
 
 ### 说明
 
-- **老存档里的视频补不回来**：当时根本没下字节，record.json 里的 url 早过期。详情页对这类会显示「视频：这条存档建立时还没存视频字节」，重建时用 `[视频]` 占位 —— 新的存档才有字节。
+- **老存档里的视频可以「重新存档一次」补回来**：以前没下字节，只有原始 JSON；把同一条合并转发再存档一次（内容指纹命中 → 复用原条目）时，`_backfill_media` 会按记录里的 url 把缺的图片/视频补进 `assets/` 并写回 `record.json` —— 前提是 url 还没过期。补不上（rkey 已失效）时详情页显示「视频：这条存档建立时还没存视频字节」，重建时用 `[视频]` 占位。
 - 视频下载仍受 `max_file_size_mb` 限制（默认 100 MB），失败进 `missing`（`download_failed`），不影响整条存档。
 - 关掉「保存视频」开关时不传 `fetch_video`，行为与旧版一致（视频段保留原始 JSON、不记缺失）。
 
 ### Verified
 
-- 冒烟 `ALL OK (… total=165)`：新增 2 条用例（视频落盘 + 详情/重建映射；没给 `fetch_video` 时静默跳过）。
+- 冒烟 `ALL OK (… total=166)`：新增 3 条用例（视频落盘 + 详情/重建映射；没给 `fetch_video` 时静默跳过；复用旧条目时补齐视频并写回 record.json）。
 
 ## v1.18.2
 

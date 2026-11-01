@@ -4417,6 +4417,54 @@ def test_record_capture_without_video_fetcher_skips():
     print("  OK -> 视频段保留原始 JSON,不记缺失")
 
 
+def test_record_capture_backfills_video_on_reuse():
+    import asyncio
+    banner("record: 复用旧条目时补齐视频字节(老存档补一次就能看)")
+    tmp = tempfile.mkdtemp(prefix="wd_record_backfill_")
+    mp4 = b"\x00\x00\x00\x18ftypmp42" + b"b" * 16
+    nodes = [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+              "message": [{"type": "video",
+                           "data": {"file": "x.mp4",
+                                    "url": "https://mm/x.mp4?rkey=1"}}]}]
+
+    async def no_video(data):
+        raise RuntimeError("rkey expired")
+
+    async def fetch_image(data):
+        raise AssertionError("不该走图片下载器")
+
+    async def good_video(data):
+        return mp4
+
+    rec = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id=1, msg_id="bf",
+        storage_root=tmp, fetch_image=fetch_image, fetch_video=no_video,
+        ts=1720000700,
+    ))
+    assert rec["assets"] == [] and rec["missing"], rec
+    rid = rec["record_id"]
+
+    # 同一段内容再来一次：命中复用，但这次把视频补上了
+    rec2 = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id=1, msg_id="bf2",
+        storage_root=tmp, fetch_image=fetch_image, fetch_video=good_video,
+        ts=1720000800,
+    ))
+    assert rec2["reused"] is True and rec2["record_id"] == rid, rec2
+    assert len(rec2["assets"]) == 1, rec2["assets"]
+    assert rec2["assets"][0]["kind"] == "video", rec2["assets"]
+    assert rec2["missing"] == [], rec2["missing"]
+    # 补的东西要落到盘上(重开页面还能看到)
+    reloaded = record_store.load_record(tmp, rid)
+    assert len(reloaded["assets"]) == 1, reloaded["assets"]
+    assert reloaded["missing"] == [], reloaded["missing"]
+    assert "reused" not in reloaded
+    base = record_store.record_dir(tmp, rid)
+    assert os.path.isfile(os.path.join(
+        base, reloaded["assets"][0]["path"].replace("/", os.sep)))
+    print("  OK -> 复用 + 补齐 + 写回 record.json")
+
+
 def test_record_list_records_order_and_bad_dirs():
     import asyncio
     banner("record: list_records 按时间倒序, load_record 对坏目录返回 None")
@@ -4963,6 +5011,7 @@ PHASE7 = [
     test_record_capture_logs_download_failure,
     test_record_capture_video_asset,
     test_record_capture_without_video_fetcher_skips,
+    test_record_capture_backfills_video_on_reuse,
     test_record_list_records_order_and_bad_dirs,
     test_record_image_ref_rules,
     test_plugin_record_from_quoted_forward,
