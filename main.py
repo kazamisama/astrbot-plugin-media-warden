@@ -301,7 +301,7 @@ def _comp_keys(comp: Component) -> set:
 @register(
     "media-warden",
     "shirley",
-    "群聊素材守门人 v1.18.2: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, 命令仅管理员可用",
+    "群聊素材守门人 v1.19.0: 按群/按人 + 按类型(图片/动图/视频/语音/纯文本/聊天记录/文档, 含扩展名白名单)归档, 模板命名落盘 + blake2b 去重, 转发链 PIL 渲染(条目 record.json 恒存, 渲染图可选)/结构化存档, 并发下载 + 指数退避重试 + 源链接失效补救(QQ 本地缓存按 MD5 / OneBot get_image 多形态重取 + get_msg 重解析 / 组件本地副本 / 迟到缓存重查), 失败分类入库可查(含反复失败 top), /warden list/stats/export/lookup(含 sha16)/prune/fail/存档/重发, 预览回传 + 可选引用原消息, dashboard 分类管理页面(浏览/搜索/取图/发回/跨群转发/删除) + 渲染样式页(实时预览) + 九组配置(监听/类型/存储/下载/渲染/样式/转发/回执/日志 顺序排列) + v1.18.0 一次性归一化(旧数据不再打补丁), v1.18.1 长函数拆分(转发/消息分发/链接恢复), v1.18.2 索引路径归一与共用文件标记, v1.19.0 存档内视频落字节 + 页面内联播放 + 重建带视频, 命令仅管理员可用",
     VERSION,
 )
 
@@ -1825,7 +1825,10 @@ class MediaWardenStar(Star):
                 raw_nodes,
                 platform=ctx.platform, group_id=ctx.group_id,
                 msg_id=ctx.msg_id, storage_root=self.cfg.storage_root,
-                fetch_image=_archive_image, ts=ctx.ts, record_id=rid,
+                fetch_image=_archive_image,
+                fetch_video=(self._record_fetch_video
+                             if self.cfg.save_videos else None),
+                ts=ctx.ts, record_id=rid,
             )
         except Exception as e:
             self._log(f"forward archive failed: {type(e).__name__}: {e!r}")
@@ -2246,6 +2249,32 @@ class MediaWardenStar(Star):
                 continue
         return None
 
+    async def _record_fetch_video(self, data: dict) -> Optional[bytes]:
+        """节点内视频字节的获取链（v1.19.0）：直连下载（带一次 url 升级重试）。
+
+        视频不进 QQ 图片缓存目录，所以不走 _forward_local_cached；失败只返回
+        None（与图片一致，record 会记进 missing 的 download_failed）。
+        """
+        ref = data if isinstance(data, dict) else {}
+        url = record_store.image_ref(ref)
+        if not url:
+            return None
+        hi = _upgrade_qq_image_url(url)
+        candidates = [hi, url] if hi != url else [url]
+        for cand in candidates:
+            try:
+                dl = await download(
+                    Component(kind="video", url=cand),
+                    fetcher=aiohttp_fetcher,
+                    retries=self.cfg.download_retries,
+                    timeout_s=self.cfg.download_timeout_s,
+                    max_bytes=self.cfg.max_file_size_bytes,
+                )
+                return dl.data
+            except Exception:
+                continue
+        return None
+
     async def _resolve_forward_nodes(self, comp: Component,
                                     event: AstrMessageEvent) -> Optional[list]:
         """拿节点内容：优先 get_forward_msg（最新最全），失败退回组件里的快照。"""
@@ -2379,10 +2408,10 @@ class MediaWardenStar(Star):
     @filter.command("warden 存档")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_warden_record(self, event: AstrMessageEvent, arg: str = ""):
-        """用法: 回复一条合并转发 + /warden 存档 —— 把节点和节点内图片落成自包含目录。
+        """用法: 回复一条合并转发 + /warden 存档 —— 把节点和内嵌媒体落成自包含目录。
 
-        与转发落盘（sidecar JSON）的区别：那个 JSON 里的图还是死的 url，这个把图片
-        字节一起存进 assets/，重发时不再依赖 rkey。
+        与转发落盘（sidecar JSON）的区别：那个 JSON 里的图还是死的 url，这个把
+        图片/视频字节一起存进 assets/（v1.19.0 起视频也下），重发时不再依赖 rkey。
         """
         nodes, hint, forward_id = await self._record_target_nodes(event, arg)
         if not nodes:
@@ -2402,14 +2431,20 @@ class MediaWardenStar(Star):
                 msg_id=msg_id,
                 storage_root=root,
                 fetch_image=self._record_fetch_image,
+                fetch_video=(self._record_fetch_video
+                             if self.cfg.save_videos else None),
             )
         except Exception as e:
             self._log(f"record capture failed: {e!r}")
             yield event.plain_result(f"[Warden] 存档失败: {type(e).__name__}: {e}")
             return
         miss = len(rec.get("missing") or [])
+        n_assets = len(rec.get("assets") or [])
+        n_videos = sum(1 for a in rec.get("assets") or []
+                       if isinstance(a, dict) and a.get("kind") == "video")
         text = (f"[Warden] 已存档 {rec['record_id']}\n"
-                f"  节点 {rec['node_count']} / 图片 {len(rec.get('assets') or [])}")
+                f"  节点 {rec['node_count']} / 媒体 {n_assets}"
+                + (f"（视频 {n_videos}）" if n_videos else ""))
         if miss:
             text += f" / 缺失 {miss}"
         text += f"\n  目录: {record_store.record_dir(root, rec['record_id'])}"
@@ -2444,7 +2479,7 @@ class MediaWardenStar(Star):
                 stamp = time.strftime("%m-%d %H:%M",
                                       time.localtime(r["captured_ts"]))
                 lines.append(f"{r['record_id']}  {stamp}  "
-                             f"节点{r['node_count']}  图{r['asset_count']}")
+                             f"节点{r['node_count']}  媒体{r['asset_count']}")
             yield event.plain_result("\n".join(lines))
             return
         if not arg:

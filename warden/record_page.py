@@ -21,9 +21,19 @@ from .record import load_entry, load_record, record_dir, set_meta
 _MIME_BY_EXT = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    # v1.19.0: 存档里的视频也要能内联播放
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+    ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
 }
 # 单张图回 base64 的上限：超过就让页面走下载，别把宿主请求体撑爆
 _THUMB_MAX_BYTES = 8 * 1024 * 1024
+# 视频走同一个内联接口，但上限大得多（10 MB 的 mp4 换成 base64 约 14 MB）
+_MEDIA_MAX_BYTES = 64 * 1024 * 1024
+_VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi")
+
+
+def _is_video_path(path: str) -> bool:
+    return os.path.splitext(str(path or ""))[1].lower() in _VIDEO_EXTS
 
 
 def _mime_for(path: str) -> str:
@@ -262,9 +272,10 @@ class RecordPageApi:
             return {"status": "error", "message": "资产不存在", "data": {}}
         try:
             size = os.path.getsize(full)
-            if size > _THUMB_MAX_BYTES:
+            cap = _MEDIA_MAX_BYTES if _is_video_path(full) else _THUMB_MAX_BYTES
+            if size > cap:
                 return {"status": "error",
-                        "message": f"图片太大（{size} 字节），请用下载", "data": {}}
+                        "message": f"媒体太大（{size} 字节），请用下载", "data": {}}
             with open(full, "rb") as fh:
                 blob = fh.read()
         except OSError as e:

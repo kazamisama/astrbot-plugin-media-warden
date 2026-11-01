@@ -8,7 +8,7 @@
 
     <storage_root>/_records/<record_id>/
         record.json          # 节点结构 + 资产索引
-        assets/<sha16>.<ext> # 节点内的图片字节
+        assets/<sha16>.<ext> # 节点内的图片/视频字节
 
 record.json 结构见 README「聊天记录存档」或本模块下方 capture() 的返回值。
 
@@ -105,7 +105,10 @@ def uin_reliable(nodes: list) -> bool:
 
 
 def image_ref(data: dict) -> Optional[str]:
-    """段里能拿去下载的图片地址：优先 url，其次 file（偶尔只给 http）。"""
+    """段里能拿去下载的媒体地址：优先 url，其次 file（偶尔只给 http）。
+
+    v1.19.0 起 image 与 video 段共用这一条判断（video 段同样是 url/file）。
+    """
     url = data.get("url")
     if isinstance(url, str) and url.startswith(("http://", "https://")):
         return url
@@ -117,6 +120,13 @@ def image_ref(data: dict) -> Optional[str]:
 
 def _guess_ext(data: bytes, ref: dict) -> str:
     """先用魔数，猜不出再看段里的文件名。"""
+    # 视频魔数：ISO BMFF(ftyp) / RIFF-AVI / EBML(webm,mkv)
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return ".mov" if data[8:12] == b"qt  " else ".mp4"
+    if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
+        return ".avi"
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return ".webm"
     if data.startswith(b"\x89PNG"):
         return ".png"
     if data.startswith(b"\xff\xd8"):
@@ -171,6 +181,7 @@ async def capture(
     msg_id: Any,
     storage_root: str,
     fetch_image: Callable[[dict], Awaitable[Optional[bytes]]],
+    fetch_video: Optional[Callable[[dict], Awaitable[Optional[bytes]]]] = None,
     ts: Optional[int] = None,
     record_id: Optional[str] = None,
 ) -> dict:
@@ -178,6 +189,9 @@ async def capture(
 
     fetch_image 收一个 image 段的 data，返回字节；失败返回 None ——
     单张图失败不影响整条存档（会在 record 的 missing 里留痕）。
+
+    v1.19.0: fetch_video 给了才会把 video 段也落字节（不给则跳过视频段，
+    与旧行为一致）。视频以前只留一段原始 JSON，url 一过期就彻底没了。
     """
     captured = int(ts if ts is not None else time.time())
     rid = record_id or make_record_id(group_id, msg_id, captured)
@@ -201,6 +215,9 @@ async def capture(
     out_nodes: list = []
     assets: list = []
     missing: list = []
+    fetchers: dict = {"image": fetch_image}
+    if fetch_video is not None:
+        fetchers["video"] = fetch_video
 
     for ni, node in enumerate(nodes):
         if not isinstance(node, dict):
@@ -211,19 +228,21 @@ async def capture(
             kind = str(seg.get("type") or "").lower()
             data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
             segments.append({"type": kind, "data": dict(data)})
-            if kind != "image":
+            fetcher = fetchers.get(kind)
+            if fetcher is None:
                 continue
             url = image_ref(data)
             if url is None:
                 # 段里没有可下载地址（比如只有 file=md5.jpg）—— 记下来，不猜
-                missing.append({"node": ni, "seg": si, "reason": "no_url"})
+                missing.append({"node": ni, "seg": si, "kind": kind,
+                                "reason": "no_url"})
                 continue
             try:
-                blob = await fetch_image(data)
-            except Exception:  # 存档不能因为单张图炸掉整条记录
+                blob = await fetcher(data)
+            except Exception:  # 存档不能因为单个媒体炸掉整条记录
                 blob = None
             if not blob:
-                missing.append({"node": ni, "seg": si,
+                missing.append({"node": ni, "seg": si, "kind": kind,
                                 "reason": "download_failed", "url": url})
                 continue
             sha16 = hashlib.blake2b(blob, digest_size=8).hexdigest()
@@ -232,7 +251,7 @@ async def capture(
             if not os.path.exists(full):
                 with open(full, "wb") as fh:
                     fh.write(blob)
-            assets.append({"node": ni, "seg": si, "path": rel,
+            assets.append({"node": ni, "seg": si, "kind": kind, "path": rel,
                            "sha16": sha16, "bytes": len(blob)})
         out_nodes.append({"index": ni, "uin": uin, "name": name,
                           "time": int(_payload(node).get("time") or 0),
@@ -525,6 +544,10 @@ def build_nodes(record: dict, base_dir: str):
     """把 record 还原成 AstrBot 的 Node 列表（仅在真的要发消息时调用）。"""
     from astrbot.api.message_components import At, Face, Image, Node, Plain
 
+    try:  # v1.19.0: 老版本 AstrBot 没有 Video 组件
+        from astrbot.api.message_components import Video
+    except ImportError:  # pragma: no cover - 取决于宿主版本
+        Video = None
     assets = _asset_index(record)
     out = []
     for node in record.get("nodes") or []:
@@ -550,8 +573,19 @@ def build_nodes(record: dict, base_dir: str):
                         comps.append(Image.fromBytes(fh.read()))
                 except OSError:
                     continue
+            elif kind == "video":
+                asset = assets.get((ni, si))
+                path = None
+                if asset:
+                    path = os.path.join(
+                        base_dir, str(asset.get("path")).replace("/", os.sep))
+                if Video is not None and path and os.path.isfile(path):
+                    comps.append(Video.fromFileSystem(path))
+                else:
+                    # 没下到字节(老存档/当时失败):留占位,别把整个节点丢掉
+                    comps.append(Plain(text="[视频]"))
             else:
-                # 语音/视频/未知段：合并转发里本来就常放不出来，先留个占位
+                # 语音/未知段：合并转发里本来就常放不出来，先留个占位
                 comps.append(Plain(text=f"[{kind}]"))
         out.append(Node(content=comps, name=str(node.get("name") or ""),
                         uin=str(node.get("uin") or "0")))

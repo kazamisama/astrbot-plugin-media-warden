@@ -458,6 +458,10 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
         return _entry_detail(root, record_id, entry)
     assets = {(a.get("node"), a.get("seg")): a
               for a in rec.get("assets") or [] if isinstance(a, dict)}
+    miss_reason = {}
+    for miss in rec.get("missing") or []:
+        if isinstance(miss, dict):
+            miss_reason[(miss.get("node"), miss.get("seg"))] =                 str(miss.get("reason") or "")
     nodes_out = []
     for node in rec.get("nodes") or []:
         if not isinstance(node, dict):
@@ -479,6 +483,22 @@ def record_detail(root: str, record_id: str) -> Optional[dict]:
                     item["sha16"] = asset.get("sha16")
                 else:
                     item["missing"] = True
+                    reason = miss_reason.get((node.get("index"), len(segs_out)))
+                    if reason:
+                        item["reason"] = reason
+            elif kind == "video":
+                # v1.19.0: 视频也走资产映射（以前视频段只剩 raw 文本，页面没法播）
+                item["name"] = str(data.get("file") or "")
+                if asset:
+                    item["asset"] = asset.get("path")
+                    item["sha16"] = asset.get("sha16")
+                    item["bytes"] = int(asset.get("bytes") or 0)
+                elif (node.get("index"), len(segs_out)) in miss_reason:
+                    item["missing"] = True
+                    item["reason"] = miss_reason[(node.get("index"), len(segs_out))]
+                else:
+                    # 老存档（视频能力之前建的）：字节压根没存，别冒充「下载失败」
+                    item["nostore"] = True
             elif kind == "at":
                 item["qq"] = str(data.get("qq") or "")
             elif kind == "face":
@@ -642,6 +662,24 @@ def node_payloads(rec: dict, base_dir: str) -> list:
                     continue
                 content.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(blob).decode()}})
+            elif kind == "video":
+                # v1.19.0: 存档里的视频字节也一起重发；没下到字节时留占位
+                asset = assets.get((node.get("index"), si))
+                blob = None
+                if asset:
+                    full = os.path.join(
+                        base_dir, str(asset.get("path")).replace("/", os.sep))
+                    try:
+                        with open(full, "rb") as fh:
+                            blob = fh.read()
+                    except OSError:
+                        blob = None
+                if blob:
+                    content.append({"type": "video", "data": {
+                        "file": "base64://" + base64.b64encode(blob).decode()}})
+                else:
+                    content.append({"type": "text",
+                                    "data": {"text": "[视频]"}})
             else:
                 content.append({"type": "text",
                                 "data": {"text": f"[{kind}]"}})

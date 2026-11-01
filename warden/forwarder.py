@@ -334,6 +334,11 @@ def _coerce_nodes(raw_nodes) -> List[ForwardNode]:
                         image_refs.append(dict(d) if isinstance(d, dict) else {})
                 elif t == "json":
                     text_parts.append("[json]")
+                elif t == "video":
+                    # v1.19.0: 渲染图里至少留个占位（以前视频段直接从图上消失）
+                    text_parts.append("[视频]")
+                elif t == "voice":
+                    text_parts.append("[语音]")
         elif isinstance(content, str):
             text_parts.append(content)
         out.append(ForwardNode(

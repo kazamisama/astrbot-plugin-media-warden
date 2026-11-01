@@ -119,7 +119,7 @@
     var parts = [];
     if (s.records) parts.push(["聊天记录", s.records]);
     if (s.texts) parts.push(["纯文本", s.texts]);
-    parts.push(["存档图片", s.assets]);
+    parts.push(["存档媒体", s.assets]);
     parts.push(["存档占用", fmtBytes(s.bytes)]);
     // 扁平文件的行数与体积来自索引库的 COUNT/SUM（以前数的是「取了一页」的行，
     // 于是永远显示 2000；占用也只算存档内的图片字节，和磁盘实际差一个量级）。
@@ -258,7 +258,7 @@
             ? '<span class="pill warn" title="QQ 那边已经取不到这条原消息，只能用重建转发">原消息已失效</span>'
             : '<span class="pill warn" title="没有可用的短原消息 id（嵌套转发只拿得到长 id）">无原消息 id</span>');
         }
-        if (it.missing_count) badges.push('<span class="pill warn">缺 ' + esc(it.missing_count) + " 图</span>");
+        if (it.missing_count) badges.push('<span class="pill warn">缺 ' + esc(it.missing_count) + " 项媒体</span>");
       }
       return '<div class="item' + (itemKey(it) === state.selected ? " active" : "") +
         '" data-key="' + esc(itemKey(it)) + '">' +
@@ -304,6 +304,23 @@
     }
     if (seg.type === "text") {
       return seg.text ? '<p class="seg-text">' + esc(seg.text) + "</p>" : "";
+    }
+    if (seg.type === "video") {
+      // v1.19.0: 存档里已落盘的视频按需加载(base64 内联,<video> 才能播)
+      if (seg.missing) {
+        return '<p class="seg-dim">[视频缺失' +
+          (seg.reason ? ": " + esc(seg.reason) : "") + "]</p>";
+      }
+      if (seg.asset) {
+        var size = seg.bytes ? " (" + fmtBytes(seg.bytes) + ")" : "";
+        return '<div class="video-wrap"><button class="btn video-load" ' +
+          'data-asset-video="' + esc(seg.asset) + '" title="视频字节存在存档里，点一下内联播放">' +
+          "▶ 加载视频" + esc(size) + "</button></div>";
+      }
+      if (seg.nostore) {
+        return '<p class="seg-dim">[视频：这条存档建立时还没存视频字节]</p>';
+      }
+      return '<p class="seg-dim">[视频]</p>';
     }
     var label = seg.type;
     if (seg.raw && typeof seg.raw === "object") {
@@ -401,7 +418,7 @@
           "</div>" + (segs || '<p class="seg-dim">（空节点）</p>') + "</div>";
       }).join("");
       if (isForward && !segsHasImages(d)) {
-        body += '<p class="hint">这条聊天记录没有内嵌图片（或图片当时没取到）。</p>';
+        body += '<p class="hint">这条聊天记录没有内嵌图片/视频（或当时没取到）。</p>';
       }
     }
     $("detail").innerHTML = head + detailTabs(d) +
@@ -412,6 +429,7 @@
         state.mode = b.getAttribute("data-mode");
         renderDetail(d);
         hydrateThumbs({ source: "entry", record_id: rid }, $("detail"));
+        hydrateVideos({ source: "entry", record_id: rid }, $("detail"));
       });
     });
     var bn = $("btn-native"), br = $("btn-rebuild");
@@ -444,11 +462,40 @@
       doDelete({ id: rid }, "删除这个条目？（结构化数据 + 渲染图 + 图片资产一起删，不可恢复）");
     });
     hydrateThumbs({ source: "entry", record_id: rid }, $("detail"));
+    hydrateVideos({ source: "entry", record_id: rid }, $("detail"));
   }
 
   function segsHasImages(d) {
     return ((d && d.nodes) || []).some(function (n) {
-      return ((n.segments) || []).some(function (s) { return s.type === "image"; });
+      return ((n.segments) || []).some(function (s) {
+        return s.type === "image" || s.type === "video";
+      });
+    });
+  }
+
+  function hydrateVideos(item, root) {
+    // 视频不预加载：点一下才向 thumb 接口要 base64，避免一打开详情就拉几十 MB
+    var scope = root || document;
+    var btns = scope.querySelectorAll("button[data-asset-video]");
+    Array.prototype.forEach.call(btns, function (b) {
+      b.addEventListener("click", function () {
+        var rel = b.getAttribute("data-asset-video");
+        b.disabled = true;
+        b.textContent = "加载中…";
+        api("thumb", thumbParams(item, rel)).then(function (payload) {
+          var d = unwrap(payload);
+          if (!d || !d.data_url) throw new Error("没有返回数据");
+          var v = document.createElement("video");
+          v.className = "video";
+          v.controls = true;
+          v.preload = "metadata";
+          v.src = d.data_url;
+          b.parentNode.replaceChild(v, b);
+        }).catch(function (e) {
+          b.disabled = false;
+          b.textContent = "视频加载失败: " + (e && e.message ? e.message : e);
+        });
+      });
     });
   }
 

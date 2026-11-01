@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import types
+from pathlib import Path
 
 PERMISSION_CALLS: list = []
 
@@ -105,6 +106,18 @@ def _install_stub():
         def fromBytes(cls, data):
             return cls(file=data)
 
+    class Video:
+        def __init__(self, file="", **kw):
+            self.file = file
+            self.url = kw.get("url", "")
+            self.path = kw.get("path", "")
+
+        @classmethod
+        def fromFileSystem(cls, path, **kw):
+            from pathlib import Path as _P
+            return cls(file=_P(path).resolve(strict=False).as_uri(),
+                       path=str(path), **kw)
+
     class Node:
         def __init__(self, content=None, **kw):
             self.content = list(content or [])
@@ -120,6 +133,7 @@ def _install_stub():
     mc.Reply = Reply
     mc.Face = Face
     mc.Image = Image
+    mc.Video = Video
     mc.Node = Node
     mc.Nodes = Nodes
     sys.modules["astrbot"] = a
@@ -4246,7 +4260,9 @@ def test_record_capture_roundtrip():
     # 只有一张图带可用 url;另一张只有 file=md5 -> missing(no_url)
     assert calls == ["http://example/a.jpg?term=1"], calls
     assert len(rec["assets"]) == 1, rec["assets"]
-    assert rec["missing"] == [{"node": 0, "seg": 4, "reason": "no_url"}], rec["missing"]
+    assert rec["missing"] == [
+        {"node": 0, "seg": 4, "kind": "image", "reason": "no_url"}
+    ], rec["missing"]
     asset = rec["assets"][0]
     assert asset["path"].startswith("assets/") and asset["path"].endswith(".png")
     base = record_store.record_dir(tmp, rec["record_id"])
@@ -4311,9 +4327,94 @@ def test_record_capture_logs_download_failure():
     assert rec["assets"] == []
     assert rec["node_count"] == 1 and rec["nodes"][0]["segments"][0]["data"]["text"] == "在吗"
     assert rec["missing"] == [
-        {"node": 0, "seg": 1, "reason": "download_failed", "url": "http://e/x.jpg"}
+        {"node": 0, "seg": 1, "kind": "image",
+         "reason": "download_failed", "url": "http://e/x.jpg"}
     ], rec["missing"]
     print("  OK")
+
+
+def test_record_capture_video_asset():
+    import asyncio
+    banner("record: 节点内视频落盘(以前只剩一段原始 JSON,url 过期就没)")
+    tmp = tempfile.mkdtemp(prefix="wd_record_video_")
+    mp4 = b"\x00\x00\x00\x18ftypmp42" + b"v" * 24
+
+    async def fetch_image(data):
+        raise AssertionError("视频不该走图片下载器")
+
+    async def fetch_video(data):
+        return mp4
+
+    nodes = [{
+        "sender": {"user_id": 1, "nickname": "白紫"},
+        "time": 1720000500,
+        "message": [
+            {"type": "text", "data": {"text": "看视频"}},
+            {"type": "video", "data": {"file": "5cd3.mp4",
+                                       "url": "https://mm/a.mp4?rkey=x",
+                                       "file_size": "10048828"}},
+            # 只有文件名、没有可下载 url：记 missing(no_url),不猜
+            {"type": "video", "data": {"file": "deadbeef.mp4"}},
+        ],
+    }]
+    rec = asyncio.run(record_store.capture(
+        nodes, platform="aiocqhttp", group_id=961583271, msg_id="v1",
+        storage_root=tmp, fetch_image=fetch_image, fetch_video=fetch_video,
+        ts=1720000500,
+    ))
+    assert len(rec["assets"]) == 1, rec["assets"]
+    asset = rec["assets"][0]
+    assert asset["kind"] == "video", asset
+    assert asset["path"].endswith(".mp4"), asset["path"]
+    assert asset["bytes"] == len(mp4), asset
+    base = record_store.record_dir(tmp, rec["record_id"])
+    blob_path = os.path.join(base, asset["path"].replace("/", os.sep))
+    assert open(blob_path, "rb").read() == mp4
+    assert rec["missing"] == [
+        {"node": 0, "seg": 2, "kind": "video", "reason": "no_url"}
+    ], rec["missing"]
+
+    # 详情页:视频要能拿到资产(页面才有得播),缺的那段带 reason
+    detail = record_admin.record_detail(tmp, rec["record_id"])
+    vseg = detail["nodes"][0]["segments"][1]
+    assert vseg["type"] == "video" and vseg["asset"] == asset["path"], vseg
+    assert vseg["bytes"] == len(mp4), vseg
+    mseg = detail["nodes"][0]["segments"][2]
+    assert mseg["missing"] is True and mseg["reason"] == "no_url", mseg
+
+    # 重建转发:视频用 base64:// 一起发(图片同一条链路)
+    payloads = record_admin.node_payloads(rec, base)
+    content = payloads[0]["data"]["content"]
+    vids = [c for c in content if c["type"] == "video"]
+    assert len(vids) == 1, content
+    assert vids[0]["data"]["file"].startswith("base64://"), vids[0]
+    assert any(c["type"] == "text" and c["data"]["text"] == "[视频]"
+               for c in content), content
+
+    # AstrBot 组件重建:Video 组件指向落盘文件
+    comps = record_store.build_nodes(rec, base)
+    kinds = [type(c).__name__ for c in comps[0].content]
+    assert "Video" in kinds, kinds
+    print("  OK -> 视频落 mp4 / 详情可播 / 重建带 base64 + 占位")
+
+
+def test_record_capture_without_video_fetcher_skips():
+    import asyncio
+    banner("record: 没给 fetch_video 时视频段静默跳过(旧行为,不进 missing)")
+    tmp = tempfile.mkdtemp(prefix="wd_record_novideo_")
+
+    async def fetch_image(data):
+        return b"\x89PNG\r\n\x1a\n"
+
+    rec = asyncio.run(record_store.capture(
+        [{"sender": {"user_id": 1, "nickname": "n"}, "time": 1,
+          "message": [{"type": "video", "data": {"url": "https://mm/a.mp4"}}]}],
+        platform="aiocqhttp", group_id=1, msg_id="nv",
+        storage_root=tmp, fetch_image=fetch_image, ts=1720000600,
+    ))
+    assert rec["assets"] == [] and rec["missing"] == [], rec
+    assert rec["nodes"][0]["segments"][0]["data"]["url"] == "https://mm/a.mp4"
+    print("  OK -> 视频段保留原始 JSON,不记缺失")
 
 
 def test_record_list_records_order_and_bad_dirs():
@@ -4860,6 +4961,8 @@ PHASE7 = [
     test_record_capture_roundtrip,
     test_record_capture_dedupes_identical_bytes,
     test_record_capture_logs_download_failure,
+    test_record_capture_video_asset,
+    test_record_capture_without_video_fetcher_skips,
     test_record_list_records_order_and_bad_dirs,
     test_record_image_ref_rules,
     test_plugin_record_from_quoted_forward,
