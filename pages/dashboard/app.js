@@ -91,13 +91,21 @@
     return { id: it.record_id, path: rel };
   }
 
+  // 取图失败时说清为什么：超限的老图以前只显示「图片加载失败」，没人知道
+  // 是 8 MB 上限；现在服务端把大小和上限写进 message，提示里带 title。
+  function brokenThumb(img, msg) {
+    var tooBig = /太大|上限/.test(msg || "");
+    img.outerHTML = '<div class="thumb broken" title="' + esc(msg || "图片加载失败") + '">' +
+      (tooBig ? "图片太大，用「打开目录」看" : "图片加载失败") + "</div>";
+  }
+
   function fillThumb(img, params) {
     api("thumb", params).then(function (payload) {
       var d = unwrap(payload);
       if (d && d.data_url) { img.src = d.data_url; }
-      else { img.outerHTML = '<div class="thumb broken">图片加载失败</div>'; }
-    }).catch(function () {
-      img.outerHTML = '<div class="thumb broken">图片加载失败</div>';
+      else { brokenThumb(img, "图片加载失败"); }
+    }).catch(function (e) {
+      brokenThumb(img, e && e.message ? e.message : "图片加载失败");
     });
   }
 

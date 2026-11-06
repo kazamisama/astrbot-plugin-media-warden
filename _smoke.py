@@ -5104,6 +5104,25 @@ def test_record_page_routes_and_handlers():
         _install_web_stub(query={"id": "nope", "path": asset})
         assert asyncio.run(api.get_thumb())["status"] == "error"
 
+        # v1.20.3: 9 MB 的动图不再被「图片上限 8 MB」挡掉（腾讯 GIF 常超 8 MB）
+        flat_dir = os.path.join(tmp, "g1", "u1")
+        os.makedirs(flat_dir, exist_ok=True)
+        flat_rel = "g1/u1/20261106_123235_image_e4118b36.gif"
+        with open(os.path.join(flat_dir, os.path.basename(flat_rel)), "wb") as fh:
+            fh.write(b"GIF89a" + b"\0" * (9 * 1024 * 1024))
+        _install_web_stub(query={"source": "flat", "path": flat_rel})
+        big = asyncio.run(api.get_thumb())
+        assert big["status"] == "ok", big
+        assert big["data"]["bytes"] > 9 * 1024 * 1024, big
+        # 超过 64 MB 仍然拒绝，但 message 要说清大小与上限（页面据此换文案）
+        huge_rel = "g1/u1/huge.gif"
+        with open(os.path.join(flat_dir, "huge.gif"), "wb") as fh:
+            fh.seek(65 * 1024 * 1024)
+            fh.write(b"\0")
+        _install_web_stub(query={"source": "flat", "path": huge_rel})
+        huge = asyncio.run(api.get_thumb())
+        assert huge["status"] == "error" and "上限" in huge["message"], huge
+
         calls = []
 
         async def fake_native(bot, group_id, message_id):
